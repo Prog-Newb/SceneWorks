@@ -684,7 +684,15 @@ mod tests {
     /// Drive `generate_stream_using` for one iris text-to-image job; `extra` is merged into the
     /// job payload.
     fn run_iris_arm(behavior: ArmBehavior, cancel_requested: bool, extra: Value) -> ArmRun {
-        let _env = isolate_hf_cache();
+        // The arm admits against the host's unified memory before loading; pin an emulated budget
+        // the iris pipeline fits so the stub engine runs on any host (a 7 GiB hosted runner
+        // otherwise refuses the request before the arm under test is reached).
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+            (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64"),
+        ]);
         let data = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         // A weightless but complete install: the pinned backbone and its text encoder.
