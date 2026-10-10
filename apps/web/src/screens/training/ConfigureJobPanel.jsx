@@ -138,6 +138,15 @@ export function ConfigureJobPanel({
   const updateLtxValidation = (key, value) => {
     updateConfigDraft("ltxValidation", { ...(configDraft.ltxValidation ?? {}), [key]: value });
   };
+  const numericInput = (field, props = {}, validated = false) => (
+    <input
+      onChange={(event) => updateConfigDraft(field, event.target.value)}
+      type="number"
+      value={configDraft[field] ?? ""}
+      {...props}
+      {...(validated ? invalidProps(configValidity, field) : {})}
+    />
+  );
   return (
     <WorkPanel
       className="training-config-panel"
@@ -234,24 +243,12 @@ export function ConfigureJobPanel({
               Trigger phrase
               <input onChange={(event) => updateConfigDraft("triggerWord", event.target.value)} value={configDraft.triggerWord ?? ""} />
             </label>
-            <label>
-              Steps
-              <input
-                onChange={(event) => updateConfigDraft("steps", event.target.value)}
-                type="number"
-                value={configDraft.steps ?? ""}
-                {...invalidProps(configValidity, "steps")}
-              />
-            </label>
-            <label>
-              Checkpoint cadence
-              <input
-                onChange={(event) => updateConfigDraft("saveEvery", event.target.value)}
-                type="number"
-                value={configDraft.saveEvery ?? ""}
-                {...invalidProps(configValidity, "saveEvery")}
-              />
-            </label>
+            {[["steps", "Steps"], ["saveEvery", "Checkpoint cadence"]].map(([field, label]) => (
+              <label key={field}>
+                {label}
+                {numericInput(field, {}, true)}
+              </label>
+            ))}
 
             {/* sc-15036: a full base fine-tune produces a MODEL, and the model catalog has one
                 global user manifest — there is no project-scoped model store to honour a "project"
@@ -278,31 +275,16 @@ export function ConfigureJobPanel({
                 </select>
               </label>
             )}
-            <label>
-              Sample count
-              <input
-                min="0"
-                onChange={(event) => updateConfigDraft("sampleCount", event.target.value)}
-                type="number"
-                value={configDraft.sampleCount ?? ""}
-              />
-            </label>
-            <label>
-              Sample steps
-              <input
-                onChange={(event) => updateConfigDraft("sampleSteps", event.target.value)}
-                type="number"
-                value={configDraft.sampleSteps ?? ""}
-              />
-            </label>
-            <label>
-              Sample cadence
-              <input
-                onChange={(event) => updateConfigDraft("sampleEvery", event.target.value)}
-                type="number"
-                value={configDraft.sampleEvery ?? ""}
-              />
-            </label>
+            {[
+              ["sampleCount", "Sample count", { min: "0" }],
+              ["sampleSteps", "Sample steps"],
+              ["sampleEvery", "Sample cadence"],
+            ].map(([field, label, props]) => (
+              <label key={field}>
+                {label}
+                {numericInput(field, props)}
+              </label>
+            ))}
           </div>
 
           {ltxWorkflows.length ? (
@@ -454,47 +436,23 @@ export function ConfigureJobPanel({
                   ))}
                 </select>
               </label>
-              <label>
-                Rank
-                <input
-                  onChange={(event) => updateConfigDraft("rank", event.target.value)}
-                  type="number"
-                  value={configDraft.rank ?? ""}
-                  {...invalidProps(configValidity, "rank")}
-                />
-              </label>
-              <label>
-                Alpha
-                <input
-                  onChange={(event) => updateConfigDraft("alpha", event.target.value)}
-                  type="number"
-                  value={configDraft.alpha ?? ""}
-                  {...invalidProps(configValidity, "alpha")}
-                />
-              </label>
+              {[["rank", "Rank"], ["alpha", "Alpha"]].map(([field, label]) => (
+                <label key={field}>
+                  {label}
+                  {numericInput(field, {}, true)}
+                </label>
+              ))}
               {/* Real hyperparameters the config validates (sc-10689). They live here
                   beside the other numeric knobs so every `> 0` error the rule set can
                   raise names an input the user can reach. The draft always seeds a
                   working value (configDraftFromTarget), so these are never empty. */}
               <label title="Images per optimizer step. Higher batches smooth gradients but cost more VRAM.">
                 Batch size
-                <input
-                  min="1"
-                  onChange={(event) => updateConfigDraft("batchSize", event.target.value)}
-                  type="number"
-                  value={configDraft.batchSize ?? ""}
-                  {...invalidProps(configValidity, "batchSize")}
-                />
+                {numericInput("batchSize", { min: "1" }, true)}
               </label>
               <label title="Optimizer steps accumulated before an update — multiplies the effective batch size without extra VRAM.">
                 Gradient accumulation
-                <input
-                  min="1"
-                  onChange={(event) => updateConfigDraft("gradientAccumulation", event.target.value)}
-                  type="number"
-                  value={configDraft.gradientAccumulation ?? ""}
-                  {...invalidProps(configValidity, "gradientAccumulation")}
-                />
+                {numericInput("gradientAccumulation", { min: "1" }, true)}
               </label>
               {showNetworkType ? (
                 <label title="What the run trains. LoRA is the standard low-rank adapter; LoKr (LyCORIS Kronecker) trains a much smaller, often more expressive adapter on targets that advertise it; Full base fine-tune updates every base weight and writes a fine-tuned checkpoint instead of an adapter — far more memory, offered only where the engine supports it.">
@@ -518,13 +476,7 @@ export function ConfigureJobPanel({
               {showNetworkType && isLokrNetwork ? (
                 <label title="LoKr block-decomposition factor. -1 lets LyCORIS pick the largest factor automatically; larger values trade adapter size for capacity.">
                   LoKr factor
-                  <input
-                    min="-1"
-                    onChange={(event) => updateConfigDraft("decomposeFactor", event.target.value)}
-                    step="1"
-                    type="number"
-                    value={configDraft.decomposeFactor ?? ""}
-                  />
+                  {numericInput("decomposeFactor", { min: "-1", step: "1" })}
                 </label>
               ) : null}
               <label>
@@ -539,22 +491,11 @@ export function ConfigureJobPanel({
               </label>
               <label>
                 Learning rate
-                <input
-                  onChange={(event) => updateConfigDraft("learningRate", event.target.value)}
-                  step="0.00001"
-                  type="number"
-                  value={configDraft.learningRate ?? ""}
-                  {...invalidProps(configValidity, "learningRate")}
-                />
+                {numericInput("learningRate", { step: "0.00001" }, true)}
               </label>
               <label>
                 Weight decay
-                <input
-                  onChange={(event) => updateConfigDraft("weightDecay", event.target.value)}
-                  step="0.00001"
-                  type="number"
-                  value={configDraft.weightDecay ?? ""}
-                />
+                {numericInput("weightDecay", { step: "0.00001" })}
               </label>
               <label title="Learning-rate scheduler (not the timestep/noise scheduler). Constant holds the LR fixed for the whole run; linear and cosine decay it toward zero over the run.">
                 LR scheduler
@@ -568,12 +509,7 @@ export function ConfigureJobPanel({
               </label>
               <label title="Optional linear warmup: number of steps to ramp the LR up from zero before the scheduler body runs. 0 disables warmup.">
                 LR warmup steps
-                <input
-                  min="0"
-                  onChange={(event) => updateConfigDraft("lrWarmupSteps", event.target.value)}
-                  type="number"
-                  value={configDraft.lrWarmupSteps ?? ""}
-                />
+                {numericInput("lrWarmupSteps", { min: "0" })}
               </label>
               <label>
                 Timestep type
@@ -650,12 +586,7 @@ export function ConfigureJobPanel({
               </label>
               <label>
                 Guidance scale
-                <input
-                  onChange={(event) => updateConfigDraft("sampleGuidanceScale", event.target.value)}
-                  step="0.1"
-                  type="number"
-                  value={configDraft.sampleGuidanceScale ?? ""}
-                />
+                {numericInput("sampleGuidanceScale", { step: "0.1" })}
               </label>
             </div>
 
