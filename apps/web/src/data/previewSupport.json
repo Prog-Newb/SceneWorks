@@ -91,6 +91,9 @@
       "candle": true,
       "mlx": true
     },
+    "iris_3b": {
+      "mlx": false
+    },
     "kokoro_82m": {
       "candle": false
     },

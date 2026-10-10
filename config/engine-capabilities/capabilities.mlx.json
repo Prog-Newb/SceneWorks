@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "11319984d0c5aa7ff63bffa0760d93aec823aeea",
+    "inferenceRevision": "1544a2889e53cc1f7adba1d49e8761b8acf03a63",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -479,6 +479,11 @@
           "identity": "flux2-batchnorm-v1"
         }
       }
+    },
+    {
+      "id": "iris_3b",
+      "modality": "image",
+      "supportsPreview": false
     },
     {
       "id": "kolors",

@@ -10,7 +10,7 @@
       "inferenceRevision": "8f986217ad31475b288f452d78a30ef05a4d7268"
     },
     "mlx": {
-      "inferenceRevision": "11319984d0c5aa7ff63bffa0760d93aec823aeea"
+      "inferenceRevision": "1544a2889e53cc1f7adba1d49e8761b8acf03a63"
     }
   },
   "models": {
@@ -99,6 +99,9 @@
     "illustrious_xl_v2": {
       "candle": true,
       "mlx": true
+    },
+    "iris_3b": {
+      "mlx": false
     },
     "kokoro_82m": {
       "candle": false
