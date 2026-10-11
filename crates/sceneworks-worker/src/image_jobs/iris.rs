@@ -262,9 +262,39 @@ mod tests {
         engine: "mlx",
     };
 
+    /// Run `body` under an INFO subscriber whose output is captured, so a test can read the worker
+    /// events it emitted. Local (not `ladder_e2e_sc18101`'s macOS-only twin) because these tests run
+    /// on both lanes.
+    fn with_captured_tracing<T>(body: impl FnOnce() -> T) -> (T, String) {
+        #[derive(Clone, Default)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        crate::test_env::install_tracing_interest_floor();
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_target(false)
+            .without_time()
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, body);
+        let text = String::from_utf8_lossy(&capture.0.lock().unwrap()).into_owned();
+        (value, text)
+    }
+
     /// The `sampling_knob_unsupported` events `body` emitted, as `(knob, requested)` pairs.
     fn dropped_knobs<T>(body: impl FnOnce() -> T) -> (T, Vec<(String, Value)>) {
-        let (value, logged) = crate::ladder_e2e_sc18101::with_captured_tracing(body);
+        let (value, logged) = with_captured_tracing(body);
         let events = logged
             .lines()
             .filter(|line| line.contains("sampling_knob_unsupported"))
@@ -420,7 +450,8 @@ mod tests {
     // ---------------------------------------------------------------------------------------
     // sc-25679 — the Iris job arm end to end with a stub engine.
     //
-    // `generate_stream_using` is the production arm (`generate_stream` passes the real loader):
+    // `generate_stream_using` (MLX) / `generate_candle_stream_using` (Candle, sc-25680) is the
+    // production arm (the plain names pass the real loader):
     // weights/encoder resolution, the tier/admission preflight, the cached load, the per-item drive
     // and `consume_gen_events` all run for real against a staged (weightless) cache. Only the engine
     // is a stub, so these pin what the worker does with the engine's Step progress, a user cancel
@@ -610,6 +641,7 @@ mod tests {
             ("HF_HUB_CACHE", ""),
             ("HUGGINGFACE_HUB_CACHE", ""),
             ("HF_HOME", ""),
+            #[cfg(target_os = "macos")]
             (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64"),
         ]);
         let data = tempfile::tempdir().unwrap();
@@ -635,69 +667,81 @@ mod tests {
             .build()
             .unwrap();
         // `block_on` polls the arm on THIS thread, so the thread-local capture sees its events.
-        let ((outcome, posts, asset_writes), logged) =
-            crate::ladder_e2e_sc18101::with_captured_tracing(|| {
-                runtime.block_on(async {
-                    let (base_url, posts) = spawn_job_api(cancel_requested).await;
-                    let mut settings = settings_at(data.path());
-                    settings.api_url = base_url;
-                    settings.heartbeat_seconds = 5;
-                    let api = ApiClient::new(&settings);
-                    let job: JobSnapshot =
-                        serde_json::from_value(crate::tests::job_snapshot_json("job-iris", false))
-                            .unwrap();
-                    let mut payload = json!({
-                        "projectId": "project-iris",
-                        "model": "iris_3b",
-                        "mode": "text_to_image",
-                        "prompt": "a lighthouse at dusk",
-                        "width": 64,
-                        "height": 64,
-                        "count": 1,
-                        "modelManifestEntry": Value::Object(shipped_iris_entry()),
-                    });
-                    for (key, value) in extra.as_object().cloned().unwrap_or_default() {
-                        payload[key] = value;
-                    }
-                    let request = sceneworks_core::image_request::ImageRequest::from_payload(
-                        payload.as_object().unwrap(),
-                    );
-                    let plan = super::super::ImagePlan::with_count(&request, 1, None);
-                    let descriptor = crate::engines::mlx_model("iris_3b")
-                        .expect("iris_3b is linked")
-                        .descriptor;
-                    let loader_calls = Arc::clone(&calls);
-                    let loader_seen = Arc::clone(&seen);
-                    let loader_stopped = Arc::clone(&stopped_on_cancel);
-                    let loader = move |_engine: &str, _spec: &LoadSpec| {
-                        Ok(Box::new(IrisArmProbe {
-                            descriptor,
-                            behavior,
-                            generate_calls: loader_calls,
-                            seen: loader_seen,
-                            stopped_on_cancel: loader_stopped,
-                        }) as Box<dyn Generator>)
-                    };
-                    let mut asset_writes = Vec::new();
-                    let outcome = tokio::time::timeout(
-                        Duration::from_secs(60),
-                        super::super::generate_stream_using(
-                            &api,
-                            &settings,
-                            &job,
-                            &plan,
-                            project.path(),
-                            "mlx",
-                            &mut asset_writes,
-                            loader,
-                        ),
-                    )
+        let ((outcome, posts, asset_writes), logged) = with_captured_tracing(|| {
+            runtime.block_on(async {
+                let (base_url, posts) = spawn_job_api(cancel_requested).await;
+                let mut settings = settings_at(data.path());
+                settings.api_url = base_url;
+                settings.heartbeat_seconds = 5;
+                let api = ApiClient::new(&settings);
+                let job: JobSnapshot =
+                    serde_json::from_value(crate::tests::job_snapshot_json("job-iris", false))
+                        .unwrap();
+                let mut payload = json!({
+                    "projectId": "project-iris",
+                    "model": "iris_3b",
+                    "mode": "text_to_image",
+                    "prompt": "a lighthouse at dusk",
+                    "width": 64,
+                    "height": 64,
+                    "count": 1,
+                    "modelManifestEntry": Value::Object(shipped_iris_entry()),
+                });
+                for (key, value) in extra.as_object().cloned().unwrap_or_default() {
+                    payload[key] = value;
+                }
+                let request = sceneworks_core::image_request::ImageRequest::from_payload(
+                    payload.as_object().unwrap(),
+                );
+                let plan = super::super::ImagePlan::with_count(&request, 1, None);
+                let descriptor = crate::engines::mlx_model("iris_3b")
+                    .expect("iris_3b is linked")
+                    .descriptor;
+                let loader_calls = Arc::clone(&calls);
+                let loader_seen = Arc::clone(&seen);
+                let loader_stopped = Arc::clone(&stopped_on_cancel);
+                let loader = move |_engine: &str, _spec: &LoadSpec| {
+                    Ok(Box::new(IrisArmProbe {
+                        descriptor,
+                        behavior,
+                        generate_calls: loader_calls,
+                        seen: loader_seen,
+                        stopped_on_cancel: loader_stopped,
+                    }) as Box<dyn Generator>)
+                };
+                let mut asset_writes = Vec::new();
+                // The SAME arm body on both lanes: the MLX `generate_stream_using` on macOS, the
+                // Candle `generate_candle_stream_using` off-Mac (sc-25680) — so progress, cancel,
+                // failure and knob shaping are pinned per backend by one set of assertions.
+                #[cfg(target_os = "macos")]
+                let arm = super::super::generate_stream_using(
+                    &api,
+                    &settings,
+                    &job,
+                    &plan,
+                    project.path(),
+                    "mlx",
+                    &mut asset_writes,
+                    loader,
+                );
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                let arm = super::super::generate_candle_stream_using(
+                    &api,
+                    &settings,
+                    &job,
+                    &plan,
+                    project.path(),
+                    "cuda",
+                    &mut asset_writes,
+                    loader,
+                );
+                let outcome = tokio::time::timeout(Duration::from_secs(60), arm)
                     .await
                     .expect("the iris arm finished");
-                    let posts = posts.lock().unwrap().clone();
-                    (outcome, posts, asset_writes)
-                })
-            });
+                let posts = posts.lock().unwrap().clone();
+                (outcome, posts, asset_writes)
+            })
+        });
         let generate_calls = *calls.lock().unwrap();
         let seen = seen.lock().unwrap().clone();
         let stopped_on_cancel = *stopped_on_cancel.lock().unwrap();

@@ -5,7 +5,7 @@
     "modelCount": 109,
     "importedFamilyCount": 4,
     "cellCount": 1014,
-    "mlxOnlyCellCount": 46,
+    "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
   },
@@ -20,13 +20,13 @@
     "descriptorCandleRuntime": "9354e7e9c7ba5c3533ff54e14e8828d353c3e7a18a281b3cd20c039451fd8d65",
     "descriptorMlxFacts": "c0fb2b2b641738ade4ddb9a5e3b508acaa0f21fb97ce70f726ed89392c30a38d",
     "descriptorMlxRuntime": "49d9480b002122246aed1a814a1690a097a0957ad1a6c04cc8b65d26a6e1f29d",
-    "descriptorPreviewFacts": "c5aac1fbe97f63e87c32317d9fa5eba353297e2774517ee423d4e541b427f8aa",
+    "descriptorPreviewFacts": "94529de3e0388ae8d0b196012b9a68585e327574c619bf6628bbc5e866eb991e",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "d460f57bf9ec897e1e7b927abff43385f73201739a8e47f825b6f50c39cc7987",
+    "manifest": "5140bde4fc10d55f7c4a17bc7b1573ff37a6ed76aad9b6553a15e9cc0c9e4831",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
-    "routerCandle": "508eb48d36e094770efeb4f374177b872b98b865ac275af3721c33c5c7cbe209",
-    "routerCatalog": "31d12853900a30c64b0e18b53eb7aa9c9296b36278a1266f00b653b709b11e3c",
-    "routerGaps": "aa11c98bc877082d846ed3b6561fa243a13cfd1ec9e3faab5e3aba8809cfa20f",
+    "routerCandle": "2799481c1aae4731b0ccabfce7fcefb762356aaf765ac57c44f30a299a7c908b",
+    "routerCatalog": "784a845221ef24ba4297c9b088647f5561320a5e8dc86c6afd8a5b8aad1fdb58",
+    "routerGaps": "22183cc9b0753640b97ed2ed08d1d5a499b173b593b13f57e111ffebb1cfab44",
     "routerMlx": "a071e2c63c90f76750aa85aaf431ca351324f23c63ea5e9591410fef8ef677c1",
     "scheduler": "458818bae4c621c331978dc7000adfef7b6f18c0c81862334ae1880abf883782",
     "trainingCatalog": "1c78847209ffbc12498b189761963043ba4e5d01ae69e6e031a709d9f0e523de",
@@ -45,10 +45,10 @@
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
-    "workerDispatch": "e2cd68fce583d5e39e2051ea2cf6cc33919dd4b538726849d38c20ada459f353",
+    "workerDispatch": "0bf6b1b0d427f1dee12ef1d8bfa01fd8ca4e505451032ea991198f2f2d36bd51",
     "workerEngineTable": "85d32676e6f2ea02fb6ff94a5bf21aa80275c032574219a9c7c7fa6f4a32ebb4",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "246cecf217b263afdf5af76132afb159ae7b9c8da82fce8ab55beb43390dc2a9",
+    "workerImageDispatch": "7515fad6feabcdc8209ef401bbe77f2fdbbfe820ee23ec140634116f9434dbab",
     "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
     "workerImageMageFinetuned": "e00a6ccd9b811cda73073e0bd8270e58ab60c4a8a8e647f18f3fdec9c30a0935",
     "workerImagePulid": "992ac547e891d30ae485411506bb9088961224653a5a89c2699fa2cd879a985f",
@@ -2061,11 +2061,7 @@
         {
           "capability": "text_to_image",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18481",
-            "url": "https://app.shortcut.com/trefry/story/18481"
-          }
+          "candle": true
         }
       ],
       "conditioningShape": [],
@@ -2085,12 +2081,7 @@
         {
           "capability": "bf16",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-9083",
-            "url": "https://app.shortcut.com/trefry/epic/9083",
-            "authority": "epic-9083"
-          }
+          "candle": true
         }
       ],
       "guidanceMethod": [],

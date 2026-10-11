@@ -5585,3 +5585,102 @@ fn a_derivation_download_needs_the_audio_lane_and_an_ordinary_one_does_not() {
         &plain
     ));
 }
+
+/// sc-25680: Iris-3B routes to the generic Candle txt2img lane for plain text-to-image and refuses
+/// EXACTLY the list the MLX arm refuses (`iris_routes_plain_text_to_image_only` in the MLX tests) —
+/// the candle gate delegates to `iris_mlx_eligible`, and this pins both the delegation and the claim.
+#[test]
+fn iris_routes_to_candle_for_plain_text_to_image_only() {
+    use crate::jobs_store::routing::gaps::classify_candle_image_gap;
+    use crate::jobs_store::routing::mlx::image_request_mlx_eligible;
+
+    assert!(CANDLE_ROUTED_MODELS.contains(&"iris_3b"));
+    assert!(!candle_family_serves_lora("iris_3b") && !candle_family_serves_quant("iris_3b"));
+    let eligible = |payload: Value| image_request_candle_eligible("iris_3b", &object(payload));
+    assert!(eligible(
+        json!({ "model": "iris_3b", "mode": "text_to_image" })
+    ));
+    assert!(eligible(json!({
+        "model": "iris_3b",
+        "advanced": { "steps": 100, "guidanceScale": 3.0, "resolution": "512x512" }
+    })));
+    // The API normalizes every unset carrier to null; a real submission must still route.
+    assert!(eligible(json!({
+        "model": "iris_3b",
+        "mode": "text_to_image",
+        "sourceAssetId": null,
+        "referenceAssetId": null,
+        "maskAssetId": null,
+        "loras": [],
+        "hiresFix": { "enabled": false }
+    })));
+    let candle = gpu_worker(CANDLE_CAPS);
+    assert!(worker_supports_job(
+        &candle,
+        &image_generate_job(json!({ "model": "iris_3b", "prompt": "a lighthouse at dusk" }))
+    ));
+    for refused in [
+        json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+        json!({ "referenceAssetId": "a" }),
+        json!({ "referenceAssetIds": ["a"] }),
+        json!({ "maskAssetId": "a" }),
+        json!({ "controls": [{}] }),
+        json!({ "advanced": { "poses": [{}] } }),
+        json!({ "loras": [{ "id": "l" }] }),
+        json!({ "advanced": { "mlxQuantize": 8 } }),
+        json!({ "advanced": { "quantTier": "nvfp4" } }),
+        json!({ "hiresFix": { "enabled": true } }),
+        json!({ "mode": "reference" }),
+    ] {
+        let mut payload = refused.clone();
+        payload["model"] = json!("iris_3b");
+        assert!(!eligible(payload.clone()), "candle must refuse {refused}");
+        assert!(
+            !image_request_mlx_eligible("iris_3b", &object(payload.clone())),
+            "the MLX lane refuses {refused} too — one refused list for both lanes"
+        );
+        let job = image_generate_job(payload.clone());
+        if refused.pointer("/advanced/poses").is_some() {
+            // A pose set on a candle family with no pose lane is OWNED-TO-REJECT (sc-5968): the
+            // candle worker claims it only to fail it loudly, never to render it.
+            assert!(image_job_candle_pose_reject(&job), "{refused}");
+            assert_eq!(image_job_candle_lane(&job), None, "{refused}");
+        } else {
+            assert!(
+                !worker_supports_job(&candle, &job),
+                "the candle worker must not claim {refused}"
+            );
+        }
+        // Every refusal is reported with a cause, never the unrouted-family wording.
+        let reason = classify_candle_image_gap(&object(payload));
+        assert!(
+            !reason.feature.contains("unsupported image model"),
+            "{refused}: {reason:?}"
+        );
+    }
+    // The carriers ONLY the Iris check closes are named by it.
+    for iris_only in [
+        json!({ "model": "iris_3b", "controls": [{}] }),
+        json!({ "model": "iris_3b", "advanced": { "quantTier": "nvfp4" } }),
+        json!({ "model": "iris_3b", "hiresFix": { "enabled": true } }),
+    ] {
+        assert_eq!(
+            candle_image_first_refusal("iris_3b", &object(iris_only.clone())),
+            Some(CandleImageRefusal::IrisSurface),
+            "{iris_only}"
+        );
+        let reason = classify_candle_image_gap(&object(iris_only.clone()));
+        assert!(
+            reason.feature.contains("Iris-3B") && reason.detail.contains("Re-submit"),
+            "{iris_only}: {reason:?}"
+        );
+    }
+    // The Iris check never touches another family.
+    assert_eq!(
+        candle_image_first_refusal(
+            "z_image_turbo",
+            &object(json!({ "hiresFix": { "enabled": true } }))
+        ),
+        None
+    );
+}

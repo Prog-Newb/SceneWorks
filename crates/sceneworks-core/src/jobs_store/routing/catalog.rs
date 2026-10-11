@@ -1090,10 +1090,13 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("anima_base", true, true, false, true, false),
     ModelCaps::new("anima_aesthetic", true, true, false, true, false),
     ModelCaps::new("anima_turbo", true, true, false, true, false),
-    // Iris-3B generation (sc-25679, epic 25678): native MLX only (`mlx-gen-iris`, `mac_only`). Plain
-    // text-to-image with no quant tier and no adapters; no Candle twin at this pin, so every candle
-    // column is false and an off-Mac request stays unclaimed.
-    ModelCaps::new("iris_3b", true, false, false, false, false),
+    // Iris-3B generation (sc-25679 MLX / sc-25680 Candle, epic 25678): the native Candle/CUDA port
+    // (`candle-gen-iris`) registers the SAME engine id `iris_3b`, so the one plain text-to-image
+    // contract that routes to MLX on a Mac routes off-Mac too, through the generic candle txt2img
+    // lane. No quant tier and no adapters on this surface (the engine's LoRA/LoKr slot is the S3
+    // controls work, whose SceneWorks half widens this row), and `CandleImageRefusal::IrisSurface`
+    // holds the candle gate to exactly the MLX arm's shape (`iris_mlx_eligible`).
+    ModelCaps::new("iris_3b", true, true, false, false, false),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -2376,6 +2379,7 @@ mod tests {
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
+        "iris_3b",
     ];
 
     // sc-9983: Krea joins Lens as a BOTH-quant-and-LoRA candle family (sc-9607 flipped its

@@ -136,9 +136,9 @@ export const MODEL_STORIES = {
   // ported it — MLX by sc-24108, Candle/CUDA by sc-24109. The Candle key lands WITH the backend,
   // never ahead of it, so a Candle cell is never attributed to a story scoped to Metal.
   qwen_image_2_1: { mlx: 24108, candle: 24109 },
-  // Iris-3B (epic 25678): MLX-only at this pin, ported by sc-25679. No `candle` key — a Candle cell
-  // fails attribution until a Candle twin exists.
-  iris_3b: { mlx: 25679 },
+  // Iris-3B (epic 25678): ported to MLX by sc-25679 and to Candle/CUDA by sc-25680 (S2) — each
+  // backend's cells are owned by the story that brought that lane through SceneWorks.
+  iris_3b: { mlx: 25679, candle: 25680 },
   qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
   qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
   lens: { mlx: 15462, candle: 17489 },
@@ -208,9 +208,10 @@ export const FAMILY_STORIES = {
   15526: { mlx: 15526, candle: 15837 },
   15527: { mlx: 15527, candle: 15839 },
   15528: { mlx: 15528, candle: 17414 },
-  // Iris-3B: the family is owned by its epic (sc-25678) — the model story sc-25679 already owns the
-  // iris_3b cells, and one id may own only one thing. MLX-only, so no Candle family twin yet.
-  25678: { mlx: 25678 },
+  // Iris-3B: the MLX family is owned by its epic (sc-25678) — the model stories sc-25679/sc-25680
+  // already own the iris_3b cells, and one id may own only one thing. The Candle family twin is
+  // sc-25684 (S6: Iris task resource management and memory admission), the epic's memory owner.
+  25678: { mlx: 25678, candle: 25684 },
 };
 
 /**

@@ -1,19 +1,19 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:5f78e525ce8dee66ff480e88805269026611c40959395d8526a141a1b5f5c8a1",
+    "sceneWorksRevision": "source-tree:fde2746212fcc9dce6edc8e28b1d1304c3e42ced5890c2a3e6cec05f3388d367",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "f51c2a57c8931ba6ceb6e842d5aeb7143b858c85901eeee5a5d4526fba241097"
+        "sha256": "6ec94b7d26394254c29cd79fb4a23af81fb282be1a2bf9615819ca18521560fa"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "65e32045e3c7212603bef8373678efdbbca048caffd86b39a499d958a2255a56"
+        "sha256": "8897bc33d0d291b767f24e320132bd7c3b2ec4e88ed68aec1cd40460cad92c03"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "628725ca4173dbc8b3f0343b61f88c4a0c6fe8df25feb677abdd06f211e27389"
+        "sha256": "738a4feb1836fe02e460d52f776aea4febc567f5cfe4d7d767588bb4562e6aa2"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "98cd4769c1d9f2a808b4b30e937abdf1e93854ad0fcd4cc429815e9ab17c8fb7"
+        "sha256": "701f9945ebc0f8cd5dcb427034912f4e705698d93ae7f65a345b642e963df0e2"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "a85100132f8f058c57589f8c90b09f048a740a8c154f72ab5248228d142a6edd"
+        "sha256": "e489c4c22d9657b37cbd097fe40691f5c2f9cb0e0c5af526250240239068bf1b"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -137,12 +137,12 @@
       "image": 55,
       "video": 11
     },
-    "cells": 9580,
+    "cells": 9590,
     "publishedCells": 3855,
-    "elidedCells": 5725,
+    "elidedCells": 5735,
     "elidedByState": {
       "Implemented": 1218,
-      "Missing": 4507
+      "Missing": 4517
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 49,
@@ -163,7 +163,7 @@
       }
     ],
     "anchors": 250,
-    "analyticOnlyCells": 100,
+    "analyticOnlyCells": 101,
     "anchoredCells": 3855,
     "staleAnchors": 250,
     "attestedAnchors": 0,
@@ -1754,20 +1754,43 @@
       "family": "iris",
       "resolvedRoute": "iris_3b",
       "resolvedRoutes": {
-        "mlx": "iris_3b"
+        "mlx": "iris_3b",
+        "candle": "iris_3b"
       },
       "routeKind": "registry",
       "backends": [
-        "mlx"
+        "mlx",
+        "candle"
       ],
       "owningFamilyStories": {
-        "mlx": 25678
+        "mlx": 25678,
+        "candle": 25684
       },
       "owningModelStories": {
-        "mlx": 25679
+        "mlx": 25679,
+        "candle": 25680
       },
       "axes": {
         "mlx": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "text_to_image"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
           "tiers": [
             "default"
           ],
@@ -13152,6 +13175,66 @@
           "lora": 0,
           "none": 0
         }
+      }
+    },
+    {
+      "modelId": "iris_3b",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "iris_3b",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "iris_3b",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "iris_3b",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "iris_3b",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
       }
     },
     {

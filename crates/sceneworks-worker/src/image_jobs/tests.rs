@@ -27625,8 +27625,8 @@ fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebindin
     // is the ordering of receipt authority versus cache rebinding rather than a provider result.
     let base = include_str!("base.rs");
     let body = base
-        .split_once("async fn generate_candle_stream(")
-        .expect("missing production function marker generate_candle_stream")
+        .split_once("async fn generate_candle_stream_using(")
+        .expect("missing production function marker generate_candle_stream_using")
         .1
         .split_once("\n}\n")
         .expect("generate_candle_stream has no top-level end marker")
@@ -27643,7 +27643,7 @@ fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebindin
     );
 
     let closure = body
-        .split_once("start_cached_gen_stream_with_request_state(")
+        .split_once("start_cached_gen_stream_with_request_state_using(")
         .expect("generate_candle_stream no longer opens a cached generator closure")
         .1;
     let bind = closure

@@ -12293,8 +12293,39 @@ async fn generate_candle_stream(
     job: &JobSnapshot,
     plan: &ImagePlan,
     project_path: &Path,
+    device_backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    generate_candle_stream_using(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        device_backend,
+        asset_writes,
+        crate::inference_runtime::load,
+    )
+    .await
+}
+
+/// [`generate_candle_stream`] with the generator loader supplied by the caller — the Candle twin of
+/// [`generate_stream_using`] (sc-25680): every pre-load decision, the cached load, the per-item drive
+/// and `consume_gen_events` are the production code; only the engine is injectable, so a test can pin
+/// progress / cancel / failure on a real candle job arm without weights or a CUDA device.
+#[allow(clippy::too_many_arguments)]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn generate_candle_stream_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
     _device_backend: &str,
     asset_writes: &mut Vec<Value>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
 ) -> WorkerResult<()> {
     let request = &plan.request;
     let adapter_label = candle_adapter_label(&request.model);
@@ -12388,7 +12419,20 @@ async fn generate_candle_stream(
     let guidance = resolve_guidance(request, &model);
     let mut true_cfg = resolve_true_cfg(request, &model);
     let hires_fix = resolve_hires_fix_plan(request, steps, guidance, true_cfg);
-    let negative_prompt = resolve_negative_prompt(request, &model);
+    // The same Iris-3B request shaping the MLX arm applies (sc-25680): a CFG-bound negative prompt is
+    // dropped at guidance 1.0 and the withheld schedule shift never reaches the engine, each drop
+    // reported as `sampling_knob_unsupported`. Inert for every other model.
+    let knob_drop = iris::KnobDropContext {
+        model_id: &request.model,
+        job_id: &job.id,
+        engine: backend,
+    };
+    let negative_prompt = iris::gate_negative_prompt_on_guidance(
+        &request.model_manifest_entry,
+        guidance,
+        resolve_negative_prompt(request, &model),
+        &knob_drop,
+    );
 
     // Per-payload flash/accel-attention (sc-3674): the UI Advanced toggle sends `advanced.flashAttn`
     // (default on). Process-global toggle, set before the generator loads (the candle pipeline reads
@@ -12489,6 +12533,7 @@ async fn generate_candle_stream(
     // + a `sampling_knob_unsupported` event, never a hard-fail. The curated knobs light up per-family with
     // zero worker change as the candle engines are adopted.
     let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
+    let scheduler_shift = iris::honored_scheduler_shift(engine_id, scheduler_shift, &knob_drop);
     let sampler = if request.model == "realvisxl_lightning" {
         Some("lightning".to_owned())
     } else {
@@ -13685,12 +13730,13 @@ async fn generate_candle_stream(
     .await;
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 
-    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         format!("candle {engine_id} load failed"),
+        load_generator,
         move |generator,
               cache_state,
               loaded_policy,

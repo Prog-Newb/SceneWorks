@@ -774,7 +774,12 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
     commit that changes the declaration, and say in the commit body which lanes moved and why.
 
-    Last moved: sc-25679 adds the MLX-only `iris_3b` catalog entry (one untagged artifact, so a
+    Last moved: sc-25680 routes `iris_3b` to Candle/CUDA. It adds exactly five NEW lanes
+    (`iris_3b:candle:*`), each [0,0,2]: the catalog entry carries no `candle` block yet, so the
+    whole Candle slice is the generator's "routed but untriaged" Missing (its memory declaration is
+    sc-25684's, S6), and nothing else moves.
+
+    Previously: sc-25679 adds the MLX-only `iris_3b` catalog entry (one untagged artifact, so a
     single tier; text_to_image x {none, lora} = 2 coordinates per lane). It contributes exactly
     five NEW lanes and moves nothing else: `resident` [2,0,0]; `staged_residency` [2,0,0] because
     the descriptor advertises sequential offload and the engine joined the fit gate's

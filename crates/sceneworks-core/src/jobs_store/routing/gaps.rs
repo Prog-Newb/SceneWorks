@@ -978,6 +978,22 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             ),
             Some("epic 5480"),
         ),
+        CandleImageRefusal::IrisSurface => UnsupportedReason::new(
+            Some(model),
+            "Iris-3B request outside plain text-to-image",
+            &format!(
+                "Iris-3B serves plain text-to-image only — no source/reference/mask, controls, \
+                 poses, user LoRA, quant tier (advanced.mlxQuantize / advanced.quantTier) or hires \
+                 fix, on either backend. This request (mode {mode:?}) carries one of those, so it is \
+                 refused rather than rendered with the carrier silently dropped.{remediation}{also}",
+                remediation = if also.is_empty() {
+                    " Re-submit as plain text_to_image without it and the same prompt routes."
+                } else {
+                    ""
+                }
+            ),
+            Some("sc-25680"),
+        ),
         CandleImageRefusal::QuantTier => {
             let bits = candle_requested_quant_bits(payload).unwrap_or_default();
             if matches!(model, "chroma1_base" | "chroma1_flash" | "chroma1_hd")

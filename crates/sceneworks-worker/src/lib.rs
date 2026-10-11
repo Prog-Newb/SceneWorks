@@ -463,6 +463,10 @@ mod flux2_dev_gpu_smoke;
 // the resulting asset carries the engine's measured mixed/native checkpointWeightFacts receipt.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod imported_nvfp4_gpu_smoke;
+// Real-weight end-to-end worker smoke for Iris-3B on Candle/CUDA (sc-25680): one production
+// `image_generate` job through the shipped catalog entry and the generic text_encoder seam.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod iris_gpu_smoke;
 // Real-weight GPU smoke for the candle Anima 2B lane (epic 10512, sc-10625 — the hardware-gated
 // acceptance extracted from sc-10525). Test-only + candle-only; drives `crate::inference_runtime::load("anima_base" |
 // "anima_aesthetic" | "anima_turbo")` against the dense bf16 circlestone-labs/Anima split_files
