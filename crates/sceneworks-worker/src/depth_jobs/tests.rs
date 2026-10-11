@@ -118,15 +118,15 @@ fn export_dir(data_dir: &Path) -> PathBuf {
 }
 
 /// Stage `files` of the depth export; `config.yaml` gets `config` (the tiny depth config by
-/// default), the weights get placeholder bytes.
+/// default), the weights get a header-only safetensors file stamped for the depth task.
 fn stage_export(data_dir: &Path, files: &[&str], config: &str) {
     let dir = export_dir(data_dir);
     std::fs::create_dir_all(&dir).unwrap();
     for file in files {
-        let bytes: &[u8] = if *file == BACKBONE_CONFIG_FILE {
-            config.as_bytes()
+        let bytes = if *file == BACKBONE_CONFIG_FILE {
+            config.as_bytes().to_vec()
         } else {
-            b"placeholder"
+            crate::iris_test_weights::task_weights(IrisTask::Depth)
         };
         std::fs::write(dir.join(file), bytes).unwrap();
     }
