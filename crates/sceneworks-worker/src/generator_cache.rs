@@ -268,6 +268,13 @@ struct CacheIdentityWeights {
 }
 
 impl LoadIdentity {
+    /// The named components (`LoadSpec::components` ids, e.g. Iris's `text_encoder`) this identity
+    /// was loaded with. Test/introspection helper.
+    #[cfg(test)]
+    pub(crate) fn component_ids(&self) -> Vec<String> {
+        self.components.iter().map(|(id, _)| id.clone()).collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn from_load_spec(engine_id: &str, spec: &LoadSpec) -> Self {
         Self::try_from_load_spec(engine_id, spec)
@@ -980,6 +987,7 @@ where
 {
     with_cached_generator_for_request_after_cold_admission_using_on(
         generator_worker(),
+        crate::transform_cache::evict_resident_transform(),
         engine_id,
         spec,
         load_error_context,
@@ -1056,6 +1064,7 @@ where
 {
     with_cached_generator_using_cold_admission_on(
         generator_worker().clone(),
+        crate::transform_cache::evict_resident_transform(),
         engine_id,
         spec,
         load_error_context,
@@ -1067,8 +1076,10 @@ where
 }
 
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+#[allow(clippy::too_many_arguments)]
 async fn with_cached_generator_using_cold_admission_on<R>(
     worker: mpsc::Sender<GeneratorJob>,
+    evict_transform: impl std::future::Future<Output = WorkerResult<bool>> + Send,
     engine_id: &'static str,
     spec: LoadSpec,
     load_error_context: impl Into<String>,
@@ -1083,6 +1094,7 @@ where
 {
     with_cached_generator_for_request_using_cold_admission_on(
         worker,
+        evict_transform,
         engine_id,
         spec,
         load_error_context,
@@ -1131,6 +1143,7 @@ where
 {
     with_cached_generator_for_request_using_cold_admission_on(
         generator_worker().clone(),
+        crate::transform_cache::evict_resident_transform(),
         engine_id,
         spec,
         load_error_context,
@@ -1142,8 +1155,10 @@ where
 }
 
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+#[allow(clippy::too_many_arguments)]
 async fn with_cached_generator_for_request_using_cold_admission_on<R>(
     worker: mpsc::Sender<GeneratorJob>,
+    evict_transform: impl std::future::Future<Output = WorkerResult<bool>> + Send,
     engine_id: &'static str,
     spec: LoadSpec,
     load_error_context: impl Into<String>,
@@ -1169,8 +1184,9 @@ where
         request_cancel,
         admission: cold_admission,
     } = cold_load;
-    // One resident engine across the generator and transform caches (sc-25683).
-    crate::transform_cache::evict_resident_transform().await?;
+    // One resident engine across the generator and transform caches (sc-25683). Injected so a test
+    // on a local cache worker never touches the process-global transform cache.
+    evict_transform.await?;
     let key = LoadIdentity::try_from_load_spec(engine_id, &spec).map_err(|error| {
         crate::classify_engine_error("Generator cache source validation failed", error)
     })?;
@@ -1258,6 +1274,7 @@ where
 {
     with_cached_generator_for_request_after_cold_admission_using_on(
         generator_worker(),
+        crate::transform_cache::evict_resident_transform(),
         engine_id,
         spec,
         load_error_context,
@@ -1272,6 +1289,7 @@ where
 #[cfg(test)]
 async fn with_cached_generator_for_request_using_on<R>(
     worker: &mpsc::Sender<GeneratorJob>,
+    evict_transform: impl std::future::Future<Output = WorkerResult<bool>> + Send,
     engine_id: &'static str,
     spec: LoadSpec,
     load_error_context: impl Into<String>,
@@ -1294,6 +1312,7 @@ where
 {
     with_cached_generator_for_request_after_cold_admission_using_on(
         worker,
+        evict_transform,
         engine_id,
         spec,
         load_error_context,
@@ -1308,6 +1327,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn with_cached_generator_for_request_after_cold_admission_using_on<R>(
     worker: &mpsc::Sender<GeneratorJob>,
+    evict_transform: impl std::future::Future<Output = WorkerResult<bool>> + Send,
     engine_id: &'static str,
     spec: LoadSpec,
     load_error_context: impl Into<String>,
@@ -1332,8 +1352,10 @@ where
 {
     // One resident engine across the generator and transform caches (sc-25683): a resident
     // restoration transform is dropped before a generator can load on top of it. A no-op when no
-    // transform was ever loaded.
-    crate::transform_cache::evict_resident_transform().await?;
+    // transform was ever loaded. Injected (production passes the process-global
+    // `transform_cache::evict_resident_transform`) so a test on a local cache worker never evicts the
+    // global transform another test is asserting on.
+    evict_transform.await?;
     let key = LoadIdentity::try_from_load_spec(engine_id, &spec).map_err(|error| {
         crate::classify_engine_error("Generator cache source validation failed", error)
     })?;
@@ -1632,6 +1654,43 @@ pub(crate) async fn mlx_tier_budget(
     reply_rx.await.map_err(|_| {
         crate::WorkerError::Engine("MLX generator cache worker dropped the tier budget".to_owned())
     })?
+}
+
+/// Test seam (sc-25684): load the backend-neutral staging stub into the PROCESS-GLOBAL generator
+/// cache through the production cache entry point (including its eviction of a resident transform),
+/// standing in for a warm generator a task switch must evict. Callers hold
+/// [`crate::test_env::env_lock`] so tests touching the global caches serialize.
+#[cfg(test)]
+pub(crate) async fn load_stub_into_global_cache(weights: &Path) -> WorkerResult<()> {
+    with_cached_generator_for_request_using_on(
+        generator_worker(),
+        crate::transform_cache::evict_resident_transform(),
+        "sc3724_stub",
+        LoadSpec::new(WeightsSource::Dir(weights.to_path_buf())),
+        "stub load",
+        |_id, spec| tests::staging_stub_load(spec),
+        |_, _, _, warm_policy: crate::execution_planner::WarmPolicyProposal, _, _| {
+            warm_policy
+                .decline(crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory);
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// Test seam (sc-25684): whether the process-global generator cache holds a resident generator
+/// (without evicting it), and the component ids of the spec it was loaded with — so a task-switch
+/// test can see a text encoder leave with its generator.
+#[cfg(test)]
+pub(crate) async fn global_generator_resident() -> Option<Vec<String>> {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<Option<Vec<String>>>();
+    let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let _ = reply_tx.send(cache.resident_key().map(LoadIdentity::component_ids));
+    });
+    generator_worker()
+        .send(job)
+        .expect("generator worker alive");
+    reply_rx.await.expect("generator worker replies")
 }
 
 #[cfg(test)]
@@ -3023,7 +3082,9 @@ mod tests {
 
     /// A stub that attests the staged-residency lifecycle, which is what makes a warm switch
     /// grantable at all (`OffloadPolicy::Sequential` is advisory in gen-core).
-    fn staging_stub_load(_spec: &gen_core::LoadSpec) -> gen_core::Result<Box<dyn Generator>> {
+    pub(super) fn staging_stub_load(
+        _spec: &gen_core::LoadSpec,
+    ) -> gen_core::Result<Box<dyn Generator>> {
         let mut descriptor = stub_descriptor();
         descriptor.capabilities.supports_sequential_offload = true;
         // The descriptor bit alone is NOT what sc-18317 consults — a granted switch needs the loaded
@@ -3049,23 +3110,29 @@ mod tests {
         }))
     }
 
+    /// The transform-eviction seam for tests on a local cache worker: never touches the
+    /// process-global transform cache another test may be asserting on.
+    fn no_transform_eviction() -> std::future::Ready<WorkerResult<bool>> {
+        std::future::ready(Ok(false))
+    }
+
     /// sc-25683: one resident engine across the generator and transform caches — a generator load
     /// first drops a resident restoration transform (the transform side's cold load evicts the
     /// generator; see `transform_cache`).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_generator_load_evicts_a_resident_transform() {
-        // Serializes with every other test that touches the process-global transform cache.
-        let _env = crate::test_env::EnvVars::set(&[]);
+        // A dedicated transform cache: the eviction is the injected seam, so no other test's
+        // generator load can race this one through the process-global transform cache.
         let export = tempfile::tempdir().expect("export tempdir");
-        crate::transform_cache::load_stub_into_global_cache(export.path())
-            .await
-            .expect("stub transform loads");
-        assert!(crate::transform_cache::global_transform_resident().await);
+        let transforms =
+            crate::transform_cache::IsolatedTransformCache::with_stub(export.path()).await;
+        assert!(transforms.resident().await);
 
         let (tx, _capture, _worker) = start_capturing_cache_worker();
         let weights = tempfile::tempdir().expect("weights tempdir");
         with_cached_generator_for_request_using_on(
             &tx,
+            transforms.evict(),
             "sc3724_stub",
             LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf())),
             "stub load",
@@ -3080,7 +3147,7 @@ mod tests {
         .await
         .expect("the generator loads");
         assert!(
-            !crate::transform_cache::global_transform_resident().await,
+            !transforms.resident().await,
             "the generator load must evict the resident transform"
         );
     }
@@ -3108,6 +3175,7 @@ mod tests {
         let cold_loads = Arc::clone(&loads);
         let cold = with_cached_generator_for_request_using_on(
             &tx,
+            no_transform_eviction(),
             "sc3724_stub",
             resident,
             "stub load",
@@ -3137,6 +3205,7 @@ mod tests {
         let warm_loads = Arc::clone(&loads);
         let warm = with_cached_generator_for_request_using_on(
             &tx,
+            no_transform_eviction(),
             "sc3724_stub",
             staged,
             "stub load",
@@ -3230,6 +3299,7 @@ mod tests {
 
         let cold = with_cached_generator_for_request_using_on(
             &tx,
+            no_transform_eviction(),
             "sc3724_stub",
             resident,
             "stub load",
@@ -3264,6 +3334,7 @@ mod tests {
 
         let warm = with_cached_generator_for_request_using_on(
             &tx,
+            no_transform_eviction(),
             "sc3724_stub",
             staged,
             "stub load",
@@ -3329,6 +3400,7 @@ mod tests {
 
         with_cached_generator_for_request_using_on(
             &tx,
+            no_transform_eviction(),
             "sc3724_stub",
             resident,
             "stub load",
@@ -3344,6 +3416,7 @@ mod tests {
         .expect("cold request succeeds");
         let warm = with_cached_generator_for_request_using_on(
             &tx,
+            no_transform_eviction(),
             "sc3724_stub",
             staged,
             "stub load",
@@ -3399,6 +3472,7 @@ mod tests {
         for _ in 0..2 {
             with_cached_generator_for_request_using_on(
                 &tx,
+                no_transform_eviction(),
                 "sc3724_stub",
                 spec.clone(),
                 "stub load",
@@ -3456,6 +3530,7 @@ mod tests {
         let cold_loads = Arc::clone(&loads);
         let first_access = with_cached_generator_for_request_after_cold_admission_using_on(
             &tx,
+            no_transform_eviction(),
             "sc3724_stub",
             first_spec.clone(),
             "stub load",
@@ -3487,6 +3562,7 @@ mod tests {
         let warm_loads = Arc::clone(&loads);
         let warm_access = with_cached_generator_for_request_after_cold_admission_using_on(
             &tx,
+            no_transform_eviction(),
             "sc3724_stub",
             first_spec.clone(),
             "stub load",
@@ -3516,6 +3592,7 @@ mod tests {
         let rejected_loads = Arc::clone(&loads);
         let rejected = with_cached_generator_for_request_after_cold_admission_using_on(
             &tx,
+            no_transform_eviction(),
             "sc3724_stub",
             second_spec.clone(),
             "stub load",
@@ -3548,6 +3625,7 @@ mod tests {
         let retained_loads = Arc::clone(&loads);
         let retained_access = with_cached_generator_for_request_after_cold_admission_using_on(
             &tx,
+            no_transform_eviction(),
             "sc3724_stub",
             first_spec,
             "stub load",
@@ -3573,6 +3651,7 @@ mod tests {
         let replacement_loads = Arc::clone(&loads);
         let replacement_access = with_cached_generator_for_request_after_cold_admission_using_on(
             &tx,
+            no_transform_eviction(),
             "sc3724_stub",
             second_spec,
             "stub load",
@@ -3606,6 +3685,7 @@ mod tests {
         let sequential_loads = Arc::clone(&loads);
         let sequential_access = with_cached_generator_for_request_after_cold_admission_using_on(
             &tx,
+            no_transform_eviction(),
             "sc3724_stub",
             LoadSpec::new(WeightsSource::Dir(sequential))
                 .with_offload_policy(OffloadPolicy::Sequential),
@@ -3636,6 +3716,7 @@ mod tests {
         let rejected_after_sequential =
             with_cached_generator_for_request_after_cold_admission_using_on(
                 &tx,
+                no_transform_eviction(),
                 "sc3724_stub",
                 LoadSpec::new(WeightsSource::Dir(after_sequential))
                     .with_offload_policy(OffloadPolicy::Resident),
@@ -3697,6 +3778,7 @@ mod tests {
             async {
                 with_cached_generator_for_request_after_cold_admission_using_on(
                     &tx,
+                    no_transform_eviction(),
                     "sc3724_stub",
                     spec,
                     "stub load",
@@ -3829,6 +3911,7 @@ mod tests {
         let first_loads = loads.clone();
         let cold = with_cached_generator_for_request_using_cold_admission_on(
             tx.clone(),
+            no_transform_eviction(),
             "scail2",
             spec.clone(),
             "stub load",
@@ -3854,6 +3937,7 @@ mod tests {
 
         let warm = with_cached_generator_for_request_using_cold_admission_on(
             tx.clone(),
+            no_transform_eviction(),
             "scail2",
             spec,
             "stub load",
@@ -3896,6 +3980,7 @@ mod tests {
         let first_loads = loads.clone();
         with_cached_generator_using_cold_admission_on(
             tx.clone(),
+            no_transform_eviction(),
             "scail2",
             base.clone(),
             "stub load",
@@ -3914,6 +3999,7 @@ mod tests {
 
         with_cached_generator_using_cold_admission_on(
             tx.clone(),
+            no_transform_eviction(),
             "scail2",
             base,
             "stub load",
@@ -3931,6 +4017,7 @@ mod tests {
         let rejected_loads = loads.clone();
         let rejected = with_cached_generator_using_cold_admission_on(
             tx.clone(),
+            no_transform_eviction(),
             "scail2",
             different,
             "stub load",
@@ -3982,6 +4069,7 @@ mod tests {
 
         with_cached_generator_using_cold_admission_on(
             tx.clone(),
+            no_transform_eviction(),
             "scail2",
             base,
             "stub load",
@@ -4017,6 +4105,7 @@ mod tests {
         let request_cancel = gen_core::CancelFlag::new();
         let mut queued = Box::pin(with_cached_generator_using_cold_admission_on(
             tx.clone(),
+            no_transform_eviction(),
             "scail2",
             different,
             "stub load",
@@ -4081,6 +4170,7 @@ mod tests {
         let (tx, worker) = start_isolated_generator_worker();
         with_cached_generator_using_cold_admission_on(
             tx.clone(),
+            no_transform_eviction(),
             "scail2",
             base,
             "stub load",
@@ -4112,6 +4202,7 @@ mod tests {
         let run_count = runs.clone();
         let mut queued = Box::pin(with_cached_generator_using_cold_admission_on(
             tx.clone(),
+            no_transform_eviction(),
             "scail2",
             different,
             "stub load",
@@ -4170,6 +4261,7 @@ mod tests {
         let (tx, worker) = start_isolated_generator_worker();
         with_cached_generator_using_cold_admission_on(
             tx.clone(),
+            no_transform_eviction(),
             "scail2",
             base.clone(),
             "stub load",
@@ -4186,6 +4278,7 @@ mod tests {
         let warm = tokio::spawn(async move {
             with_cached_generator_using_cold_admission_on(
                 warm_tx,
+                no_transform_eviction(),
                 "scail2",
                 base,
                 "stub load",
@@ -4211,6 +4304,7 @@ mod tests {
         let cold = tokio::spawn(async move {
             with_cached_generator_using_cold_admission_on(
                 cold_tx,
+                no_transform_eviction(),
                 "scail2",
                 different,
                 "stub load",

@@ -210,7 +210,11 @@ export const FAMILY_STORIES = {
   15528: { mlx: 15528, candle: 17414 },
   // Iris-3B: the MLX family is owned by its epic (sc-25678) — the model stories sc-25679/sc-25680
   // already own the iris_3b cells, and one id may own only one thing. The Candle family twin is
-  // sc-25684 (S6: Iris task resource management and memory admission), the epic's memory owner.
+  // sc-25684 (S6: Iris task resource management and memory admission), which delivered the Candle
+  // lane's admission: the staged-residency row measured once on CUDA (12.0 GB at 1024²) and the
+  // declared per-megapixel activation term for batches and outputs above 1024². No memory anchor
+  // exists for either lane (the epic-end campaign owns anchors), so the cells stay
+  // Implemented/Missing by implementation, never Anchored.
   25678: { mlx: 25678, candle: 25684 },
 };
 

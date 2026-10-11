@@ -226,6 +226,11 @@ on:
         required: false
         type: boolean
         default: false
+      iris_worker_smoke_filter:
+        description: "cargo test filter for the Iris worker smoke step (default: every Iris worker smoke + the training smoke). sc-25684: iris_staged_vram_measurement runs only the staged-residency VRAM measurement, alone in a fresh process, and skips the training smoke (the default filter never selects it)"
+        required: false
+        type: string
+        default: iris_worker_gpu_smoke
 
 # Cancel superseded PR runs, but never cancel a main-push run: this lane is the
 # ONLY thing that compiles the candle-gated worker code, so a main commit whose
@@ -1715,13 +1720,16 @@ jobs:
         run: cargo fetch --locked
       - name: Run the Iris-3B Candle worker smoke
         shell: cmd
+        env:
+          IRIS_SMOKE_FILTER: ${{ inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke' }}
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo test -p sceneworks-worker --features backend-candle --release iris_worker_gpu_smoke -- --ignored --nocapture --test-threads=1
+          cargo test -p sceneworks-worker --features backend-candle --release %IRIS_SMOKE_FILTER% -- --ignored --nocapture --test-threads=1
       # SC-25686: one bounded Iris LoRA `lora_train` job through the production executor (8 steps,
       # 256²), then the trained adapter applied by an `image_generate` job (same snapshots, offline).
       - name: Run the Iris-3B Candle training smoke
+        if: ${{ (inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke') == 'iris_worker_gpu_smoke' }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"

@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:8b13c05b16368387cb05e5fd641f69cbcc56b1922a5a9f620540efad9238faed",
+    "sceneWorksRevision": "source-tree:066a252a3ccec320c21e5955f0ebb1b86aff56f81ed2fc93b3acd823c3ca9107",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "ca8f763bbdfa8185df35e215df7a9a61e153e7ab0c04b47ab56c7b45c4c908e0"
+        "sha256": "13a7044a07ead809fe1a71ae704742725d9e7d5f83c160ba8bb8438eb5fee3a2"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "9c63222c7af01a18bea547c0e95855acf14c0971fddd0a1df591bd98921f2f80"
+        "sha256": "be3629cb7ffdddc51b2f97d7ca658152dc1fcc31f767b2e5ebffe3f7807b833e"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",

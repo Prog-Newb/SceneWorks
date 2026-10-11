@@ -12825,6 +12825,18 @@ async fn generate_candle_stream_using(
     // the tier's MEASURED sequential peak (`candle.sequentialPeakGb`) is known and STILL won't fit, reject
     // instead of running into a reactive OOM. Honors `SCENEWORKS_CUDA_VRAM_CAP_GB` to emulate a small
     // card. Unmeasured models (no `candle` block) and non-NVIDIA hosts yield `Unknown` → never block.
+    //
+    // sc-25684: a resident restoration transform (the Iris `upscaler/` task, sc-25683) is evicted by
+    // the generator cache's load anyway — evict it BEFORE probing, so its VRAM is not counted as
+    // occupied and a generation that fits once it is gone is not refused or demoted to staging
+    // (the reclaimable credit below covers only a resident GENERATOR). A no-op when none is loaded.
+    if crate::transform_cache::evict_resident_transform().await? {
+        tracing::info!(
+            event = "candle_generation_evicted_resident_transform",
+            job_id = %job.id,
+            model = %request.model,
+        );
+    }
     let raw_budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),
@@ -13116,10 +13128,11 @@ async fn generate_candle_stream_using(
     );
     let mut raw_settings =
         mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
-    // A native prompt batch's extra images ride every resident/sequential prediction below exactly
-    // like resident adapter bytes do (sc-25681): `(images − 1) × candle.promptBatchImageGb ×
-    // max(1, MP)`, declared, so a batch is never admitted on a one-image floor. Zero otherwise.
-    let batch_overlay_bytes = lane_controls::native_batch_overlay_bytes(
+    // The declared pixel-space activations beyond the one 1024² image the floors carry — a native
+    // prompt batch's extra images (sc-25681) and an output above 1024² (sc-25684) — ride every
+    // resident/sequential prediction below exactly like resident adapter bytes do:
+    // `candle.imageActivationGbPerMegapixel × (images × max(1, MP) − 1)`. Zero otherwise.
+    let batch_overlay_bytes = lane_controls::declared_activation_overlay_bytes(
         request,
         native_batch.as_ref(),
         memory_width,

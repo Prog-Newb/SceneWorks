@@ -279,9 +279,48 @@ pub(crate) async fn load_stub_into_global_cache(dir: &Path) -> WorkerResult<()> 
 /// Test seam: whether the process-global cache holds a resident transform (without evicting it).
 #[cfg(test)]
 pub(crate) async fn global_transform_resident() -> bool {
-    let Some(worker) = TRANSFORM_WORKER.get() else {
-        return false;
-    };
+    match TRANSFORM_WORKER.get() {
+        Some(worker) => transform_resident_on(worker).await,
+        None => false,
+    }
+}
+
+/// Test seam: a dedicated (non-global) transform cache holding a stub, so a generator-cache test can
+/// check the injected transform eviction without racing the process-global cache.
+#[cfg(test)]
+pub(crate) struct IsolatedTransformCache(mpsc::Sender<TransformJob>);
+
+#[cfg(test)]
+impl IsolatedTransformCache {
+    pub(crate) async fn with_stub(dir: &Path) -> Self {
+        let worker = tests::spawn_isolated_cache();
+        with_cached_transform_on(
+            &worker,
+            "stub_restore",
+            LoadSpec::new(WeightsSource::Dir(dir.to_path_buf())),
+            "stub load",
+            || Ok(()),
+            |_, _| Ok(tests::stub("stub_restore")),
+            |_| Ok(()),
+        )
+        .await
+        .expect("stub transform loads");
+        Self(worker)
+    }
+
+    pub(crate) fn evict(
+        &self,
+    ) -> impl std::future::Future<Output = WorkerResult<bool>> + Send + '_ {
+        evict_resident_transform_on(&self.0)
+    }
+
+    pub(crate) async fn resident(&self) -> bool {
+        transform_resident_on(&self.0).await
+    }
+}
+
+#[cfg(test)]
+async fn transform_resident_on(worker: &mpsc::Sender<TransformJob>) -> bool {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<bool>();
     let job: TransformJob = Box::new(move |cache| {
         let _ = reply_tx.send(cache.resident_model().is_some());
@@ -328,7 +367,7 @@ pub(crate) mod tests {
         })
     }
 
-    fn spawn_isolated_cache() -> mpsc::Sender<TransformJob> {
+    pub(super) fn spawn_isolated_cache() -> mpsc::Sender<TransformJob> {
         let (tx, rx) = mpsc::channel::<TransformJob>();
         thread::spawn(move || run_transform_cache_worker(rx, None));
         tx

@@ -351,6 +351,181 @@ async fn iris_worker_gpu_smoke() {
     );
 }
 
+/// One `nvidia-smi` reading of `memory.used` (MiB) on physical GPU `index`, or `None` when the
+/// query fails.
+#[cfg(not(target_os = "macos"))]
+fn nvidia_memory_used_mib(index: &str) -> Option<u64> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=memory.used",
+            "--format=csv,noheader,nounits",
+            "-i",
+            index,
+        ])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// sc-25684 (S6): the STAGED (sequential-residency) working set of an Iris-3B generation on real
+/// weights. A 1024² job (count 1, 30 steps; the peak does not depend on the step count) runs through
+/// the production Candle arm under a card cap just below the declared resident floor, so the fit gate
+/// routes it to `OffloadPolicy::Sequential` — `candle-gen-iris` encodes with the Qwen3-VL text
+/// encoder, drops it, then denoises with the backbone. A sampler thread polls `nvidia-smi
+/// memory.used` on the job's card every 100 ms; the reported peak is the overall card high-water (the
+/// same quantity as the recorded 21.3–21.4 GB RESIDENT peak), and the catalog's
+/// `candle.sequentialPeakGb` row is set from it. Dispatch with
+/// `-f iris_worker_smoke_filter=iris_staged_vram_measurement` to run this alone in a fresh process
+/// (nothing else resident on the card). Deliberately NOT named `iris_worker_gpu_smoke*`: the default
+/// smoke filter is a substring match and would run it last in the shared process, contaminating its
+/// baseline and peak.
+#[cfg(not(target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "real-weight worker GPU measurement; needs the pinned speridlabs/iris-3b and Qwen3-VL-4B-Instruct snapshots under HF_HUB_CACHE and a CUDA device"]
+async fn iris_staged_vram_measurement() {
+    const STAGED_JOB: &str = "iris-cuda-staged";
+    const STAGED_SIZE: u32 = 1024;
+    const STAGED_STEPS: u32 = 30;
+    // The recorded RESIDENT overall peak at 1024² (inference CUDA runs 38068347300 / 38075865079).
+    const RESIDENT_PEAK_GB: f64 = 21.3;
+    let hf_hub_cache = PathBuf::from(
+        std::env::var("HF_HUB_CACHE").expect("set $HF_HUB_CACHE to the real-weights hub"),
+    );
+    assert!(hf_hub_cache.is_dir(), "HF_HUB_CACHE is not a directory");
+    // The worker's gpu_id is the nvidia-smi (physical, PCI-bus-ordered) index the admission budget is
+    // read from; under `CUDA_VISIBLE_DEVICES` that is the visible device's index.
+    let gpu_index = std::env::var("CUDA_VISIBLE_DEVICES")
+        .ok()
+        .and_then(|devices| devices.split(',').next().map(|d| d.trim().to_owned()))
+        .filter(|device| !device.is_empty())
+        .unwrap_or_else(|| "0".to_owned());
+    let entry = shipped_iris_entry();
+    let entry_object = entry.as_object().expect("catalog entry object");
+    let tier = crate::vram_gate::requested_tier_key(&serde_json::Map::new(), entry_object, false);
+    let resident_gb =
+        crate::vram_gate::predicted_peak_gb(entry_object, tier).expect("declared resident floor");
+    // Just under the resident floor: the resident load does not fit, the staged one does.
+    let cap_gb = resident_gb - 0.5;
+    let sequential_gb = crate::vram_gate::predicted_sequential_peak_gb(entry_object, tier)
+        .expect("declared staged row");
+    assert!(
+        sequential_gb <= cap_gb,
+        "the staged row ({sequential_gb} GB) must fit the {cap_gb} GB cap or the gate refuses"
+    );
+    assert_eq!(
+        crate::vram_gate::load_plan(
+            Some(resident_gb),
+            Some(sequential_gb),
+            Some(crate::vram_gate::VramBudget {
+                free_gb: cap_gb,
+                total_gb: cap_gb
+            }),
+            true
+        ),
+        crate::vram_gate::LoadPlan::Sequential,
+        "the cap must route the job to staged residency"
+    );
+    let cap = format!("{cap_gb}");
+    let _env = crate::test_env::EnvVars::set(&[(crate::vram_gate::CUDA_VRAM_CAP_ENV, &cap)]);
+
+    let temp = tempfile::tempdir().expect("smoke tempdir creates");
+    let (api_url, posts) = spawn_worker_api_stub().await;
+    let mut settings = Settings::for_test(temp.path().join("data"));
+    settings.api_url = api_url;
+    settings.config_dir = temp.path().join("config");
+    settings.worker_id = "iris-smoke-worker".to_owned();
+    settings.gpu_id = gpu_index.clone();
+    settings.backend_candle_enabled = true;
+    settings.heartbeat_seconds = 30;
+    let project = ProjectStore::new(settings.data_dir.clone(), "iris-smoke")
+        .create_project("Iris-3B CUDA staged smoke")
+        .expect("smoke project creates");
+    let mut snapshot = stub_job_snapshot(STAGED_JOB);
+    snapshot["payload"] = json!({
+        "projectId": project.id,
+        "model": "iris_3b",
+        "mode": "text_to_image",
+        "prompt": "a lighthouse on a rocky coast at dusk, warm window light",
+        "width": STAGED_SIZE,
+        "height": STAGED_SIZE,
+        "count": 1,
+        "seed": 3,
+        "advanced": { "steps": STAGED_STEPS },
+        "modelManifestEntry": entry,
+    });
+    let job: JobSnapshot = serde_json::from_value(snapshot).expect("smoke job deserializes");
+
+    let baseline_mib = nvidia_memory_used_mib(&gpu_index).expect("nvidia-smi memory.used reads");
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sampler = {
+        let stop = Arc::clone(&stop);
+        let index = gpu_index.clone();
+        std::thread::spawn(move || {
+            let mut peak = 0_u64;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Some(used) = nvidia_memory_used_mib(&index) {
+                    peak = peak.max(used);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            peak
+        })
+    };
+    let api = ApiClient::new(&settings);
+    let started = std::time::Instant::now();
+    let outcome = crate::image_jobs::run_image_generate_job(&api, &settings, &job).await;
+    let elapsed = started.elapsed();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let peak_mib = sampler.join().expect("sampler thread joins");
+    let gib = |mib: u64| mib as f64 / 1024.0;
+    eprintln!(
+        "RESULT model=iris_3b backend=candle residency=staged geometry={STAGED_SIZE}x{STAGED_SIZE} \
+         steps={STAGED_STEPS} cap_gb={cap_gb} gpu={gpu_index} baseline_gb={:.2} peak_gb={:.2} \
+         peak_delta_gb={:.2} elapsed_s={:.1} outcome={}",
+        gib(baseline_mib),
+        gib(peak_mib),
+        gib(peak_mib.saturating_sub(baseline_mib)),
+        elapsed.as_secs_f64(),
+        match &outcome {
+            Ok(()) => "completed".to_owned(),
+            Err(error) => format!("failed: {error}"),
+        },
+    );
+    outcome.expect("the staged Iris-3B CUDA job completes");
+    let posts = posts.lock().expect("progress posts lock").clone();
+    let result = posts
+        .iter()
+        .rev()
+        .find(|(id, body)| id == STAGED_JOB && body["status"] == "completed")
+        .map(|(_, body)| body["result"].clone())
+        .expect("the job posted a completed result");
+    let asset = &result["assetWrites"][0];
+    let path = PathBuf::from(&project.path).join(asset["mediaPath"].as_str().expect("media"));
+    let decoded = image::open(&path).expect("open rendered asset").to_rgb8();
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (STAGED_SIZE, STAGED_SIZE)
+    );
+    let std = crate::smoke_support::image_std(&gen_core::Image {
+        width: decoded.width(),
+        height: decoded.height(),
+        pixels: decoded.into_raw(),
+    });
+    assert!(
+        std > crate::smoke_support::DEGENERATE_STD_FLOOR_DEFAULT,
+        "the staged render looks degenerate (RGB std {std:.2})"
+    );
+    assert!(
+        gib(peak_mib) < RESIDENT_PEAK_GB,
+        "a staged run must peak below the {RESIDENT_PEAK_GB} GB resident peak (got {:.2} GB) — \
+         the text encoder was not dropped before the denoise",
+        gib(peak_mib)
+    );
+}
+
 /// sc-25681: the NATIVE prompt batch on real weights — a 2-prompt × count-1 job is one
 /// `candle-gen-iris` call (`prompt_batch`), published as two non-degenerate assets in prompt order
 /// on seeds `seed` and `seed + 1`, each recording its own prompt and the batch. Runs in the same
