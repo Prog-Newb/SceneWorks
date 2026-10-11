@@ -1275,8 +1275,8 @@ mod job_tests {
         assert_eq!(
             Value::Object(item.model_options.clone()),
             json!({"depth": {
-                "path": root.join("sidecars/item0.depth.npy"),
-                "mask_path": root.join("sidecars/item0.mask.png"),
+                "path": root.join("sidecars").join("item0.depth.npy"),
+                "mask_path": root.join("sidecars").join("item0.mask.png"),
                 "scale": 0.001, "max_depth": 80.0
             }})
         );
@@ -1335,8 +1335,10 @@ mod job_tests {
             .iter()
             .find(|download| download["componentId"] == "text_encoder")
             .unwrap();
+        // The declared shard glob resolves against the shard actually present.
         for file in encoder["files"].as_array().unwrap() {
-            stage(&data, TE_REPO, TE_REVISION, file.as_str().unwrap());
+            let file = file.as_str().unwrap().replace('*', "00001-of-00002");
+            stage(&data, TE_REPO, TE_REVISION, &file);
         }
         let plan = task_plan(
             &data,
@@ -1569,7 +1571,7 @@ mod job_tests {
         assert_eq!(request.items[1].caption, "");
         assert_eq!(
             Value::Object(request.items[1].model_options.clone()),
-            json!({"degraded_image": root.join("sidecars/item1.degraded.png")})
+            json!({"degraded_image": root.join("sidecars").join("item1.degraded.png")})
         );
     }
 

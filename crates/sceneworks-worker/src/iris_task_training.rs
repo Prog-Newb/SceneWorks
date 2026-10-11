@@ -105,8 +105,30 @@ fn installed_generation_text_encoder(data_dir: &Path) -> Option<PathBuf> {
     files
         .iter()
         .filter_map(Value::as_str)
-        .all(|file| snapshot.join(file).is_file())
+        .all(|pattern| snapshot_has(&snapshot, pattern))
         .then_some(snapshot)
+}
+
+/// Whether a snapshot holds a declared download entry: a literal file, or — for a `prefix*suffix`
+/// glob (the encoder's `model-*.safetensors` shards) — at least one matching file in that directory.
+fn snapshot_has(snapshot: &Path, pattern: &str) -> bool {
+    let Some((prefix, suffix)) = pattern.split_once('*') else {
+        return snapshot.join(pattern).is_file();
+    };
+    let (dir, prefix) = match prefix.rsplit_once('/') {
+        Some((dir, prefix)) => (snapshot.join(dir), prefix),
+        None => (snapshot.to_path_buf(), prefix),
+    };
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.len() >= prefix.len() + suffix.len()
+                && name.starts_with(prefix)
+                && name.ends_with(suffix)
+                && entry.path().is_file()
+        })
+    })
 }
 
 /// The pinned training resources a restoration run stages. Tests substitute fixtures with their own
@@ -839,11 +861,11 @@ mod tests {
         let depth = &item.model_options["depth"];
         assert_eq!(
             depth["path"],
-            json!(root.path().join("sidecars/a.depth.npy"))
+            json!(root.path().join("sidecars").join("a.depth.npy"))
         );
         assert_eq!(
             depth["mask_path"],
-            json!(root.path().join("sidecars/a.mask.png"))
+            json!(root.path().join("sidecars").join("a.mask.png"))
         );
         assert_eq!(depth["scale"], json!(0.001));
         assert_eq!(depth["max_depth"], json!(80.0));
@@ -859,7 +881,7 @@ mod tests {
         assert_eq!(pair.model_options.len(), 1);
         assert_eq!(
             pair.model_options["degraded_image"],
-            json!(root.path().join("sidecars/a.degraded.png"))
+            json!(root.path().join("sidecars").join("a.degraded.png"))
         );
         let clean = task_item(
             IrisObjective::Restoration,
