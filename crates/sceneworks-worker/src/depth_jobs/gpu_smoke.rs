@@ -109,7 +109,14 @@ async fn iris_worker_gpu_smoke_depth() {
     settings.heartbeat_seconds = 30;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
-        settings.gpu_id = "0".to_owned();
+        // The worker's gpu_id is the nvidia-smi (physical, PCI-bus-ordered) index the admission
+        // budget is read from; under `CUDA_VISIBLE_DEVICES` that is the visible device's index,
+        // exactly as a production per-GPU worker is launched.
+        settings.gpu_id = std::env::var("CUDA_VISIBLE_DEVICES")
+            .ok()
+            .and_then(|devices| devices.split(',').next().map(|d| d.trim().to_owned()))
+            .filter(|device| !device.is_empty())
+            .unwrap_or_else(|| "0".to_owned());
         settings.backend_candle_enabled = true;
     }
     resolve_depth_export(&settings).expect("the depth/ export is installed (no download here)");
