@@ -10,7 +10,7 @@
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "f9cea18bf0a12aeed3fa6c8968312f27be7d0f8e5e592094c907e685c7109083",
+    "apiContractEntry": "5df3a9f36ec4932b3ba562227680546f60acdb730b149cd750c8e9244fd182ca",
     "apiDto": "50f37331e5f3f398c803c15afee3a5f54cbbcab265e233d02098377ad78d9ac9",
     "apiGeneration": "75e502e31d13ac2018e9bfdc17e6bc939f24704fc04fd4a93008eb9c5cdffa12",
     "apiValidation": "af10f934201399fb91d995b81e77bffe8feff97d4698ccb54ec16fc522cdb9b5",
@@ -20,7 +20,7 @@
     "descriptorCandleRuntime": "029c15a82e7ddaa017839b19407fdea25c2608fab4d3201c09c4bf9e6216e369",
     "descriptorMlxFacts": "08ceb97ce2f0a45ae3978423fbf894160a425d74ca0af4303e2bbd3b99c98232",
     "descriptorMlxRuntime": "a9d5c24276d1c61e2e44e2f903b79235888c347e155ce3c3631621b4c06bb04e",
-    "descriptorPreviewFacts": "94529de3e0388ae8d0b196012b9a68585e327574c619bf6628bbc5e866eb991e",
+    "descriptorPreviewFacts": "fa8a482398c5c6d8b6979905444655a645e2a7f9c6fc609cb6e247904017601f",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
     "manifest": "54f6be00e4b71cce76c995c1e01ce34083f7ebed6bc4daf03bb681752699daba",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
@@ -56,7 +56,7 @@
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
     "workerTrainingDispatch": "7a1670cffbe9cbbc61ce4c4335bb14760132457a54d930c2b3c308c61d848f76",
-    "workerUtilityDispatch": "6173d8e8a0a7b24159b0f569bf54eb769f3203b3b46953af540b9cfcf460d089",
+    "workerUtilityDispatch": "635bd9aa2a01454091e49145d9fa86583242680f0dc996e5ab4dd36240790da5",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
     "workerVideoDispatch": "14ebc949a182da1ecc3af1ba5b38c584fd2d629a55e1d16d2e13f10c4ac84697",
