@@ -123,6 +123,20 @@ mod resolved_cache_promotion;
 // the production caller is cfg'd out, so allow dead_code there (the engines.rs precedent).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod generator_cache;
+// Resident-model cache for image→image `gen_core::Transform`s (the Iris-3B restorer, sc-25683): the
+// third thin wrapper over `cache_thread`, sharing one resident engine with the generator cache.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+mod transform_cache;
+// Iris-3B restoration (sc-25683): the engine's pure planner for the pre-submission preview (public:
+// the rust-api plan endpoint calls it), the cache-only install resolver, admission and the run.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub mod iris_restore;
 // sc-21027: MiniMax-H3's FL2VA provider labels its two conditioning-force boundaries. A Metal
 // watchdog timeout there poisons this process's command queue, so record the first timeout, refuse
 // the next claim, and clean-exit exactly once for the existing auto-worker supervisor to replace.

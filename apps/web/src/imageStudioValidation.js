@@ -74,10 +74,24 @@ export function imageGenerateValidation({
   // A restored alternate decoder cannot be reconciled or safely omitted until the platform
   // capability response identifies the active engine. Native selections never set this gate.
   decoderCapabilitiesPending = false,
+  // Iris restoration post-processing (sc-25683): the planner preview's status when the Upscale pass
+  // uses the Iris engine, else null. A refused plan blocks Generate with its reason (the request is
+  // never silently changed); a still-loading preview is a silent requirement.
+  restorePlan = null,
 } = {}) {
   const issues = [];
   if (!activeProject) {
     issues.push(issue.requirement("project", "Open a project to generate"));
+  }
+  if (restorePlan?.blocked) {
+    issues.push(
+      issue.error(
+        "upscale",
+        restorePlan.error ? `Iris restoration cannot run: ${restorePlan.error}` : "Iris restoration cannot run as set.",
+      ),
+    );
+  } else if (restorePlan && !restorePlan.ready) {
+    issues.push(issue.requirement("upscale", "Planning the Iris restoration…"));
   }
   // A structured model needs caption content; everyone else a plain prompt. Both are
   // "you haven't written it yet" — silent, the empty field speaks for itself.

@@ -231,3 +231,114 @@ async fn iris_worker_gpu_smoke() {
         rendered_path.display(),
     );
 }
+
+/// Real-weight worker acceptance for Iris-3B RESTORATION on Candle/CUDA (sc-25683): the production
+/// `image_upscale` dispatch with `engine: "iris"` — cache-only resolution of the task's own
+/// `upscaler/` export (no text encoder), admission, the cached `candle-gen-iris` restore transform,
+/// per-tile progress — for a multi-tile 4× (512x384 → 2048x1536, 6 tiles) and a 1× restore. The
+/// `iris_worker_gpu_smoke` filter of the dispatch-only `iris-worker-smoke` job selects this too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "real-weight worker GPU smoke; needs the pinned speridlabs/iris-3b upscaler/ export under HF_HUB_CACHE and a CUDA device"]
+async fn iris_worker_gpu_smoke_restore() {
+    let hf_hub_cache = PathBuf::from(
+        std::env::var("HF_HUB_CACHE").expect("set $HF_HUB_CACHE to the real-weights hub"),
+    );
+    assert!(hf_hub_cache.is_dir(), "HF_HUB_CACHE is not a directory");
+    let temp = tempfile::tempdir().expect("smoke tempdir creates");
+    let (api_url, posts) = spawn_worker_api_stub().await;
+    let mut settings = Settings::for_test(temp.path().join("data"));
+    settings.api_url = api_url;
+    settings.config_dir = temp.path().join("config");
+    settings.worker_id = "iris-smoke-worker".to_owned();
+    settings.gpu_id = "cuda".to_owned();
+    settings.backend_candle_enabled = true;
+    settings.heartbeat_seconds = 30;
+    let (export_dir, _) = crate::iris_restore::resolve_restore_export_dir(&settings)
+        .expect("HF_HUB_CACHE must already hold the iris_3b_restore upscaler/ export");
+
+    let store = ProjectStore::new(settings.data_dir.clone(), "iris-smoke");
+    let project = store
+        .create_project("Iris-3B CUDA restore smoke")
+        .expect("smoke project creates");
+    let source_file = temp.path().join("source.png");
+    image::RgbImage::from_fn(512, 384, |x, y| {
+        image::Rgb([
+            (x % 256) as u8,
+            (y % 256) as u8,
+            ((x / 8 + y / 8) % 2 * 200) as u8,
+        ])
+    })
+    .save(&source_file)
+    .expect("source writes");
+    let source = store
+        .import_asset(
+            &project.id,
+            sceneworks_core::project_store::UploadAsset {
+                filename: "source.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: source_file,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .expect("source imports");
+    let source_id = source["id"].as_str().expect("asset id").to_owned();
+
+    for (scale, expected, tiles) in [(4.0, (2048u32, 1536u32), 6usize), (1.0, (512, 384), 2)] {
+        posts.lock().expect("progress posts lock").clear();
+        let mut snapshot = stub_job_snapshot(JOB_ID);
+        snapshot["type"] = json!("image_upscale");
+        snapshot["payload"] = json!({
+            "projectId": project.id,
+            "sourceAssetId": source_id,
+            "engine": "iris",
+            "scale": scale,
+        });
+        let job: JobSnapshot = serde_json::from_value(snapshot).expect("smoke job deserializes");
+        let api = ApiClient::new(&settings);
+        let started = std::time::Instant::now();
+        crate::upscale_jobs::run_image_upscale_job(&api, &settings, &job)
+            .await
+            .unwrap_or_else(|error| panic!("the Iris CUDA restore at {scale}x completes: {error}"));
+        let elapsed = started.elapsed();
+        let posts = posts.lock().expect("progress posts lock").clone();
+        let tile_posts = posts
+            .iter()
+            .filter(|(_, body)| {
+                body.get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| message.starts_with("Restoring tile"))
+            })
+            .count();
+        assert_eq!(tile_posts, tiles, "one progress post per planned tile");
+        let result = posts
+            .iter()
+            .rev()
+            .find(|(_, body)| body["status"] == "completed")
+            .map(|(_, body)| body["result"].clone())
+            .expect("the job posted a completed result");
+        let asset = &result["assetWrites"][0];
+        let path = PathBuf::from(&project.path).join(asset["mediaPath"].as_str().expect("path"));
+        let decoded = image::open(&path).expect("restored asset opens").to_rgb8();
+        assert_eq!(decoded.dimensions(), expected);
+        let restored = gen_core::Image {
+            width: decoded.width(),
+            height: decoded.height(),
+            pixels: decoded.into_raw(),
+        };
+        let std = crate::smoke_support::image_std(&restored);
+        assert!(
+            std > crate::smoke_support::DEGENERATE_STD_FLOOR_DEFAULT,
+            "the restored image looks degenerate (RGB std {std:.2})"
+        );
+        eprintln!(
+            "RESULT status=pass model=iris_3b_restore backend=candle scale={scale} geometry={}x{} \
+             tiles={tiles} elapsed_s={:.1} rgb_std={std:.3} export={} output={}",
+            restored.width,
+            restored.height,
+            elapsed.as_secs_f64(),
+            export_dir.display(),
+            path.display(),
+        );
+    }
+}

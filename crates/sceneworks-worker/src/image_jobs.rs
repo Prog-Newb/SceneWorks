@@ -2468,6 +2468,55 @@ pub(crate) fn standalone_upscale_workflow_share(
     )
 }
 
+/// The workflow envelope for a standalone Iris restoration (`image_upscale` with `engine: "iris"`,
+/// sc-25683). The same rule as [`standalone_upscale_workflow_share`] — the pass is a distinct job, so
+/// nothing is inherited from whatever generated the source — with the Iris controls in place of the
+/// factor: the APPLIED scale, input sizing and colour fix the engine ran (`plan`), never the requested
+/// ones. Geometry is the SOURCE image's, so the recipe reads "this image, restored at N×".
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+pub(crate) fn standalone_restore_workflow_share(
+    job_payload: &JsonObject,
+    plan: &gen_core::iris::restoration::RestorationPlan,
+) -> Option<sceneworks_core::workflow_share::WorkflowShare> {
+    let mut overlay = job_payload.clone();
+    overlay.insert("upscale".to_owned(), iris_upscale_overlay(plan));
+    embeddable_workflow_share(
+        &WorkflowAssetFacts {
+            mode: "image_upscale".to_owned(),
+            model: crate::iris_restore::IRIS_RESTORE_MODEL_ID.to_owned(),
+            prompt: String::new(),
+            negative_prompt: String::new(),
+            seed: 0,
+            width: Some(plan.source.width),
+            height: Some(plan.source.height),
+        },
+        &overlay,
+    )
+}
+
+/// The envelope's `upscale` record for an applied Iris restoration: exactly the reopenable controls.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+pub(crate) fn iris_upscale_overlay(plan: &gen_core::iris::restoration::RestorationPlan) -> Value {
+    json!({
+        "enabled": true,
+        "engine": sceneworks_core::image_restoration::IRIS_RESTORE_ENGINE,
+        "scale": plan.scale,
+        "inputSizing": match plan.input_sizing {
+            gen_core::InputSizing::Budgeted => "budgeted",
+            gen_core::InputSizing::Original => "original",
+        },
+        "colorFix": plan.color_fix,
+    })
+}
+
 impl ImagePlan {
     /// Test-only convenience: a plan whose image count is the request count, embedding nothing.
     /// Production always goes through [`ImagePlan::with_count`] (the FLUX.2 angle/pose sets need an
@@ -2929,6 +2978,20 @@ async fn apply_inline_upscale(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    // Iris restoration (sc-25683) is sized by `scale`, not `factor`, and runs as a transform.
+    if request.upscale.is_iris() {
+        return apply_inline_iris_restore(
+            api,
+            settings,
+            job,
+            plan,
+            project_path,
+            backend,
+            asset_writes,
+            crate::iris_restore::registry_transform_loader,
+        )
+        .await;
+    }
     let factor: u8 = if request.upscale.factor == 4 { 4 } else { 2 };
     let engine_id = normalize_upscale_engine(&request.upscale.engine);
     let softness = request.upscale.softness();
@@ -3018,11 +3081,127 @@ async fn apply_inline_upscale(
                 &engine_for_task,
                 factor,
                 softness,
+                None,
                 &project_path_for_task,
             )
         })
         .await
         .map_err(|error| crate::task_join_error("upscaled asset write task", error))??;
+        asset_writes.push(Value::Object(fact));
+        heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    }
+    Ok(())
+}
+
+/// The Image Studio inline post-processing pass with the Iris restoration engine (sc-25683): restore
+/// every base image the generation produced into a second, lineage-linked asset. Same placement and
+/// lifetime as the other engines' inline pass (the base images are already streamed, so they persist
+/// if a late restore refuses or is canceled; a canceled restore writes nothing for its image).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_inline_iris_restore(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+    loader: crate::iris_restore::TransformLoader,
+) -> WorkerResult<()> {
+    let params = plan
+        .request
+        .upscale
+        .iris_params()
+        .map_err(|error| WorkerError::InvalidPayload(format!("upscale: {error}")))?;
+    let base_facts: Vec<JsonObject> = asset_writes
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|fact| fact.get("type").and_then(Value::as_str) == Some("image"))
+        .cloned()
+        .collect();
+    let total_images = base_facts.len();
+
+    for (i, base_fact) in base_facts.iter().enumerate() {
+        check_cancel(api, &job.id, "Iris restoration canceled by user.").await?;
+        let media_rel = base_fact
+            .get("mediaPath")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("restoration source asset missing mediaPath".to_owned())
+            })?;
+        let source_path = project_path.join(media_rel);
+        let (source, source_alpha) = tokio::task::spawn_blocking(move || {
+            crate::iris_restore::decode_oriented(&source_path)
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "Restoration source could not be loaded: {error}"
+                    ))
+                })
+                .map(|decoded| split_alpha(&decoded))
+        })
+        .await
+        .map_err(|error| crate::task_join_error("restoration source decode task", error))??;
+
+        let streaming = streaming_result(plan, asset_writes);
+        let backend_label = backend.to_owned();
+        let index = i + 1;
+        update_job(
+            api,
+            &job.id,
+            image_progress(
+                JobStatus::Running,
+                ProgressStage::Running,
+                0.9,
+                &format!("Restoring image {index}/{total_images} with Iris."),
+                Some(streaming.clone()),
+                backend,
+            ),
+        )
+        .await?;
+        let outcome = crate::upscale_jobs::restore_with_progress(
+            api,
+            settings,
+            &job.id,
+            loader,
+            source,
+            params,
+            move |current, total| {
+                image_progress(
+                    JobStatus::Running,
+                    ProgressStage::Running,
+                    0.9,
+                    &format!(
+                        "Restoring image {index}/{total_images} with Iris: tile {current}/{total}."
+                    ),
+                    Some(streaming.clone()),
+                    &backend_label,
+                )
+            },
+        )
+        .await?;
+
+        let plan_for_task = plan.clone();
+        let base_fact_for_task = base_fact.clone();
+        let project_path_for_task = project_path.to_owned();
+        let fact = tokio::task::spawn_blocking(move || {
+            write_upscaled_asset(
+                &plan_for_task,
+                &base_fact_for_task,
+                &outcome.image,
+                source_alpha.as_ref(),
+                sceneworks_core::image_restoration::IRIS_RESTORE_ENGINE,
+                0,
+                0.0,
+                Some(&outcome.plan),
+                &project_path_for_task,
+            )
+        })
+        .await
+        .map_err(|error| crate::task_join_error("restored asset write task", error))??;
         asset_writes.push(Value::Object(fact));
         heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     }
@@ -3047,17 +3226,24 @@ fn write_upscaled_asset(
     engine_id: &str,
     factor: u8,
     softness: f32,
+    // The applied Iris restoration plan (sc-25683) when the pass was the `iris` engine — it sizes by
+    // `scale`, so `factor`/`softness` are unused and the record/name/lineage carry the plan instead.
+    iris: Option<&gen_core::iris::restoration::RestorationPlan>,
     project_path: &Path,
 ) -> WorkerResult<JsonObject> {
     let request = &plan.request;
     let index = base_fact.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
     let (width, height) = (upscaled.width(), upscaled.height());
+    let size_tag = match iris {
+        Some(iris) => format!("iris{}x", crate::iris_restore::format_scale(iris.scale)),
+        None => format!("up{factor}x"),
+    };
 
     // Sanitize the untrusted model id before it becomes a path component (F-003 / sc-11159),
     // mirroring `write_image_asset` so the upscaled variant is confined identically.
     let model_slug = slugify(&request.model, "model", None);
     let filename = format!(
-        "{}_{}_{}_{:04}_up{factor}x.png",
+        "{}_{}_{}_{:04}_{size_tag}.png",
         &plan.created_at[..10],
         model_slug,
         plan.slug,
@@ -3071,10 +3257,18 @@ fn write_upscaled_asset(
     // The APPLIED pass, not the requested one. Hoisted above the write because two things now read
     // it: the embedded workflow (sc-15948) and the `rawAdapterSettings.upscale` record below, and a
     // shared image must not describe a different pass from the one the sidecar records.
-    let upscale_record = if engine_id == "seedvr2" {
+    let upscale_record = if let Some(iris) = iris {
+        crate::iris_restore::applied_settings_record(iris)
+    } else if engine_id == "seedvr2" {
         json!({ "enabled": true, "engine": engine_id, "factor": factor, "softness": softness })
     } else {
         json!({ "enabled": true, "engine": engine_id, "factor": factor })
+    };
+    // The envelope carries the reopenable controls only (the record's plan/dimension facts are
+    // sidecar observability, not a recipe).
+    let envelope_record = match iris {
+        Some(iris) => iris_upscale_overlay(iris),
+        None => upscale_record.clone(),
     };
 
     let temp_path = media_path.with_extension("tmp.png");
@@ -3083,7 +3277,7 @@ fn write_upscaled_asset(
     let mut share = plan
         .workflow_source
         .as_deref()
-        .and_then(|payload| upscaled_workflow_share(request, base_fact, payload, &upscale_record));
+        .and_then(|payload| upscaled_workflow_share(request, base_fact, payload, &envelope_record));
     if let Some(share) = share.as_mut() {
         share.model_hash = plan.model_hash.clone();
         share.loras = plan.loras.clone();
@@ -3100,7 +3294,13 @@ fn write_upscaled_asset(
         .get("displayName")
         .and_then(Value::as_str)
         .unwrap_or("Generated image");
-    let display_name = format!("{base_display} ({factor}x upscaled)");
+    let display_name = match iris {
+        Some(iris) => format!(
+            "{base_display} ({})",
+            crate::iris_restore::display_suffix(iris)
+        ),
+        None => format!("{base_display} ({factor}x upscaled)"),
+    };
 
     // rawAdapterSettings: the base settings + an `upscale` record (mirrors the Python worker so the
     // gallery / preset restore can read back the engine/factor/softness).
@@ -3135,7 +3335,18 @@ fn write_upscaled_asset(
         .unwrap_or_default();
     extra.insert("isUpscaled".to_owned(), json!(true));
     extra.insert("upscaledFromAssetId".to_owned(), source_asset_id);
-    extra.insert("factor".to_owned(), json!(factor));
+    match iris {
+        Some(iris) => {
+            extra.insert("scale".to_owned(), json!(iris.scale));
+            extra.insert(
+                "restoration".to_owned(),
+                json!(crate::iris_restore::RestorePlanView::from_plan(iris)),
+            );
+        }
+        None => {
+            extra.insert("factor".to_owned(), json!(factor));
+        }
+    }
     extra.insert("engine".to_owned(), json!(engine_id));
     fact.insert("extra".to_owned(), Value::Object(extra));
     Ok(fact)

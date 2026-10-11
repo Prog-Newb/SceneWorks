@@ -760,6 +760,29 @@ impl ImageUpscaleRequest {
             .map(|value| value.clamp(0.0, 1.0) as f32)
             .unwrap_or(0.0)
     }
+
+    /// Whether this block selects the Iris-3B restoration engine (sc-25683).
+    pub fn is_iris(&self) -> bool {
+        crate::image_restoration::is_iris_engine(&self.engine)
+    }
+
+    /// The Iris-only controls (`scale` / `inputSizing` / `colorFix`) carried in the flattened
+    /// extras, as a JSON object for [`crate::image_restoration`]'s shared parse.
+    pub fn iris_controls(&self) -> JsonObject {
+        crate::image_restoration::IRIS_ONLY_KEYS
+            .iter()
+            .filter_map(|key| {
+                self.extra
+                    .get(*key)
+                    .map(|value| ((*key).to_owned(), value.clone()))
+            })
+            .collect()
+    }
+
+    /// The parsed Iris restoration controls (a typed refusal for a malformed one).
+    pub fn iris_params(&self) -> Result<crate::image_restoration::IrisRestoreParams, String> {
+        crate::image_restoration::parse_iris_restore_params(&self.iris_controls())
+    }
 }
 
 pub const fn default_image_upscale_factor() -> u8 {

@@ -1,15 +1,15 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:671e02993bad8bb45ff4ba8b5d7ea7e6ada305c24f9127f44a29fc34665c01a0",
+    "sceneWorksRevision": "source-tree:33fd9c55f59cde7eacbb8f17b4aff3d8b5fae32d02e0c30ba6cd8154b0128095",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "f3ae84d3e010ece415f513cb13d2753773eac645a0fd77f7df7367f688326c25"
+        "sha256": "b29eceadfb56124cad8d6f48b7eef424f83fb8e8bf1dd9f4755d9a40a18ca251"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "8897bc33d0d291b767f24e320132bd7c3b2ec4e88ed68aec1cd40460cad92c03"
+        "sha256": "e28489880e98df0de133f40f38d5622579c224b5b9eda25228068c72c5ec2388"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
@@ -17,7 +17,7 @@
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "7f60deb9b8d9400fc4ef5d584b951eef83b6d41965b994f188d645b1a8540ce1"
+        "sha256": "a4a3b83b70164138c7613ffd8498e09c03e5d2cf7d7d3ad43669565643f7a499"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",

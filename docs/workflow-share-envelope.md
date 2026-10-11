@@ -301,6 +301,9 @@ keys in either direction: a key this table does not name is dropped on write **a
 | `upscale.factor` | The upscale factor. |
 | `upscale.engine` | The upscale engine label. |
 | `upscale.softness` | The upscale softness. |
+| `upscale.scale` | The Iris restoration output scale (any positive factor; 1 restores without resizing). |
+| `upscale.inputSizing` | The Iris restoration input sizing: `budgeted` or `original`. |
+| `upscale.colorFix` | Whether the Iris restoration colour correction ran. |
 | `loras[].name` | For a generated image, the safe readable stem of the exact adapter filename. It associates the prompt tag with the hash map but is not resource identity. A foreign or unresolved recipe may instead carry its portable display hint. |
 | `loras[].weight` | Its weight. |
 | `loras[].repo` | Its Hugging Face `owner/name`, when the catalog entry resolved to one. Never a path, never a local id. |

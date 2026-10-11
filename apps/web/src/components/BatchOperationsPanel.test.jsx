@@ -35,6 +35,7 @@ describe("BatchOperationsPanel (sc-6112)", () => {
     await act(async () => root.unmount());
     container.remove();
     vi.clearAllMocks();
+    vi.restoreAllMocks();
   });
 
   const mount = (props) =>
@@ -76,6 +77,59 @@ describe("BatchOperationsPanel (sc-6112)", () => {
     const [op, params] = onRun.mock.calls[0];
     expect(op).toBe("upscale");
     expect(params).toMatchObject({ engine: "real-esrgan", factor: 4 });
+  });
+
+  it("runs Iris restoration with its own controls, gated on the planner preview of the selection (sc-25683)", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        items: [
+          { assetId: "a", plan: { summary: "4×: 512x384 → 2048x1536 (processed at 2048x1536 in 6 tiles)" }, error: null },
+          { assetId: "b", plan: { summary: "budgeted: 683x512 input → 2732x2048 (4× of the budgeted input; source 4032x3024, processed at 2736x2048 in 15 tiles)" }, error: null },
+        ],
+      }),
+    });
+    const onRun = vi.fn();
+    await mount({
+      onRun,
+      projectId: "p1",
+      token: "t",
+      upscaleEngines: [...upscaleEngines, { key: "iris", label: "Iris restore", factors: [4], restoration: true }],
+    });
+    const engineSelect = document.body.querySelector(".batch-ops-params select");
+    await act(async () => {
+      engineSelect.value = "iris";
+      engineSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    // No factor select for a restoration engine; Run waits for the plan.
+    expect(document.body.querySelector(".batch-ops-params").textContent).not.toContain("Factor");
+    expect(runButton().disabled).toBe(true);
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 260)));
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).toEqual({ projectId: "p1", assetIds: ["a", "b"], scale: 4, inputSizing: "budgeted", colorFix: true });
+    expect(document.body.querySelector(".iris-restore-preview").textContent).toContain("budgeted: 683x512 input → 2732x2048");
+    expect(runButton().disabled).toBe(false);
+    await act(async () => runButton().click());
+    expect(onRun).toHaveBeenCalledWith("upscale", {
+      engine: "iris",
+      restore: { scale: 4, inputSizing: "budgeted", colorFix: true },
+    });
+  });
+
+  it("blocks an Iris batch when any selected image's plan is refused", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ items: [{ assetId: "a", plan: null, error: "over the 8192px-per-side limit" }] }),
+    });
+    await mount({
+      projectId: "p1",
+      upscaleEngines: [{ key: "iris", label: "Iris restore", factors: [4], restoration: true }],
+    });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 260)));
+    expect(runButton().disabled).toBe(true);
+    expect(document.body.textContent).toContain("Cannot restore: over the 8192px-per-side limit");
   });
 
   it("requires a prompt for the edit op, then passes the prompt + model", async () => {

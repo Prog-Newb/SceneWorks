@@ -1161,6 +1161,8 @@ pub(crate) fn caption_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// Engine defaults to `real-esrgan` when absent (mirrors `run_image_upscale`).
 /// SeedVR2 runs here through MLX on Mac and through the native Candle/CUDA backend on Windows/Linux
 /// (sc-5928 / sc-5160). The platform capability mirrors those two production lanes.
+/// `iris` (sc-25683) is the Iris-3B restoration transform (`iris_3b_restore`), registered by both
+/// native bundles (`mlx-gen-iris` / `candle-gen-iris`), so it is served by both lanes too.
 pub(crate) fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if !matches!(job.job_type, JobType::ImageUpscale) {
         return false;
@@ -1174,7 +1176,7 @@ pub(crate) fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     matches!(
         engine.as_str(),
         "" | "real-esrgan" | "realesrgan" | "real_esrgan" | "seedvr2"
-    )
+    ) || crate::image_restoration::is_iris_engine(&engine)
 }
 
 /// Whether a `video_upscale` job is MLX-eligible (epic 4811 / sc-4816). The only Mac engine is the
@@ -1195,17 +1197,23 @@ pub(crate) fn video_upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     matches!(engine.as_str(), "" | "seedvr2" | "seedvr2_3b")
 }
 
-/// Whether an `image_upscale` job explicitly requests the SeedVR2 engine (`engine=seedvr2`, the id the
-/// web sends and the worker accepts). SeedVR2 runs on MLX (Mac) or candle (Windows/Linux), so this
-/// also drives every generic worker descriptor's refusal (the inverse of the AuraSR gate).
-/// The image default engine is Real-ESRGAN, so an absent engine is NOT SeedVR2.
+/// Whether an `image_upscale` job explicitly requests a NATIVE-ONLY engine: SeedVR2 (`engine=seedvr2`)
+/// or the Iris-3B restoration transform (`engine=iris`, sc-25683). Both run on MLX (Mac) or candle
+/// (Windows/Linux) only, so this drives every generic worker descriptor's refusal (the inverse of the
+/// AuraSR gate). The image default engine is Real-ESRGAN, so an absent engine is neither.
+///
+/// The persisted claim fact keeps its historical `claim_seedvr2_upscale` column name; what it means
+/// is "a native-only upscale engine was requested".
 pub(crate) fn upscale_job_requests_seedvr2(job: &JobSnapshot) -> bool {
     matches!(job.job_type, JobType::ImageUpscale)
         && job
             .payload
             .get("engine")
             .and_then(Value::as_str)
-            .is_some_and(|engine| engine.trim().eq_ignore_ascii_case("seedvr2"))
+            .is_some_and(|engine| {
+                engine.trim().eq_ignore_ascii_case("seedvr2")
+                    || crate::image_restoration::is_iris_engine(engine)
+            })
 }
 
 /// Whether this training job targets a native-only kernel (see
