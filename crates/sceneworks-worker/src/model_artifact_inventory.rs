@@ -201,6 +201,15 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             entrypoint: TypedResolverEntrypoint::PinnedComponent,
         },
     },
+    // sc-25683: the Iris-3B restoration task resolves its own `upscaler/` export from the pinned
+    // `iris_3b_restore` snapshot (cache-only), like the other upscaler weights.
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/iris_restore.rs"],
+        categories: &[Category::Image, Category::OptionalComponent],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
+        },
+    },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/upscale_jobs.rs"],
         categories: &[Category::Image, Category::OptionalComponent],
