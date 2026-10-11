@@ -222,7 +222,7 @@ on:
         type: boolean
         default: false
       run_iris_worker_smoke:
-        description: "Run the Iris-3B Candle worker jobs once on real weights (sc-25680 generation 512², 30 steps; sc-25682 depth on a 1024x768 EXIF-rotated photo; sc-25683 restoration jobs (4x 6-tile + 1x); sc-25686 Iris LoRA training; snapshots must already be in E:\\huggingface\\hub)"
+        description: "Run the Iris-3B Candle worker jobs once on real weights (sc-25680 generation 512², 30 steps, with sc-25681 non-default controls + a stamped LoRA and a 2-prompt native prompt batch; sc-25682 depth on a 1024x768 EXIF-rotated photo; sc-25683 restoration jobs (4x 6-tile + 1x); sc-25686 Iris LoRA training; snapshots must already be in E:\\huggingface\\hub)"
         required: false
         type: boolean
         default: false
@@ -1664,7 +1664,10 @@ jobs:
 
   # SC-25680 (epic 25678): one real-weight Iris-3B `image_generate` job through the production Candle
   # worker arm, on the real-weights card. Dispatch only — never on PR/push — and bounded (one 512²
-  # image, 30 steps). Offline: the pinned speridlabs/iris-3b + Qwen3-VL-4B-Instruct snapshots must
+  # image, 30 steps). SC-25681: non-default controls (euler, shift, CFG interval, caption overflow)
+  # plus a tiny stamped generation-task LoRA the test writes itself; preview, warning and adapter
+  # provenance are asserted, then a 2-prompt × count-1 NATIVE prompt batch (one engine call, two
+  # assets) runs in the same filter. Offline: the pinned speridlabs/iris-3b + Qwen3-VL-4B-Instruct snapshots must
   # already be in E:\huggingface\hub (inference's `candle-iris` real-weight profile materializes
   # them there); a missing snapshot fails the job rather than downloading.
   # SC-25682 extends it with one real-weight `image_depth` job (`iris_worker_gpu_smoke_depth`, matched

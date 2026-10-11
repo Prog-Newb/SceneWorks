@@ -32,6 +32,7 @@ pub mod hf_repo_renames;
 pub mod ideogram_caption;
 pub mod image_request;
 pub mod image_restoration;
+pub mod image_sampling_controls;
 pub mod jobs_store;
 pub mod jsonc;
 pub mod license_acknowledgments;

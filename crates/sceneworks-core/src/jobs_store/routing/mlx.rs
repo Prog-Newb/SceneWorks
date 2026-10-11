@@ -464,12 +464,13 @@ pub(crate) fn mage_flow_mlx_eligible(payload: &Map<String, Value>) -> bool {
         || has_nonempty_nested_array(payload, "advanced", "poses"))
 }
 
-/// Iris-3B generation (sc-25679) is plain text-to-image: the `iris_3b` engine takes no source,
-/// reference, mask, control, pose or adapter, and has no quant tier — it refuses `LoadSpec::quantize`
-/// and `adapters` by name. An enabled hires fix is refused too: its second pass is an img2img
-/// refinement (a `Reference` at the hires strength) the engine refuses, after a full first pass.
-/// Any such carrier keeps the job off MLX (an `mlx_unsupported` affordance) instead of reaching an
-/// engine that would refuse it.
+/// Iris-3B generation (sc-25679) is text-to-image: the `iris_3b` engine takes no source, reference,
+/// mask, control or pose, and has no quant tier — it refuses `LoadSpec::quantize` by name. It DOES
+/// apply generation-task LoRA / LoKr adapters (sc-25681): `loras` routes, and the API's Iris task
+/// gate plus the engine's stamp check refuse an incompatible file. An enabled hires fix is refused:
+/// its second pass is an img2img refinement (a `Reference` at the hires strength) the engine refuses,
+/// after a full first pass. Any refused carrier keeps the job off MLX (an `mlx_unsupported`
+/// affordance) instead of reaching an engine that would refuse it.
 pub(crate) fn iris_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let hires_fix_enabled = payload
         .get("hiresFix")
@@ -479,7 +480,6 @@ pub(crate) fn iris_mlx_eligible(payload: &Map<String, Value>) -> bool {
         .unwrap_or(false);
     !hires_fix_enabled
         && mage_flow_mlx_eligible(payload)
-        && !has_nonempty_or_malformed_array(payload, "loras")
         && !["mlxQuantize", "quantTier"]
             .iter()
             .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))

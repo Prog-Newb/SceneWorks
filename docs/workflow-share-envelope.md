@@ -390,6 +390,8 @@ smuggled under a scalar key.
 | `sampler` | `Scalar` | Sampler choice. |
 | `scheduler` | `Scalar` | Scheduler choice. |
 | `schedulerShift` | `Scalar` | Time-shift (mu) for the curated schedule. |
+| `cfgInterval` | `NumberPair` | Classifier-free-guidance interval `[start, end]` in model time (Iris-3B). Any other shape is dropped. |
+| `captionOverflow` | `Scalar` | Caption-overflow policy (`warn` / `error` / `silent`) for an over-long prompt (Iris-3B). |
 | `steps` | `Scalar` | Step-count override. |
 | `guidanceScale` | `Scalar` | Guidance override. |
 | `guidanceMethod` | `Scalar` | Guidance method (CFG / CFG++). |

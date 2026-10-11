@@ -295,6 +295,7 @@ fn pulid_memory_route_context() -> crate::memory_route_registry::MemoryRouteRequ
 
 fn pulid_memory_inputs(width: u32, height: u32) -> crate::mlx_fit_gate::MlxRequestInputs {
     crate::mlx_fit_gate::MlxRequestInputs {
+        native_batch: 1,
         width,
         height,
         // The worker drives outputs one at a time and opens one provider request scope per item.

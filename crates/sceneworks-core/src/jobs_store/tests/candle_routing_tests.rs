@@ -5617,7 +5617,8 @@ fn iris_routes_to_candle_for_plain_text_to_image_only() {
     use crate::jobs_store::routing::mlx::image_request_mlx_eligible;
 
     assert!(CANDLE_ROUTED_MODELS.contains(&"iris_3b"));
-    assert!(!candle_family_serves_lora("iris_3b") && !candle_family_serves_quant("iris_3b"));
+    // sc-25681: generation-task adapters apply on the candle lane too; still no quant tier.
+    assert!(candle_family_serves_lora("iris_3b") && !candle_family_serves_quant("iris_3b"));
     let eligible = |payload: Value| image_request_candle_eligible("iris_3b", &object(payload));
     assert!(eligible(
         json!({ "model": "iris_3b", "mode": "text_to_image" })
@@ -5641,6 +5642,21 @@ fn iris_routes_to_candle_for_plain_text_to_image_only() {
         &candle,
         &image_generate_job(json!({ "model": "iris_3b", "prompt": "a lighthouse at dusk" }))
     ));
+    // sc-25681: a LoRA / LoKr stack routes to the candle lane like the MLX one.
+    let with_adapter = json!({
+        "model": "iris_3b",
+        "prompt": "a lighthouse at dusk",
+        "loras": [{ "id": "l", "weight": 0.8 }]
+    });
+    assert!(eligible(with_adapter.clone()));
+    assert!(image_request_mlx_eligible(
+        "iris_3b",
+        &object(with_adapter.clone())
+    ));
+    assert!(worker_supports_job(
+        &candle,
+        &image_generate_job(with_adapter)
+    ));
     for refused in [
         json!({ "mode": "edit_image", "sourceAssetId": "a" }),
         json!({ "referenceAssetId": "a" }),
@@ -5648,7 +5664,6 @@ fn iris_routes_to_candle_for_plain_text_to_image_only() {
         json!({ "maskAssetId": "a" }),
         json!({ "controls": [{}] }),
         json!({ "advanced": { "poses": [{}] } }),
-        json!({ "loras": [{ "id": "l" }] }),
         json!({ "advanced": { "mlxQuantize": 8 } }),
         json!({ "advanced": { "quantTier": "nvfp4" } }),
         json!({ "hiresFix": { "enabled": true } }),

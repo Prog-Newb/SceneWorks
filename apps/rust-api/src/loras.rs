@@ -1579,6 +1579,20 @@ pub(crate) fn validate_lora_specs_for_model(
         // to notice.
         //
         // Absent `modelIds` means family gating alone, so no existing entry is tightened.
+        // The Iris TASK gate (sc-25681): Iris's generation, depth and restoration backbones share
+        // one architecture, so family cannot tell their adapters apart — the adapter's `irisTask`
+        // stamp (recorded at import, re-read from the file header here) must name the model's
+        // declared `loraCompatibility.irisTask`, and an unstamped file is refused. Inert for every
+        // model that declares no Iris task.
+        if let Some(message) = sceneworks_core::lora_family::iris_adapter_refusal(
+            model,
+            model_id,
+            lora_id,
+            lora,
+            header.as_ref(),
+        ) {
+            return Err(ApiError::bad_request(message));
+        }
         let declared_model_ids = lora_model_ids(lora);
         if !declared_model_ids.is_empty() && !declared_model_ids.iter().any(|id| id == model_id) {
             return Err(ApiError::bad_request(format!(
@@ -2409,6 +2423,110 @@ mod base_model_gating_tests {
                 "loraCompatibility": { "families": ["ltx-video"] }
             }),
         ]
+    }
+
+    /// The SHIPPED `iris_3b` row (sc-25681).
+    fn shipped_iris_model() -> Value {
+        let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")
+                .expect("builtin.models.jsonc embedded")
+                .1,
+        ))
+        .expect("builtin.models.jsonc parses");
+        shipped["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "iris_3b")
+            .expect("iris_3b is shipped")
+            .clone()
+    }
+
+    fn write_stamped_adapter(dir: &std::path::Path, name: &str, metadata: Value) -> String {
+        let header = json!({
+            "__metadata__": metadata,
+            "blocks.0.attn.qkv.lora_down.weight": { "dtype": "F32", "shape": [1], "data_offsets": [0, 4] }
+        })
+        .to_string();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&[0; 4]);
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path.display().to_string()
+    }
+
+    /// sc-25681: on the shipped Iris row, a generation-stamped LoRA/LoKr is admitted; another
+    /// family, another Iris task, and an unstamped file are refused with a typed reason — read
+    /// from the recorded entry AND the file header.
+    ///
+    /// *Mutation that reds this:* remove the `iris_adapter_refusal` call.
+    #[test]
+    fn iris_adapters_are_gated_on_the_generation_task_stamp() {
+        let models = vec![shipped_iris_model()];
+        let dir = tempfile::tempdir().unwrap();
+        let stamped =
+            |task: &str| json!({ "family": "iris", "irisTask": task, "baseModel": "iris_3b" });
+        let cases = [
+            (
+                "lora",
+                json!({ "irisTask": "generation" }),
+                stamped("generation"),
+                None,
+            ),
+            (
+                "lokr",
+                json!({ "irisTask": "generation", "networkType": "lokr" }),
+                json!({ "family": "iris", "irisTask": "generation", "networkType": "lokr" }),
+                None,
+            ),
+            (
+                "depth",
+                json!({ "irisTask": "depth" }),
+                stamped("depth"),
+                Some("Iris depth task"),
+            ),
+            // The entry claims generation but the FILE says depth: the header wins.
+            (
+                "forged",
+                json!({ "irisTask": "generation" }),
+                stamped("depth"),
+                Some("Iris depth task"),
+            ),
+            (
+                "unstamped",
+                json!({}),
+                json!({ "family": "iris" }),
+                Some("no Iris task stamp"),
+            ),
+        ];
+        for (name, extra, metadata, refusal) in cases {
+            let path = write_stamped_adapter(dir.path(), &format!("{name}.safetensors"), metadata);
+            let mut lora = json!({ "id": name, "families": ["iris"], "path": path });
+            for (key, value) in extra.as_object().unwrap() {
+                lora[key] = value.clone();
+            }
+            let outcome =
+                validate_lora_specs_for_model(&models, &[], "iris_3b", &[lora], true, "LoRA");
+            match refusal {
+                None => {
+                    outcome.unwrap_or_else(|error| panic!("{name} must be admitted: {error:?}"));
+                }
+                Some(fragment) => {
+                    let error = outcome.expect_err(name);
+                    assert!(format!("{error:?}").contains(fragment), "{name}: {error:?}");
+                }
+            }
+        }
+        // Another family's LoRA never reaches the task gate: the family gate refuses it.
+        let flux =
+            write_stamped_adapter(dir.path(), "flux.safetensors", json!({ "family": "flux" }));
+        let lora = json!({ "id": "flux", "families": ["flux"], "path": flux });
+        let error = validate_lora_specs_for_model(&models, &[], "iris_3b", &[lora], true, "LoRA")
+            .expect_err("a flux LoRA is not an Iris adapter");
+        assert!(format!("{error:?}").contains("flux"), "{error:?}");
     }
 
     #[test]

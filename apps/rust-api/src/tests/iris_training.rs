@@ -761,3 +761,112 @@ async fn parquet_import_forwards_caption_field_columns() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
 }
+
+/// The S7 adapter (Training Studio) meets the S3 adapter gate (sc-25681): a registered Iris LoRA
+/// whose file carries the engine's stamp (`family=iris`, `irisTask=generation`,
+/// `baseModel=iris_3b`) is accepted on an `iris_3b` image job — the shipped entry's
+/// `loraCompatibility` (families `iris`, `irisTask` generation) admits it end to end.
+#[tokio::test]
+async fn a_trained_iris_adapter_is_accepted_by_the_iris_image_job_gate() {
+    let _env = iris_env("256");
+    let temp_dir = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp_dir);
+    // The catalog is the SHIPPED `iris_3b` row alone — no stand-in adapter host: its
+    // `loraCompatibility` must satisfy both the training family guardrail and the image-job gate.
+    seed_installed_training_base(&settings.data_dir, "iris_3b");
+    let manifests = settings.config_dir.join("manifests");
+    std::fs::create_dir_all(&manifests).expect("manifest dir");
+    let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc embedded")
+            .1,
+    ))
+    .expect("builtin.models.jsonc parses");
+    let iris = shipped["models"]
+        .as_array()
+        .expect("models")
+        .iter()
+        .find(|model| model["id"] == "iris_3b")
+        .expect("iris_3b is shipped")
+        .clone();
+    std::fs::write(
+        manifests.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": [iris] }).to_string(),
+    )
+    .expect("builtin models writes");
+    let app = create_app(settings.clone()).unwrap();
+    let project_id = project(&app).await;
+    let dataset_id = dataset(&app, &project_id, one_item()).await;
+    let target = iris_target(&app).await;
+    let (status, job) = submit(
+        &app,
+        &project_id,
+        &dataset_id,
+        target["defaults"].clone(),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let job_id = job["id"].as_str().unwrap().to_owned();
+    let plan = &job["payload"]["plan"];
+    let output_dir = std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
+    let file_name = plan["output"]["fileName"].as_str().unwrap().to_owned();
+
+    claim_training_job_as_mlx_worker(&app, &job_id).await;
+    std::fs::create_dir_all(&output_dir).unwrap();
+    // What the Iris trainer writes: an adapter whose safetensors metadata names its task identity.
+    let header = json!({
+        "__metadata__": { "family": "iris", "irisTask": "generation", "baseModel": "iris_3b" },
+        "blocks.0.attn.qkv.lora_down.weight": { "dtype": "F32", "shape": [1], "data_offsets": [0, 4] }
+    })
+    .to_string();
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend_from_slice(header.as_bytes());
+    bytes.extend_from_slice(&[0; 4]);
+    std::fs::write(output_dir.join(&file_name), bytes).unwrap();
+    let completed = complete(&app, &job_id, "completed", json!({})).await;
+    assert_eq!(completed["result"]["loraRegistered"], true, "{completed}");
+
+    let (_, loras) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    let lora_id = loras
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "Iris Style")
+        .expect("the adapter is registered")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, generation) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "iris_3b",
+            "mode": "text_to_image",
+            "prompt": "a lighthouse",
+            "width": 512,
+            "height": 512,
+            "count": 1,
+            "loras": [{ "id": lora_id, "weight": 0.8 }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{generation}");
+    assert!(
+        generation["payload"]["loras"]
+            .as_array()
+            .is_some_and(|loras| loras.iter().any(|lora| lora["id"] == json!(lora_id))),
+        "{generation:#}"
+    );
+}

@@ -10,9 +10,9 @@
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "ab881e4a6f95692b8a96dac8164fd86da73c6274eaf74eb0dee20d488841c9a3",
-    "apiDto": "58d81445e42b63b0a53d61e6fd32097f51f1414e3f55cc1eaa9c9c196d28f0eb",
-    "apiGeneration": "75e502e31d13ac2018e9bfdc17e6bc939f24704fc04fd4a93008eb9c5cdffa12",
+    "apiContractEntry": "040fb5e7c2d2d091adbc52f511fdf1594e1203b25fb7d8b35a9086c8f2a3ea1d",
+    "apiDto": "197b762bafece03c09a66404fc0021be240a78471d30d07128e0da6e5d398a9e",
+    "apiGeneration": "2b2784c851c5d43cfc59db8d43b008a0a3bb1176b9a66b34239c4a02ae9b364d",
     "apiValidation": "bb76d5dcef7d3799be2ea50eab72aa7135e837548d6270511f7d436f24449d7d",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
     "descriptorAudioFacts": "701d4120bef0920a05178ace2ec320cdd87cf5f3b7a318cde3625a86c47ed62c",
@@ -22,18 +22,18 @@
     "descriptorMlxRuntime": "25f70add7328405e55fe18ef26d24461828b72d07453a1b178d1a28fa3ac6006",
     "descriptorPreviewFacts": "fa8a482398c5c6d8b6979905444655a645e2a7f9c6fc609cb6e247904017601f",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "716c7d326bae20cff7823e469c7670865291eee2c8932f8474343a6f64b8384c",
-    "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
-    "routerCandle": "f2c232e63686bfc8692ffa7052044d4d6b9578f81ce4dce15f6292531cb84917",
-    "routerCatalog": "34c0b74b1ae7ae3ddb830760ce4a99db9dc5493638bc562669abdfdde7067794",
-    "routerGaps": "27a59308ea6862b281befae9c4f6caaae6a6ac62992da9ba4086be728ec1d90d",
-    "routerMlx": "2d8ca145498672937b07ecc09725a9de46ad7bb8b6ad5654650b3f9cc50a4034",
+    "manifest": "fe8b6f7c9c94541493e4f31d35ff9461b96082361a50c7b9071a22b423e245b5",
+    "modelImportDefaults": "1316249a2897f775ba4d4645cc5c76bea3ecfa4bbb703ce93160053ef9701e34",
+    "routerCandle": "156af2279f102889749275a2868306f0e789181e6a48e8914fec02864a474650",
+    "routerCatalog": "c930f1e37299214805edb4dcd425b1bde8541393f601fd9ec6b45407c9af7987",
+    "routerGaps": "ad24733ac45b8b7abd401440be65017b71a79a006d8084e124824f95e89089cd",
+    "routerMlx": "4bf1d959a93f2c35b8e608aac4e6957807de7dd3749524d06d9139059295f054",
     "scheduler": "6af81b64a988d199625a8d738e4f018370605b076afeee64216254796d41a7a6",
     "trainingCatalog": "66df64efedb130a4a39986a202648e1d775c2e3567211d10117986a057d63a82",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
-    "webImageAdvanced": "685edcd46c3b986eec15916c31261ec5b18e527d6c70b76a0fbacff7c9487b8d",
-    "webImageRequest": "aa2081a13221fcb996f8ea50d6251d46e16ec91eb98fd94e6074c2929853e909",
+    "webImageAdvanced": "16c4dc222a2ebe6072bfddf445b8d19d9b6bc82ef8f04bdc9313a013f2d17579",
+    "webImageRequest": "55d0130e36d1c2b1192dcada746ae4b0e035ad1d07d779b801bb453564833680",
     "webMacGating": "edd5caead44b6cd56f0306fbcf2078e2a6b391fcb130ad1f859cda6cc3aa9ae3",
     "webPreviewGating": "0db03f8997f27f8e205ed262ac2ed951d6002c29b53aeea4bae38da40739c077",
     "webSimpleAudio": "b2782f4e1363bfc0f5c71402261b8863cd7f47d0b5545fc975c1cd4dd87b03c4",
@@ -45,13 +45,13 @@
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
-    "workerDispatch": "027c405770b96ee53c5b4d5a17b198754a8ac5e77930f9cfa2c7b420f9ffc244",
+    "workerDispatch": "4abff0bc2014813ac2b6b9d49d6fc16d9c48d87c4547ebb76b54d35c795c7918",
     "workerEngineTable": "85d32676e6f2ea02fb6ff94a5bf21aa80275c032574219a9c7c7fa6f4a32ebb4",
     "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
-    "workerImageDispatch": "7515fad6feabcdc8209ef401bbe77f2fdbbfe820ee23ec140634116f9434dbab",
-    "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
-    "workerImageMageFinetuned": "e00a6ccd9b811cda73073e0bd8270e58ab60c4a8a8e647f18f3fdec9c30a0935",
-    "workerImagePulid": "992ac547e891d30ae485411506bb9088961224653a5a89c2699fa2cd879a985f",
+    "workerImageDispatch": "a3c25da9d6245cc70dc9dd6762ea8ec8f8b622cce409c5c19eb125f86f064724",
+    "workerImageKreaImported": "6fbc8d9a80bc03a295bcbf39c6c11298e7fba33f4d702dc5a06f328ac9eb4c1b",
+    "workerImageMageFinetuned": "da5a75e976782f92c6561ad3b7f9e364bb03c74d12e7f77a8658727d8ae85d80",
+    "workerImagePulid": "f2ffa16632abb63110c1250412e8517b1e3c3b38f5dde0efb6847e09a2954cdc",
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
@@ -2068,13 +2068,13 @@
       "userAdapters": [
         {
           "capability": "lora",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "lokr",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "precisionTier": [

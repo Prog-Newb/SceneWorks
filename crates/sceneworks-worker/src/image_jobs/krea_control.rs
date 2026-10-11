@@ -92,6 +92,7 @@ fn krea_control_memory_inputs(
         "character_image" | "image_to_image" | "image_generation" | "text_to_image"
     ));
     crate::mlx_fit_gate::MlxRequestInputs {
+        native_batch: 1,
         width,
         height,
         count: 1,

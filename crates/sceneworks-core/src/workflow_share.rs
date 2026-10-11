@@ -1260,6 +1260,9 @@ pub enum AdvancedShape {
     Poses,
     /// The Krea multi-phase denoise list, reduced to `{ steps, guidance, loras:[{index, weight}] }`.
     Phases,
+    /// A `[start, end]` pair of finite numbers (the CFG interval, sc-25681). Anything else —
+    /// another length, a string, a nested value — is dropped, like an object under a scalar key.
+    NumberPair,
 }
 
 /// One classified `advanced` key.
@@ -1363,6 +1366,18 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         "schedulerShift",
         AdvancedShape::Scalar,
         "Authored time-shift (mu) for the curated schedule.",
+    ),
+    allow(
+        "cfgInterval",
+        AdvancedShape::NumberPair,
+        "Authored classifier-free-guidance interval [start, end] in model time (sc-25681, \
+         Iris-3B): which denoise steps guidance runs on — changes the picture, names nothing local.",
+    ),
+    allow(
+        "captionOverflow",
+        AdvancedShape::Scalar,
+        "Authored caption-overflow policy (warn / error / silent, sc-25681): whether an over-long \
+         prompt is truncated or refused — authored intent about the prompt, not a hardware budget.",
     ),
     allow(
         "steps",
@@ -2949,6 +2964,7 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
             AdvancedShape::StructuredPrompt => sanitize_structured_prompt(value),
             AdvancedShape::Poses => sanitize_poses(value),
             AdvancedShape::Phases => sanitize_phases(value),
+            AdvancedShape::NumberPair => sanitize_number_pair(value),
         };
         if let Some(sanitized) = sanitized {
             out.insert(key.clone(), sanitized);
@@ -2988,6 +3004,13 @@ fn sanitize_scalar(key: &str, value: &Value) -> Option<Value> {
         // close: it is how a path reaches the file through a key that is otherwise allowed.
         _ => None,
     }
+}
+
+fn sanitize_number_pair(value: &Value) -> Option<Value> {
+    let pair = value.as_array().filter(|pair| pair.len() == 2)?;
+    pair.iter()
+        .all(|number| number.as_f64().is_some_and(f64::is_finite))
+        .then(|| value.clone())
 }
 
 fn sanitize_structured_prompt(value: &Value) -> Option<Value> {

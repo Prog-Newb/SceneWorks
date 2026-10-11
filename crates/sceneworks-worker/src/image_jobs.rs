@@ -1699,6 +1699,23 @@ pub(crate) async fn run_image_generate_job(
     // window.
     drop(preload_heartbeat);
 
+    // A render's non-fatal engine warnings (sc-25681, e.g. Iris's `caption_truncated`) are on each
+    // asset's provenance; the completion message names them too, so the user sees them on the job
+    // without opening an asset.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    let warnings = lane_controls::job_warning_messages(&asset_writes);
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    let warnings: Vec<String> = Vec::new();
+    let mut message = format!("Generated {} image(s).", plan.image_count);
+    if !warnings.is_empty() {
+        message.push_str(&format!(" Warning: {}", warnings.join(" ")));
+    }
     update_job(
         api,
         &job.id,
@@ -1706,7 +1723,7 @@ pub(crate) async fn run_image_generate_job(
             JobStatus::Completed,
             ProgressStage::Completed,
             1.0,
-            &format!("Generated {} image(s).", plan.image_count),
+            &message,
             Some(streaming_result(&plan, &asset_writes)),
             backend,
         ),
@@ -2755,6 +2772,10 @@ pub(crate) fn reattach_alpha(
     }))
 }
 
+/// `rawAdapterSettings` key of a native prompt batch's full prompt list (sc-25681), recorded on
+/// every image of the batch so reopening any one restores the batch.
+pub(crate) const PROMPT_BATCH_KEY: &str = "promptBatch";
+
 /// Save image `index` (its engine `pixels`, 3- or 4-channel) under `assets/images/` and return the
 /// flat fact the API turns into an indexed asset (every key here is consumed by
 /// `build_image_sidecar_parts`). Shared by the stub and real paths.
@@ -2815,6 +2836,14 @@ pub(crate) fn write_image_asset(
     let requested_channels =
         crate::qwen_alpha::resolve_output_channels(&request.model, &request.advanced)?;
     crate::qwen_alpha::record_requested_channels(&mut raw_settings, requested_channels);
+    // A native prompt batch (sc-25681): THIS image's prompt is `prompts[index % len]`, and the
+    // whole list is recorded (worker-owned — a replayed `advanced` can never forge it) so the
+    // studio reopens the batch, not just this one prompt.
+    let prompt = request.image_prompt(index).to_owned();
+    raw_settings.remove(PROMPT_BATCH_KEY);
+    if !request.prompts.is_empty() {
+        raw_settings.insert(PROMPT_BATCH_KEY.to_owned(), json!(request.prompts));
+    }
 
     // Typed by the engine's channel count, not assumed to be three (sc-24111). See
     // `GeneratedPixels` for why this is the load-bearing line rather than the writer below.
@@ -2847,7 +2876,7 @@ pub(crate) fn write_image_asset(
             &WorkflowAssetFacts {
                 mode: request.mode.clone(),
                 model: request.model.clone(),
-                prompt: request.prompt.clone(),
+                prompt: prompt.clone(),
                 negative_prompt: request.negative_prompt.clone(),
                 // THIS image's seed, not the batch base the payload carries.
                 seed,
@@ -2885,7 +2914,7 @@ pub(crate) fn write_image_asset(
         let _ = std::fs::remove_file(&temp_path);
     })?;
 
-    let title: String = request.prompt.chars().take(56).collect();
+    let title: String = prompt.chars().take(56).collect();
     let title = title.trim();
     let display_name = format!(
         "{} #{}",
@@ -2929,7 +2958,7 @@ pub(crate) fn write_image_asset(
         "mode": request.mode,
         "model": request.model,
         "adapter": adapter,
-        "prompt": request.prompt,
+        "prompt": prompt,
         "negativePrompt": request.negative_prompt,
         "loras": request.loras,
         "stylePreset": request.style_preset,
@@ -3660,14 +3689,22 @@ fn lerp(a: u8, t: f32) -> u8 {
 // MLX/candle generator stream helpers.
 include!("image_jobs/stream.rs");
 
-// Iris-3B generation-task wiring (sc-25679 MLX / sc-25680 Candle): the CFG-bound negative prompt
-// and the withheld schedule shift, applied identically by the MLX `generate_stream` arm and the
-// Candle `generate_candle_stream` arm.
+// Iris-3B generation-task wiring (sc-25679 MLX / sc-25680 Candle / sc-25681 controls): its tests
+// drive the MLX `generate_stream` arm and the Candle `generate_candle_stream` arm end to end.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 mod iris;
+
+// The generic image lane's request controls beyond the positional knobs (CFG interval,
+// caption-overflow policy, CFG-bound negative prompt) and the per-image provenance facts (engine
+// warnings, adapter apply reports), resolved identically by both arms (sc-25681).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod lane_controls;
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 mod tier_resolver;

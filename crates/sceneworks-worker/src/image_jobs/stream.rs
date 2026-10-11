@@ -42,6 +42,18 @@ enum GenEvent {
         allow(dead_code)
     )]
     CheckpointWeightFacts { facts: Value },
+    /// Per-image provenance facts of image `index` (sc-25681): the engine's non-fatal warnings and
+    /// the applied adapter stack (`lane_controls::image_facts`). Sent before that image's
+    /// [`GenEvent::Image`] on the same channel; the consumer merges the block into that image's
+    /// `rawAdapterSettings`. Lanes with nothing to report never produce it.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        )),
+        allow(dead_code)
+    )]
+    ImageFacts { index: usize, facts: JsonObject },
     Image {
         index: usize,
         seed: i64,
@@ -103,6 +115,19 @@ impl PromptEnhancementEventSink {
                 report,
             });
         })
+    }
+}
+
+impl PromptEnhancementEventSink {
+    /// Report image `index`'s provenance facts (sc-25681) on the same per-item channel the
+    /// prompt-enhancement report rides. Load-bearing like that report, so it blocks rather than
+    /// dropping under channel pressure; it is sent before the image itself, so the consumer holds
+    /// it when the image is written.
+    fn send_image_facts(&self, facts: JsonObject) {
+        let _ = self.tx.blocking_send(GenEvent::ImageFacts {
+            index: self.index,
+            facts,
+        });
     }
 }
 
@@ -318,6 +343,51 @@ where
             break;
         };
         if !send_scored_generated_image(&tx, index, image) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Drive ONE engine call that renders a whole native prompt batch (sc-25681): its progress rides
+/// image 0's channel, then each returned image `k` (engine order — prompt-minor) is published as
+/// image `k` on seed `seed + k`, the seed the engine drew its noise from, after its provenance
+/// `facts`. A cancel or an engine failure inside the call returns before any image is sent, so a
+/// partial batch is never published; a count that is not `expected` is a typed engine failure.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+fn drive_native_prompt_batch<F>(
+    tx: tokio::sync::mpsc::Sender<GenEvent>,
+    seed: i64,
+    expected: usize,
+    generate: F,
+) -> WorkerResult<()>
+where
+    F: FnOnce(
+        gen_core::PreviewSink,
+        &mut dyn FnMut(Progress),
+    ) -> WorkerResult<(Vec<(u32, u32, Vec<u8>)>, Option<JsonObject>)>,
+{
+    let _cache_release = RequestCacheRelease;
+    let mut on_progress = |progress| send_gen_progress(&tx, 0, progress);
+    let (images, facts) = generate(preview_sink_for(&tx, 0), &mut on_progress)?;
+    if images.len() != expected {
+        return Err(WorkerError::Engine(format!(
+            "the prompt batch returned {} images, expected {expected}",
+            images.len()
+        )));
+    }
+    for (index, (width, height, pixels)) in images.into_iter().enumerate() {
+        if let Some(facts) = facts.clone() {
+            let _ = tx.blocking_send(GenEvent::ImageFacts { index, facts });
+        }
+        let image = (seed.wrapping_add(index as i64), width, height, pixels);
+        if !send_generated_image(&tx, index, image) {
             break;
         }
     }

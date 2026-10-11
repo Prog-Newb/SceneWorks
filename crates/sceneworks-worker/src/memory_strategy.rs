@@ -173,6 +173,45 @@ pub fn generate_with_scope(
     context: Option<&gen_core::MemoryRunContext>,
     on_progress: &mut dyn FnMut(gen_core::Progress),
 ) -> gen_core::Result<gen_core::GenerationOutput> {
+    run_with_scope(
+        generator,
+        request,
+        context,
+        on_progress,
+        |generator, request, on_progress| generator.generate(request, on_progress),
+    )
+}
+
+/// [`generate_with_scope`] through [`gen_core::Generator::generate_with_report`] (sc-25681): the
+/// same scope lifecycle, returning the render's non-fatal warnings with its output. The trait's
+/// default `generate_with_report` is exactly `generate`, so a provider that reports nothing renders
+/// byte-for-byte as it does through [`generate_with_scope`].
+pub fn generate_with_scope_report(
+    generator: &dyn gen_core::Generator,
+    request: &mut gen_core::GenerationRequest,
+    context: Option<&gen_core::MemoryRunContext>,
+    on_progress: &mut dyn FnMut(gen_core::Progress),
+) -> gen_core::Result<gen_core::GenerationReport> {
+    run_with_scope(
+        generator,
+        request,
+        context,
+        on_progress,
+        |generator, request, on_progress| generator.generate_with_report(request, on_progress),
+    )
+}
+
+fn run_with_scope<T>(
+    generator: &dyn gen_core::Generator,
+    request: &mut gen_core::GenerationRequest,
+    context: Option<&gen_core::MemoryRunContext>,
+    on_progress: &mut dyn FnMut(gen_core::Progress),
+    run: impl FnOnce(
+        &dyn gen_core::Generator,
+        &gen_core::GenerationRequest,
+        &mut dyn FnMut(gen_core::Progress),
+    ) -> gen_core::Result<T>,
+) -> gen_core::Result<T> {
     let execution_domains =
         crate::execution_planner::plan_request_execution_domains(generator, request);
     if !execution_domains.is_empty() {
@@ -190,7 +229,7 @@ pub fn generate_with_scope(
         );
     }
     let Some(context) = context else {
-        return generator.generate(request, on_progress);
+        return run(generator, request, on_progress);
     };
     if let gen_core::MemorySafetyDecision::Reject { reason } =
         generator.memory_strategy_safety_check(context)
@@ -213,7 +252,7 @@ pub fn generate_with_scope(
             return Err(error);
         }
     }
-    let result = generator.generate(request, on_progress);
+    let result = run(generator, request, on_progress);
     if let Some(scope) = scope.as_mut() {
         let outcome = match &result {
             Ok(_) => gen_core::MemoryRunOutcome::Complete,

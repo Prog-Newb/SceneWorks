@@ -194,7 +194,22 @@ export function maxStepsForModel(model) {
 // ("" = use the model default). Absent declaration = never inert.
 export function negativePromptInertAtGuidance(model, guidanceOverride) {
   if (model?.image?.negativePromptRequiresGuidance !== true) return false;
+  return guidanceIsOff(model, guidanceOverride);
+}
+
+// Is classifier-free guidance OFF at this override (sc-25681)? Exactly 1.0 — the override, or the
+// model default when the override is cleared — is CFG off (the engines' `uses_cfg` test).
+export function guidanceIsOff(model, guidanceOverride) {
   const override = guidanceOverride === "" || guidanceOverride == null ? Number.NaN : Number(guidanceOverride);
   const effective = Number.isFinite(override) ? override : guidanceDefaultFromModel(model);
   return effective === 1;
+}
+
+// The patch-grid hint (sc-25681): `image.patchGridVisibleBelow` (Iris-3B, 1024) — informational,
+// the size is never restricted.
+export function patchGridHint(model, width, height) {
+  const side = model?.image?.patchGridVisibleBelow;
+  return side > 0 && (width < side || height < side)
+    ? `Below ${side}px a side, ${model.name} shows a visible patch grid.`
+    : null;
 }

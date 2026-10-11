@@ -489,8 +489,15 @@ mod flux2_dev_gpu_smoke;
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod imported_nvfp4_gpu_smoke;
 // Real-weight end-to-end worker smoke for Iris-3B on Candle/CUDA (sc-25680): one production
-// `image_generate` job through the shipped catalog entry and the generic text_encoder seam.
-#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+// `image_generate` job through the shipped catalog entry and the generic text_encoder seam. The
+// native prompt-batch smoke (sc-25681) also runs on the macOS/MLX lane.
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
 mod iris_gpu_smoke;
 // Real-weight Iris-3B generation TRAINING smoke (sc-25685 MLX / sc-25686 Candle): one bounded LoRA
 // `lora_train` job through the production executor, then the adapter applied by an `image_generate`

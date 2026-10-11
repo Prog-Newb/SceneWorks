@@ -12375,6 +12375,223 @@ async fn image_sampler_off_the_models_menu_is_rejected() {
     );
 }
 
+/// A temp app whose catalog is the SHIPPED `iris_3b` row plus an undeclaring `plain_image`, and
+/// a project in it.
+async fn iris_and_plain_app() -> (tempfile::TempDir, axum::Router, String) {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc embedded")
+            .1,
+    ))
+    .expect("builtin.models.jsonc parses");
+    let iris = shipped["models"]
+        .as_array()
+        .expect("models")
+        .iter()
+        .find(|model| model["id"] == "iris_3b")
+        .expect("iris_3b is shipped")
+        .clone();
+    let plain = json!({
+        "id": "plain_image",
+        "name": "Plain",
+        "family": "z-image",
+        "type": "image",
+        "adapter": "z_image_diffusers",
+        "capabilities": ["text_to_image"],
+        "downloads": [
+            { "provider": "huggingface", "repo": "owner/plain", "files": ["*.safetensors"], "default": true }
+        ],
+        "paths": {},
+        "defaults": { "steps": 8, "guidanceScale": 3.0 },
+        "limits": {},
+        "ui": { "label": "Plain" }
+    });
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": [iris, plain] }).to_string(),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Iris Controls Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    (temp_dir, app, project_id)
+}
+
+/// sc-25681: the SHIPPED Iris-3B row's sampling controls at image enqueue. Every control it
+/// declares (solver order as a sampler, schedule shift, CFG interval, caption-overflow policy,
+/// negative prompt under CFG) is admitted and travels VERBATIM into the job payload; a malformed
+/// value, an off-menu policy, and an interval or negative prompt at guidance 1.0 (inert there, and
+/// refused by the engine) are 400s before a job exists. A model that declares none of the new
+/// controls refuses them by name.
+#[tokio::test]
+async fn iris_sampling_controls_are_typed_at_image_enqueue() {
+    let (_temp_dir, app, project_id) = iris_and_plain_app().await;
+    let project_id = project_id.as_str();
+    let post = |model: &'static str, negative: &'static str, advanced: Value| {
+        let app = app.clone();
+        let body = json!({
+            "projectId": project_id,
+            "model": model,
+            "prompt": "a lighthouse",
+            "negativePrompt": negative,
+            "width": 512,
+            "height": 768,
+            "count": 2,
+            "seed": 7,
+            "advanced": advanced
+        });
+        async move { request(app, "POST", "/api/v1/image/jobs", body).await }
+    };
+
+    let full = json!({
+        "steps": 30,
+        "guidanceScale": 4.5,
+        "sampler": "euler",
+        "schedulerShift": 2.5,
+        "cfgInterval": [0.1, 0.9],
+        "captionOverflow": "error"
+    });
+    let (status, body) = post("iris_3b", "blurry", full.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "every declared control is admitted: {body}"
+    );
+    let payload = &body["payload"];
+    assert_eq!(payload["advanced"], full, "the controls travel verbatim");
+    assert_eq!(payload["negativePrompt"], "blurry");
+    assert_eq!(
+        (payload["width"].clone(), payload["height"].clone()),
+        (json!(512), json!(768))
+    );
+    assert_eq!(
+        (payload["count"].clone(), payload["seed"].clone()),
+        (json!(2), json!(7))
+    );
+
+    // CFG off with nothing CFG-bound is fine.
+    let (status, body) = post("iris_3b", "", json!({ "guidanceScale": 1.0 })).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    for (negative, advanced, fragment) in [
+        ("blurry", json!({ "guidanceScale": 1.0 }), "negative prompt"),
+        (
+            "",
+            json!({ "guidanceScale": 1.0, "cfgInterval": [0.2, 0.8] }),
+            "guidance interval",
+        ),
+        ("", json!({ "cfgInterval": [0.9, 0.1] }), "0 <= start"),
+        ("", json!({ "captionOverflow": "loud" }), "caption-overflow"),
+        ("", json!({ "schedulerShift": -1 }), "> 0"),
+        ("", json!({ "sampler": "heun" }), "does not offer"),
+    ] {
+        let (status, body) = post("iris_3b", negative, advanced.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{advanced}: {body}");
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("iris_3b") && detail.contains(fragment),
+            "{advanced}: {detail}"
+        );
+    }
+
+    for advanced in [
+        json!({ "cfgInterval": [0.2, 0.8] }),
+        json!({ "captionOverflow": "warn" }),
+    ] {
+        let (status, body) = post("plain_image", "", advanced.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{advanced}: {body}");
+    }
+    // The undeclared model keeps its historical behaviour for everything else.
+    let (status, body) = post("plain_image", "blurry", json!({ "guidanceScale": 1.0 })).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+/// sc-25681: a NATIVE prompt batch at image enqueue against the shipped Iris-3B row. Admitted
+/// (and forwarded verbatim) within the declared `prompts × count <= 8` cap with `prompt ==
+/// prompts[0]`; over the cap, a single-entry list, a `prompt` that is not `prompts[0]`, and a model
+/// that renders no native batch are 400s before a job exists.
+///
+/// *Mutation that reds this:* drop the `prompt_batch_error` call in `create_image_job`.
+#[tokio::test]
+async fn a_native_prompt_batch_is_typed_at_image_enqueue() {
+    let (_temp_dir, app, project_id) = iris_and_plain_app().await;
+    let post = |model: &'static str, prompt: &'static str, prompts: Value, count: u32| {
+        let app = app.clone();
+        let body = json!({
+            "projectId": project_id,
+            "model": model,
+            "prompt": prompt,
+            "prompts": prompts,
+            "width": 768,
+            "height": 768,
+            "count": count,
+            "seed": 11
+        });
+        async move { request(app, "POST", "/api/v1/image/jobs", body).await }
+    };
+    let (status, body) = post("iris_3b", "a cat", json!(["a cat", "a dog"]), 4).await;
+    assert_eq!(status, StatusCode::CREATED, "2 × 4 = 8 fits: {body}");
+    assert_eq!(body["payload"]["prompts"], json!(["a cat", "a dog"]));
+    assert_eq!(body["payload"]["prompt"], "a cat");
+    assert_eq!(body["payload"]["count"], 4);
+    // An ordinary request carries no `prompts` key at all.
+    let (status, body) = post("iris_3b", "a cat", json!([]), 1).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(body["payload"].get("prompts").is_none(), "{body}");
+    for (model, prompt, prompts, count, fragment) in [
+        (
+            "iris_3b",
+            "a cat",
+            json!(["a cat", "a dog"]),
+            5,
+            "10 images",
+        ),
+        ("iris_3b", "a cat", json!(["a cat"]), 1, "at least two"),
+        (
+            "iris_3b",
+            "a bird",
+            json!(["a cat", "a dog"]),
+            1,
+            "prompts[0]",
+        ),
+        (
+            "plain_image",
+            "a cat",
+            json!(["a cat", "a dog"]),
+            1,
+            "one job per prompt",
+        ),
+    ] {
+        let (status, body) = post(model, prompt, prompts.clone(), count).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{model} {prompts} ×{count}: {body}"
+        );
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(detail.contains(fragment), "{model} {prompts}: {detail}");
+    }
+    let (status, body) = post("iris_3b", "a cat", json!(["a cat", ""]), 1).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
 /// sc-24113: the rest of Qwen-Image 2.1's declared control surface, enforced at image enqueue —
 /// the ORDERED reference ceiling and the FREE-SIZE envelope.
 ///

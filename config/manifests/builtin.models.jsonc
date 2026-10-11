@@ -5877,13 +5877,16 @@
       // (gen_core::iris::TEXT_ENCODER_COMPONENT) from the pinned snapshot; it never downloads at
       // generation time.
       //
-      // CONTROL SURFACE (E3). The engine honours prompt, negative prompt (the CFG unconditional),
-      // size on a 16-px grid (16..=2048), count <= 8, seed, steps and guidance (= upstream
-      // cfg_scale). It refuses quantization by name; its sampler menu, schedule shift and LoRA/LoKr
-      // slot (the S3 controls work) are not on this entry's surface yet, so it declares no
-      // sampler/scheduler menu, no tier axis and no LoRA family.
-      // A negative prompt only exists under CFG: at guidance 1.0 the engine refuses one, so the
-      // entry declares `image.negativePromptRequiresGuidance` and both the UI and worker drop it.
+      // CONTROL SURFACE (E3) — exactly what the engine honours (sc-25681): prompt, negative prompt
+      // (the CFG unconditional), size on a 16-px grid (16..=2048), count <= 8, seed, steps,
+      // guidance (= upstream cfg_scale), the FlowDPM-Solver++ order as a sampler (`dpmpp_2m` =
+      // order 2, the default; `euler` = order 1), the schedule shift (upstream `shift`, default
+      // the checkpoint's flow.shift = 4.0; there is one shifted time grid, so no scheduler menu),
+      // the CFG interval, the caption-overflow policy, and generation-task LoRA/LoKr adapters
+      // stamped family=iris + irisTask=generation. Prediction target / train timesteps come from
+      // the checkpoint (no knob). It refuses quantization by name, so there is no tier axis.
+      // A negative prompt or a CFG interval only exists under CFG: at guidance 1.0 the engine
+      // refuses either, so the API refuses them and Image Studio disables both controls there.
       "id": "iris_3b",
       "name": "Iris 3B",
       "family": "iris",
@@ -5895,7 +5898,17 @@
       "macOnly": false,
       "capabilities": ["text_to_image"],
       "image": {
-        "negativePromptRequiresGuidance": true
+        "negativePromptRequiresGuidance": true,
+        "supportsSchedulerShift": true,
+        "supportsCfgInterval": true,
+        "captionOverflowPolicies": ["warn", "error", "silent"],
+        // The released checkpoint shows its 16-px patch grid below 1024² (upstream fp32 does too);
+        // Image Studio hints at it and never restricts the size.
+        "patchGridVisibleBelow": 1024,
+        // Upstream generate(prompts=[…]): one batched pass renders prompts × count <= 8 images
+        // (the engine's max_count), prompt-minor, image k on seed + k. Image Studio packs its prompt
+        // batch into these native jobs.
+        "maxPromptBatchImages": 8
       },
       "downloads": [
         // The upstream generation backbone, pulled directly (Apache-2.0; no SceneWorks re-host).
@@ -5934,10 +5947,13 @@
       },
       "gated": false,
       "defaults": {
-        // Release sampling defaults (gen_core::iris::DEFAULT_STEPS / DEFAULT_CFG_SCALE / DEFAULT_SIZE).
+        // Release sampling defaults (gen_core::iris::DEFAULT_STEPS / DEFAULT_CFG_SCALE / DEFAULT_SIZE
+        // / DEFAULT_SOLVER_ORDER, and the release config.yaml's flow.shift).
         "resolution": "1024x1024",
         "steps": 100,
         "guidanceScale": 3.0,
+        "sampler": "dpmpp_2m",
+        "schedulerShift": 4.0,
         "count": 1
       },
       "limits": {
@@ -5945,11 +5961,15 @@
         "count": [1, 2, 4, 8],
         "minDimension": 16,
         "maxDimension": 2048,
-        "requiresDimensionsMultipleOf": 16
+        "requiresDimensionsMultipleOf": 16,
+        // gen_core::iris::SAMPLERS, default first (both lanes advertise the same pair).
+        "samplers": ["dpmpp_2m", "euler"]
       },
       "loraCompatibility": {
-        "families": [],
-        "types": []
+        "families": ["iris"],
+        "types": ["style", "enhance", "character"],
+        // The task backbones share one architecture: only a generation-task stamp is offered here.
+        "irisTask": "generation"
       },
       "mlx": {
         // Conservative DECLARED floor (no measurement campaign): bf16 backbone (~6 GB) + Qwen3-VL-4B
@@ -5976,9 +5996,14 @@
         //   bits-derived key the gate can name: the single bf16 artifact has no tier subdir, so the gate
         //   names it from `advanced.mlxQuantize` (q8 by default).
         // Replaced by measured evidence at the epic-end campaign.
+        // * `promptBatchImageGb` — each EXTRA image of a native prompt batch (image.maxPromptBatchImages)
+        //   adds its pixel-space activations: the recorded 1024² resident peak minus the load peak
+        //   (21.4 − 15.7 = 5.7 GB), rounded up. The gate charges (images − 1) × this × max(1, MP) on
+        //   both predictions above; S6 (sc-25684) owns the measured value.
         "measured": false,
         "minMemoryGb": 24,
-        "sequentialPeakGb": { "bf16": 21.4, "q8": 21.4, "q4": 21.4 }
+        "sequentialPeakGb": { "bf16": 21.4, "q8": 21.4, "q4": 21.4 },
+        "promptBatchImageGb": 6.0
       },
       "ui": {
         "label": "Iris 3B",

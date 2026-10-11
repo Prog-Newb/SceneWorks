@@ -399,9 +399,9 @@ pub(crate) enum CandleImageRefusal {
     Phases,
     /// `advanced.mlxQuantize > 0` on a family that ships no packed tier.
     QuantTier,
-    /// Iris-3B (sc-25680): anything outside the plain text-to-image surface the MLX arm admits —
-    /// a non-`text_to_image` mode, controls, a quant carrier (`mlxQuantize` / `quantTier`), a user
-    /// LoRA, or an enabled hires fix. Delegates to [`iris_mlx_eligible`] so the two lanes refuse
+    /// Iris-3B (sc-25680): anything outside the text-to-image surface the MLX arm admits — a
+    /// non-`text_to_image` mode, controls, a quant carrier (`mlxQuantize` / `quantTier`), or an
+    /// enabled hires fix (adapters route since sc-25681). Delegates to [`iris_mlx_eligible`] so the two lanes refuse
     /// exactly the same list.
     IrisSurface,
 }
@@ -464,8 +464,8 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
     (CandleImageRefusal::IrisSurface, candle_refuses_iris_surface),
 ];
 
-/// Iris-3B (sc-25680) serves ONE request shape on both lanes: plain text-to-image with no source,
-/// reference, mask, control, pose, user LoRA, quant carrier or hires fix. The generic checks above
+/// Iris-3B (sc-25680) serves ONE request shape on both lanes: text-to-image with no source,
+/// reference, mask, control, pose, quant carrier or hires fix (its adapters route, sc-25681). The generic checks above
 /// already refuse most of those; this one closes the rest (`controls`, `quantTier`, a non-
 /// `text_to_image` mode, the hires-fix second pass) by DELEGATING to the MLX predicate instead of
 /// restating it, so the Candle and MLX lanes can never disagree about what Iris accepts. Last in the
