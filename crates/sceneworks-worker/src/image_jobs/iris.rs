@@ -1,96 +1,24 @@
 //! Iris-3B generation-task wiring (sc-25679, epic 25678).
 //!
-//! The `iris_3b` engine (`mlx-gen-iris`) loads the GENERATION task from two resources:
-//! `LoadSpec::weights` = the `speridlabs/iris-3b` backbone root (`config.yaml` + `model.safetensors`)
-//! and `LoadSpec::components["text_encoder"]` = the pinned `Qwen/Qwen3-VL-4B-Instruct` snapshot. The
-//! engine's descriptor advertises no `required_components` (the generic
-//! `attach_required_components` seam therefore stages nothing for it), so the generation task's
-//! resource set is read from the backend-neutral contract instead:
-//! [`gen_core::iris::IrisTask::Generation`] names the text encoder as a resource and
-//! [`gen_core::iris::TEXT_ENCODER_COMPONENT`] its component key. The component is resolved
-//! cache-only through the same all-or-nothing `coRequisite` seam every other split model uses, so a
-//! job never downloads at generation time and a missing encoder is a typed failure before load.
+//! The `iris_3b` engine loads the GENERATION task from two resources: `LoadSpec::weights` = the
+//! `speridlabs/iris-3b` backbone root (`config.yaml` + `model.safetensors`) and
+//! `LoadSpec::components["text_encoder"]` = the pinned `Qwen/Qwen3-VL-4B-Instruct` snapshot. The
+//! engine's descriptor declares `required_components: [TEXT_ENCODER_COMPONENT]`, so the generic
+//! `attach_required_components` seam stages the encoder cache-only through the catalog's
+//! all-or-nothing `coRequisite` (`componentId: "text_encoder"`): a job never downloads at
+//! generation time, and a missing or torn encoder is a typed failure before load (pinned by the
+//! tests below against the shipped catalog entry).
 //!
-//! The depth and restoration tasks (later stories) use [`IrisTask::uses_text_encoder`] = false and
-//! never reach this staging.
+//! This module carries only the Iris-specific request shaping the generic lane does not: the
+//! CFG-bound negative prompt and the withheld schedule shift.
 
-use gen_core::iris::{IrisTask, FAMILY, GENERATION_MODEL_ID, TEXT_ENCODER_COMPONENT};
-use gen_core::{LoadSpec, WeightsSource};
+use gen_core::iris::GENERATION_MODEL_ID;
 use sceneworks_core::contracts::JsonObject;
 use serde_json::Value;
-
-use crate::error::WorkerResult;
-use crate::settings::Settings;
 
 /// Is this registered engine id the Iris-3B generation route?
 pub(crate) fn is_iris_generation_engine(engine_id: &str) -> bool {
     engine_id == GENERATION_MODEL_ID
-}
-
-/// The component keys the Iris generation task stages besides its backbone, from the shared
-/// task contract (E4: only generation conditions on text).
-fn generation_components() -> &'static [&'static str] {
-    if IrisTask::Generation.uses_text_encoder() {
-        &[TEXT_ENCODER_COMPONENT]
-    } else {
-        &[]
-    }
-}
-
-/// Resolve the generation task's installed components (cache-only) for `model_id`'s catalog entry.
-/// All-or-nothing: a missing or torn co-requisite is a typed `InvalidPayload` naming the component
-/// and the Model Manager repair path, raised before any weights load.
-pub(crate) fn resolve_generation_components(
-    model_id: &str,
-    manifest_entry: &JsonObject,
-    settings: &Settings,
-) -> WorkerResult<Vec<(String, WeightsSource)>> {
-    let descriptor = gen_core::ModelDescriptor {
-        id: GENERATION_MODEL_ID,
-        family: FAMILY,
-        backend: "mlx",
-        modality: gen_core::Modality::Image,
-        capabilities: gen_core::Capabilities::default(),
-        encoder_contract: None,
-        denoiser_output_latent_space: None,
-        required_components: generation_components(),
-        control_kinds: None,
-    };
-    let manifest = Value::Object(manifest_entry.clone());
-    let components = crate::model_jobs::resolve_co_requisites(&descriptor, &manifest, settings)
-        .map_err(|error| match error {
-            crate::error::WorkerError::InvalidPayload(message) => {
-                crate::error::WorkerError::InvalidPayload(message.replacen(
-                    GENERATION_MODEL_ID,
-                    model_id,
-                    1,
-                ))
-            }
-            other => other,
-        })?;
-    Ok(components.into_iter().collect())
-}
-
-/// Stage the Iris generation task's components onto its `LoadSpec`. A no-op for every other
-/// engine, and for a component the generic descriptor seam already staged.
-pub(crate) fn attach_iris_generation_components(
-    spec: LoadSpec,
-    engine_id: &str,
-    model_id: &str,
-    manifest_entry: &JsonObject,
-    settings: &Settings,
-) -> WorkerResult<LoadSpec> {
-    if !is_iris_generation_engine(engine_id) {
-        return Ok(spec);
-    }
-    let components = resolve_generation_components(model_id, manifest_entry, settings)?;
-    Ok(components.into_iter().fold(spec, |spec, (id, source)| {
-        if spec.components.contains_key(&id) {
-            spec
-        } else {
-            spec.with_component(id, source)
-        }
-    }))
 }
 
 /// The manifest's `image.negativePromptRequiresGuidance` declaration: the negative prompt is the CFG
@@ -149,11 +77,12 @@ pub(crate) fn gate_negative_prompt_on_guidance(
     }
 }
 
-/// Iris has no scheduler axis yet: the engine refuses `scheduler_shift` by name. A stale or
-/// API-supplied `schedulerShift` therefore never reaches it (the Image Studio hides the scheduler
-/// controls for Iris, so a normal submit never carries one); a drop emits
-/// `sampling_knob_unsupported` (knob `schedulerShift`). This is the ONE seam that withholds the
-/// shift — delete it (and its call in `generate_stream`) when the engine honours `scheduler_shift`.
+/// This story's Iris surface does not expose the schedule shift: the Image Studio hides the
+/// scheduler controls for Iris, so a normal submit never carries one, and a stale or API-supplied
+/// `schedulerShift` is withheld here rather than forwarded. The engine at the pinned revision does
+/// honour `scheduler_shift` (the S3 controls work); the S3 SceneWorks half widens the surface by
+/// deleting this seam (and its call in `generate_stream`). A drop emits
+/// `sampling_knob_unsupported` (knob `schedulerShift`).
 pub(crate) fn honored_scheduler_shift(
     engine_id: &str,
     scheduler_shift: Option<f32>,
@@ -171,9 +100,9 @@ pub(crate) fn honored_scheduler_shift(
 
 /// The Iris text-encoder directory a resolved spec carries, for diagnostics/tests.
 #[cfg(test)]
-pub(crate) fn staged_text_encoder_dir(spec: &LoadSpec) -> Option<&std::path::Path> {
-    match spec.components.get(TEXT_ENCODER_COMPONENT) {
-        Some(WeightsSource::Dir(dir)) => Some(dir.as_path()),
+pub(crate) fn staged_text_encoder_dir(spec: &gen_core::LoadSpec) -> Option<&std::path::Path> {
+    match spec.components.get(gen_core::iris::TEXT_ENCODER_COMPONENT) {
+        Some(gen_core::WeightsSource::Dir(dir)) => Some(dir.as_path()),
         _ => None,
     }
 }
@@ -181,6 +110,10 @@ pub(crate) fn staged_text_encoder_dir(spec: &LoadSpec) -> Option<&std::path::Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::WorkerResult;
+    use crate::settings::Settings;
+    use gen_core::iris::{IrisTask, TEXT_ENCODER_COMPONENT};
+    use gen_core::{LoadSpec, WeightsSource};
     use serde_json::json;
     use std::path::Path;
 
@@ -250,7 +183,11 @@ mod tests {
 
     #[test]
     fn the_contract_names_only_the_text_encoder_for_generation() {
-        assert_eq!(generation_components(), &["text_encoder"]);
+        let descriptor = crate::inference_runtime::media_descriptor("iris_3b")
+            .expect("iris_3b is linked on macOS");
+        assert_eq!(descriptor.required_components, &[TEXT_ENCODER_COMPONENT]);
+        assert_eq!(TEXT_ENCODER_COMPONENT, "text_encoder");
+        assert!(IrisTask::Generation.uses_text_encoder());
         assert!(!IrisTask::Depth.uses_text_encoder());
         assert!(!IrisTask::Restoration.uses_text_encoder());
     }
@@ -262,9 +199,8 @@ mod tests {
         stage_text_encoder(data.path());
         let settings = settings_at(data.path());
         let backbone = data.path().join("backbone");
-        let spec = attach_iris_generation_components(
+        let spec = super::super::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(backbone.clone())),
-            "iris_3b",
             "iris_3b",
             &shipped_iris_entry(),
             &settings,
@@ -288,9 +224,8 @@ mod tests {
         let _env = isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let settings = settings_at(data.path());
-        let error = attach_iris_generation_components(
+        let error = super::super::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(data.path().join("backbone"))),
-            "iris_3b",
             "iris_3b",
             &shipped_iris_entry(),
             &settings,
@@ -311,29 +246,14 @@ mod tests {
         for file in ["config.json", "tokenizer.json", "tokenizer_config.json"] {
             stage(data.path(), TE_REPO, TE_REVISION, file);
         }
-        let error = attach_iris_generation_components(
+        let error = super::super::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(data.path().join("backbone"))),
-            "iris_3b",
             "iris_3b",
             &shipped_iris_entry(),
             &settings_at(data.path()),
         )
         .expect_err("torn encoder");
         assert!(error.to_string().contains("missing"), "{error}");
-    }
-
-    #[test]
-    fn other_engines_are_untouched() {
-        let data = tempfile::tempdir().unwrap();
-        let spec = attach_iris_generation_components(
-            LoadSpec::new(WeightsSource::Dir(data.path().to_path_buf())),
-            "mage_flow",
-            "mage_flow",
-            &JsonObject::new(),
-            &settings_at(data.path()),
-        )
-        .expect("no-op");
-        assert!(spec.components.is_empty());
     }
 
     const DROP: KnobDropContext<'static> = KnobDropContext {
@@ -438,10 +358,10 @@ mod tests {
         assert_eq!(events, Vec::<(String, Value)>::new());
     }
 
-    /// The generic lane derives what it forwards from the linked descriptor: Iris advertises no
-    /// quant tier (so `mlx_candidate_quant` never sets `LoadSpec::quantize`), no sampler/scheduler
-    /// names (so `normalize_sampling_knob` drops any requested one), and the catalog row offers none
-    /// of those controls, so the request carries exactly the engine-honored surface.
+    /// This story's honored-controls surface is the CATALOG row: the engine at the pinned revision
+    /// advertises more (samplers, LoRA/LoKr, cfg_interval, prompt batches — the S3 controls work,
+    /// whose SceneWorks half widens the row), but the row offers none of those controls and no quant
+    /// tier, so a normal submit carries exactly the guidance / negative-prompt / steps surface.
     #[test]
     fn the_linked_descriptor_and_catalog_expose_only_honored_controls() {
         let model = crate::engines::mlx_model("iris_3b").expect("iris_3b is linked on macOS");
@@ -449,8 +369,7 @@ mod tests {
         assert!(!model.supports_quant());
         assert!(model.supports_guidance() && model.supports_negative_prompt());
         let caps = &model.descriptor.capabilities;
-        assert!(caps.samplers.is_empty() && caps.schedulers.is_empty());
-        assert!(!caps.supports_lora && !caps.supports_lokr && !caps.supports_true_cfg);
+        assert!(caps.schedulers.is_empty() && !caps.supports_true_cfg);
         assert_eq!(model.default_steps(), gen_core::iris::DEFAULT_STEPS);
         assert_eq!(model.default_guidance(), gen_core::iris::DEFAULT_CFG_SCALE);
 

@@ -203,8 +203,8 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     },
     // Iris-3B generation task (sc-25679, epic 25678) — `mlx-gen-iris` registers `iris_3b`. The
     // backbone is the upstream `speridlabs/iris-3b` root; the Qwen3-VL text encoder is a separate
-    // catalog co-requisite staged as `LoadSpec::components["text_encoder"]`
-    // (`image_jobs::iris::attach_iris_text_encoder`). Defaults are the release's own
+    // catalog co-requisite the descriptor declares (`required_components: ["text_encoder"]`), staged
+    // as `LoadSpec::components["text_encoder"]` by the generic `attach_required_components`. Defaults are the release's own
     // (`gen_core::iris::DEFAULT_STEPS` / `DEFAULT_CFG_SCALE`), pinned by a test below.
     ModelRow {
         sceneworks_id: "iris_3b",

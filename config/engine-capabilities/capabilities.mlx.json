@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "1544a2889e53cc1f7adba1d49e8761b8acf03a63",
+    "inferenceRevision": "c9e76d0ddedc4937f89f1de6d587a78d1cc4b2d3",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -483,7 +483,7 @@
     {
       "id": "iris_3b",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "kolors",

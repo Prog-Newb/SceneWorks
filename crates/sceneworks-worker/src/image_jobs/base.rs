@@ -10018,18 +10018,10 @@ async fn generate_stream_using(
         // `tokenizer_clip_l` / `tokenizer_clip_bigg` / `vae_fp16_fix`) via the generic seam. Keyed on the
         // resolved `engine_id` (the DESCRIPTOR id) rather than `request.model`, so a finetune sibling that
         // shares one engine under a distinct catalog id resolves the same descriptor (media_descriptor matches
-        // on descriptor.id). Inert on macOS: the MLX SDXL turnkey is self-contained (no `required_components`).
+        // on descriptor.id). The MLX SDXL turnkey is self-contained (no `required_components`); Iris-3B
+        // stages its Qwen3-VL `text_encoder` here (sc-25679).
         spec =
             attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
-        // Iris-3B (sc-25679): the generation task's Qwen3-VL text encoder, from the shared task
-        // contract (its descriptor advertises no `required_components`). Cache-only; no-op otherwise.
-        spec = iris::attach_iris_generation_components(
-            spec,
-            engine_id,
-            &request.model,
-            &request.model_manifest_entry,
-            settings,
-        )?;
         // F3 alternate decoder: attach before both the provider-specific memory contract and the generic
         // MLX fit gate, so donor bytes + normal activation/OS margin are admitted as one composition.
         spec = attach_selected_decoder(spec, engine_id, request, settings)?;

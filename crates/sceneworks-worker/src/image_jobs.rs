@@ -3448,8 +3448,8 @@ fn lerp(a: u8, t: f32) -> u8 {
 // MLX/candle generator stream helpers.
 include!("image_jobs/stream.rs");
 
-// Iris-3B generation-task wiring (sc-25679): text-encoder component staging + the CFG-bound
-// negative prompt. MLX-only (the provider is `mac_only`), so macOS-only like `generate_stream`.
+// Iris-3B generation-task wiring (sc-25679): the CFG-bound negative prompt and the withheld
+// schedule shift. Used by the MLX `generate_stream` arm, so macOS-only like it.
 #[cfg(target_os = "macos")]
 mod iris;
 

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "1544a2889e53cc1f7adba1d49e8761b8acf03a63",
+    "inferenceRevision": "c9e76d0ddedc4937f89f1de6d587a78d1cc4b2d3",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -1312,12 +1312,15 @@
         "backend": "mlx",
         "modality": "image",
         "conditioning": [],
-        "supports_lora": false,
-        "supports_lokr": false,
+        "supports_lora": true,
+        "supports_lokr": true,
         "supported_quants": [],
-        "supports_preview": false,
+        "supports_preview": true,
         "supports_prompt_enhancement": false,
-        "samplers": [],
+        "samplers": [
+          "dpmpp_2m",
+          "euler"
+        ],
         "schedulers": [],
         "supported_guidance_methods": []
       },
@@ -2808,11 +2811,14 @@
         "supported_guidance_methods": []
       }
     ],
-    "transform_ids": [],
+    "transform_ids": [
+      "iris_3b_restore"
+    ],
     "trainer_ids": [
       "anima_base",
       "anima_aesthetic",
       "anima_turbo",
+      "iris_3b",
       "kolors",
       "krea_2_raw",
       "lens",
@@ -2898,6 +2904,30 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
+      },
+      {
+        "id": "iris_3b",
+        "family": "iris",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": true,
+        "max_reference_images": 0,
+        "supports_weight_noise": false,
+        "supports_depth_anchoring": false,
+        "supports_gradient_noise": false,
+        "supports_resolution_buckets": false,
+        "supports_subject_mask_loss": false,
+        "supports_identity_loss": false,
+        "supports_face_landmark_loss": false,
+        "supports_body_proportion_loss": false,
+        "supports_body_shape_loss": false,
+        "supports_normal_loss": false,
+        "supports_vae_anchor_loss": false,
         "supports_latent_lpips_loss": false,
         "supports_training_adapter": false
       },
