@@ -5,7 +5,7 @@
     "modelCount": 110,
     "importedFamilyCount": 4,
     "cellCount": 1017,
-    "mlxOnlyCellCount": 46,
+    "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
   },
@@ -17,7 +17,7 @@
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
     "descriptorAudioFacts": "701d4120bef0920a05178ace2ec320cdd87cf5f3b7a318cde3625a86c47ed62c",
     "descriptorCandleFacts": "af21a3a949f0db398eb05d39e7ff28e660450eb907e041d53dd2d21642f6239a",
-    "descriptorCandleRuntime": "029c15a82e7ddaa017839b19407fdea25c2608fab4d3201c09c4bf9e6216e369",
+    "descriptorCandleRuntime": "13e936f3e5979a089a180e206b13217a2e1698ab31780166673d2a8345206a8b",
     "descriptorMlxFacts": "08ceb97ce2f0a45ae3978423fbf894160a425d74ca0af4303e2bbd3b99c98232",
     "descriptorMlxRuntime": "d4c2dd3ee80094edb564f1c3c3d01ae404b6a219a4d084a35e31f9514f510a38",
     "descriptorPreviewFacts": "fa8a482398c5c6d8b6979905444655a645e2a7f9c6fc609cb6e247904017601f",
@@ -2101,11 +2101,7 @@
         {
           "capability": "image_depth",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18480",
-            "url": "https://app.shortcut.com/trefry/story/18480"
-          }
+          "candle": true
         }
       ],
       "conditioningShape": [],
@@ -7522,11 +7518,7 @@
         {
           "capability": "representative_request",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18480",
-            "url": "https://app.shortcut.com/trefry/story/18480"
-          }
+          "candle": true
         }
       ]
     },
