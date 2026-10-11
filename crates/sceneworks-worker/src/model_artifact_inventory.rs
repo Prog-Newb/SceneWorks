@@ -180,6 +180,14 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             entrypoint: TypedResolverEntrypoint::PinnedComponent,
         },
     },
+    // sc-25682: the Iris-3B depth task export (`depth/` of the pinned repo), resolved cache-only.
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/depth_jobs.rs"],
+        categories: &[Category::Image, Category::Primary],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
+        },
+    },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/person_jobs.rs"],
         categories: &[Category::CaptioningUtility, Category::OptionalComponent],

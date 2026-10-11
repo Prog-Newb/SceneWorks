@@ -394,6 +394,7 @@
     "dataset_upscale",
     "face_likeness_compare",
     "gpu",
+    "image_depth",
     "image_detail",
     "image_edit",
     "image_generate",

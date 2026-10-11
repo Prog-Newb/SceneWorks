@@ -222,7 +222,7 @@ on:
         type: boolean
         default: false
       run_iris_worker_smoke:
-        description: "Run the sc-25680 Iris-3B Candle worker job (512², 30 steps), the sc-25683 restoration jobs (4x 6-tile + 1x), and the sc-25686 Iris LoRA training job once on real weights (snapshots must already be in E:\\huggingface\\hub)"
+        description: "Run the Iris-3B Candle worker jobs once on real weights (sc-25680 generation 512², 30 steps; sc-25682 depth on a 1024x768 EXIF-rotated photo; sc-25683 restoration jobs (4x 6-tile + 1x); sc-25686 Iris LoRA training; snapshots must already be in E:\\huggingface\\hub)"
         required: false
         type: boolean
         default: false
@@ -1667,6 +1667,8 @@ jobs:
   # image, 30 steps). Offline: the pinned speridlabs/iris-3b + Qwen3-VL-4B-Instruct snapshots must
   # already be in E:\huggingface\hub (inference's `candle-iris` real-weight profile materializes
   # them there); a missing snapshot fails the job rather than downloading.
+  # SC-25682 extends it with one real-weight `image_depth` job (`iris_worker_gpu_smoke_depth`, matched
+  # by the same test filter): the installed `depth/` export only — no text encoder.
   # SC-25683: the same `iris_worker_gpu_smoke` filter also selects `iris_worker_gpu_smoke_restore` —
   # two `image_upscale` jobs with `engine: "iris"` (a 6-tile 4x and a 1x restore) from the task's own
   # `upscaler/` export of the same snapshot, run sequentially (`--test-threads=1`).

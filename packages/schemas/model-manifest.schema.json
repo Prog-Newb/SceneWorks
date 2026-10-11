@@ -6,6 +6,15 @@
   "type": "object",
   "required": ["schemaVersion", "models"],
   "$defs": {
+    "depthLaneAdmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["residentGb", "referencePeakGb"],
+      "properties": {
+        "residentGb": { "type": "number", "exclusiveMinimum": 0 },
+        "referencePeakGb": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
     "vectorProviderAvailability": {
       "type": "object",
       "required": ["id", "available"],
@@ -1903,6 +1912,30 @@
                 "$ref": "#/$defs/samplerLimits",
                 "x-sceneworks-allow-undeclared": true,
                 "description": "Per-backend candle/CUDA capability override, read by samplerOptionsFromModel(model, \"candle\"). The top-level limits.samplers/schedulers describe the default lane; this narrows/broadens them for the candle path."
+              }
+            }
+          },
+          "depth": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Monocular-depth task metadata (Iris-3B depth, sc-25682). Only a depth-task utility entry declares it.",
+            "properties": {
+              "admission": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["measured", "referenceModelPixels", "extrapolationFactor", "mlx", "candle"],
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [
+                  { "path": "crates/sceneworks-worker/src/depth_jobs.rs", "anchor": "entry.pointer(\"/depth/admission\")" }
+                ],
+                "description": "The depth job's DECLARED memory admission, read per lane before load: predicted peak = residentGb + (referencePeakGb - residentGb) x (model pixels / referenceModelPixels), the activation term padded by extrapolationFactor above the reference area. A request whose prediction exceeds the host budget is refused (never downscaled). measured=false until the epic-end campaign replaces it.",
+                "properties": {
+                  "measured": { "type": "boolean" },
+                  "referenceModelPixels": { "type": "integer", "minimum": 1 },
+                  "extrapolationFactor": { "type": "number", "minimum": 1 },
+                  "mlx": { "$ref": "#/$defs/depthLaneAdmission" },
+                  "candle": { "$ref": "#/$defs/depthLaneAdmission" }
+                }
               }
             }
           },

@@ -15835,3 +15835,166 @@ async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job
         );
     }
 }
+
+/// A real 2x2 PNG for routes that only need an importable raster.
+fn depth_source_png() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::RgbImage::from_pixel(2, 2, image::Rgb([10, 20, 30]))
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("png encodes");
+    bytes
+}
+
+/// sc-25682: the typed `image_depth` route — the default 1024 cap, explicit native, bounds, the
+/// task's own catalog carrier (no text encoder), refusing non-image sources, the raw-route contract,
+/// and the depth fact persisting as a `type: "depth"` asset through the progress route.
+#[tokio::test]
+async fn image_depth_route_queues_a_typed_job_and_publishes_a_depth_asset() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Depth" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(project["path"].as_str().expect("project path"));
+    let (_, source) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "photo.png",
+        "image/png",
+        &depth_source_png(),
+    )
+    .await;
+    let source_id = source["id"].as_str().expect("source id").to_owned();
+
+    let post_depth = |body: Value| {
+        let app = app.clone();
+        async move { request(app, "POST", "/api/v1/image/depth/jobs", body).await }
+    };
+    let (status, job) =
+        post_depth(json!({ "projectId": project_id, "sourceAssetId": source_id })).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "image_depth");
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+    let (status, stored) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        stored["payload"]["resolution"],
+        json!({ "mode": "capped", "maxSide": 1024 }),
+        "{stored}"
+    );
+    // The task's own catalog carrier rides the job (its admission declaration and closure) — and
+    // nothing else: no generation backbone, no text encoder.
+    let carriers: Vec<&str> = stored["payload"]["modelManifestEntries"]
+        .as_array()
+        .expect("carriers")
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect();
+    assert_eq!(carriers, ["iris_3b_depth"]);
+
+    let (status, native) = post_depth(json!({
+        "projectId": project_id, "sourceAssetId": source_id, "resolution": { "mode": "native" }
+    }))
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{native}");
+    for bad in [
+        json!({ "projectId": project_id, "sourceAssetId": source_id, "resolution": { "mode": "capped", "maxSide": 8 } }),
+        json!({ "projectId": project_id, "sourceAssetId": source_id, "resolution": { "mode": "metric" } }),
+        json!({ "projectId": project_id, "sourceAssetId": "" }),
+    ] {
+        let (status, body) = post_depth(bad.clone()).await;
+        assert!(
+            matches!(
+                status,
+                StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+            ),
+            "{bad} -> {status} {body}"
+        );
+    }
+    // The raw queue route applies the same contract.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_depth", "projectId": project_id, "requestedGpu": "auto",
+            "payload": { "projectId": project_id, "sourceAssetId": source_id, "resolution": { "mode": "capped", "maxSide": 0 } }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // The worker reports the depth fact; the API persists it as a depth asset with its raw map, its
+    // separate preview and its reload contract.
+    claim_job_as_worker(&app, &job_id, "depth-worker", &["gpu", "image_depth"]).await;
+    let npy_rel = "assets/depth/genset_dapi/map.npy";
+    let preview_rel = "assets/depth/genset_dapi/map.preview.png";
+    std::fs::create_dir_all(project_path.join("assets/depth/genset_dapi")).unwrap();
+    std::fs::write(
+        project_path.join(npy_rel),
+        sceneworks_core::depth_map::encode_npy_f32(2, 2, &[0.0, 0.5, -0.5, 1.0]).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(project_path.join(preview_rel), depth_source_png()).unwrap();
+    let fact = json!({
+        "assetId": "asset_depthapi", "type": "depth", "mediaPath": npy_rel,
+        "mimeType": "application/x-npy", "width": 2, "height": 2,
+        "displayName": "photo (depth)", "createdAt": "2026-10-11T00:00:00Z",
+        "mode": "image_depth", "model": "iris_3b_depth", "adapter": "mlx",
+        "sourceAssetId": source_id, "parents": [source_id],
+        "rawAdapterSettings": { "depth": { "resolution": { "mode": "capped", "maxSide": 1024 } } },
+        "preview": { "path": preview_rel, "mimeType": "image/png", "width": 2, "height": 2 },
+        "depth": { "valueConvention": "relative_log_depth", "shape": [2, 2] },
+    });
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "Depth map ready.", "workerId": "depth-worker",
+            "result": { "generationSetId": "genset_dapi", "assetWrites": [fact] }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["result"]["assetIds"], json!(["asset_depthapi"]));
+    let (status, asset) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets/asset_depthapi"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{asset}");
+    assert_eq!(asset["type"], "depth");
+    assert_eq!(asset["file"]["path"], npy_rel);
+    assert_eq!(asset["preview"]["path"], preview_rel);
+    assert_eq!(asset["depth"]["valueConvention"], "relative_log_depth");
+    assert_eq!(asset["lineage"]["sourceAssetId"], json!(source_id));
+
+    // A depth map is not a depth SOURCE.
+    let (status, body) =
+        post_depth(json!({ "projectId": project_id, "sourceAssetId": "asset_depthapi" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("already a depth map")),
+        "{body}"
+    );
+}

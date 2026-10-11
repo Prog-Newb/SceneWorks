@@ -4,6 +4,8 @@ import { BATCH_OPS } from "../batchOps.js";
 import { issue } from "../validation/issues.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
+import { DepthResolutionFields } from "./DepthResolutionFields.jsx";
+import { DEFAULT_DEPTH_RESOLUTION, depthResolutionError } from "../depthJobs.js";
 import { IrisRestoreControls } from "./IrisRestoreControls.jsx";
 import { IRIS_RESTORE_DEFAULTS, irisRestoreControls } from "../irisRestore.js";
 
@@ -19,7 +21,7 @@ const STATUS_LABEL = { queued: "Queued", running: "Running…", completed: "Done
 // is a silent requirement — the panel's header count shows it. A missing model/engine or
 // a missing edit prompt used to only dim the button with no stated reason (the sc-10492
 // defect); now they say why.
-export function batchOperationValidation({ count, op, missingModel, missingPrompt, restorePlan = null } = {}) {
+export function batchOperationValidation({ count, op, missingModel, missingPrompt, depthUnavailable, depthResolutionIssue, restorePlan = null } = {}) {
   const issues = [];
   if (!(count > 0)) {
     issues.push(issue.requirement("selection", "Select at least one image"));
@@ -31,6 +33,14 @@ export function batchOperationValidation({ count, op, missingModel, missingPromp
   }
   if (missingPrompt) {
     issues.push(issue.error("prompt", "Enter a prompt for the edit."));
+  }
+  // Depth (sc-25682): the exact reason the action cannot run here (no native lane, not installed,
+  // incomplete install), and an out-of-range max side.
+  if (op === "depth" && depthUnavailable) {
+    issues.push(issue.error(null, depthUnavailable));
+  }
+  if (op === "depth" && depthResolutionIssue) {
+    issues.push(issue.error("resolution", depthResolutionIssue));
   }
   // Iris restoration (sc-25683): every selected image must plan before Run — a refused plan (or a
   // still-loading preview) is never submitted, and the request is never silently changed.
@@ -49,6 +59,8 @@ export function BatchOperationsPanel({
   editModels = [],
   detailModels = [],
   upscaleEngines = [],
+  depthAvailability = { available: false, reason: "Depth estimation is not available." },
+  initialOp = "upscale",
   // For the Iris restoration preview (sc-25683): the selection's project and the API token.
   projectId = null,
   token = "",
@@ -58,7 +70,7 @@ export function BatchOperationsPanel({
   onRun,
   onClose,
 }) {
-  const [op, setOp] = useState("upscale");
+  const [op, setOp] = useState(initialOp);
   // Upscale params.
   const [engine, setEngine] = useState(upscaleEngines[0]?.key ?? "real-esrgan");
   const [factor, setFactor] = useState(4);
@@ -73,6 +85,8 @@ export function BatchOperationsPanel({
   const [editModel, setEditModel] = useState(editModels[0]?.id ?? "");
   const [prompt, setPrompt] = useState("");
   const [seed, setSeed] = useState("");
+  // Depth params (sc-25682).
+  const [depthResolution, setDepthResolution] = useState(DEFAULT_DEPTH_RESOLUTION);
 
   const count = assets.length;
   const running = items != null;
@@ -88,12 +102,14 @@ export function BatchOperationsPanel({
   const missingModel =
     (op === "detail" && !activeDetailModel) || (op === "edit" && !activeEditModel) || (op === "upscale" && !activeEngine);
   const missingPrompt = op === "edit" && !prompt.trim();
+  const depthUnavailable = depthAvailability?.available ? null : depthAvailability?.reason || "Depth estimation is not available.";
+  const depthResolutionIssue = depthResolutionError(depthResolution);
   const restoring = op === "upscale" && Boolean(activeEngine?.restoration);
   const restorePlan = restoring ? irisPlanStatus : null;
   // One summary gates Run and carries its reasons (epic 10644); `busy` stays a plain gate.
   const runDraft = useMemo(
-    () => ({ count, op, missingModel, missingPrompt, restorePlan }),
-    [count, op, missingModel, missingPrompt, restorePlan],
+    () => ({ count, op, missingModel, missingPrompt, depthUnavailable, depthResolutionIssue, restorePlan }),
+    [count, op, missingModel, missingPrompt, depthUnavailable, depthResolutionIssue, restorePlan],
   );
   const runValidity = useValidation(batchOperationValidation, runDraft, undefined);
   const canRun = runValidity.ready && !busy;
@@ -106,6 +122,8 @@ export function BatchOperationsPanel({
       onRun(op, { engine: activeEngine.key, factor: effectiveFactor, softness });
     } else if (op === "detail") {
       onRun(op, { model: activeDetailModel, strength, cnScale });
+    } else if (op === "depth") {
+      onRun(op, { resolution: depthResolution });
     } else {
       onRun(op, { model: activeEditModel, prompt: prompt.trim(), seed });
     }
@@ -270,6 +288,15 @@ export function BatchOperationsPanel({
                 />
               </label>
               <p className="batch-ops-note">Each image is edited at its native size.</p>
+            </div>
+          ) : null}
+
+          {op === "depth" ? (
+            <div className="batch-ops-params">
+              <DepthResolutionFields idPrefix="batch-depth" onChange={setDepthResolution} value={depthResolution} />
+              <p className="batch-ops-note">
+                Each image gets its own depth map (raw .npy + preview) linked to it; the source images are not modified.
+              </p>
             </div>
           ) : null}
 

@@ -7048,6 +7048,60 @@ mod download_receipt_tests {
         }
     }
 
+    /// sc-25682 (E4): Iris-3B DEPTH is its own task install — exactly the three `depth/` export files
+    /// at the pinned revision, NO co-requisite (no text encoder, no generation backbone), installed
+    /// only when all three are present. Same on every platform (both lanes serve it).
+    #[test]
+    fn iris_depth_installs_from_its_own_task_closure_without_a_text_encoder() {
+        let _env = isolate_hf_cache();
+        let base = builtin_models_entry("iris_3b_depth");
+        assert_eq!(base.get("type").and_then(Value::as_str), Some("utility"));
+        for os in ["macos", "windows", "linux"] {
+            let temp = tempfile::tempdir().unwrap();
+            let data_dir = temp.path();
+            let mut model = base.clone();
+            retain_downloads_for_os(&mut model, os);
+            assert!(
+                model_co_requisite_downloads(&model).is_empty(),
+                "{os}: depth needs no text encoder or backbone component"
+            );
+            let context = model_download_context(&model).unwrap().unwrap();
+            assert_eq!(context.repo, "speridlabs/iris-3b", "{os}");
+            assert_eq!(
+                context.files,
+                [
+                    "depth/config.yaml",
+                    "depth/model.safetensors",
+                    "depth/empty_prompt.safetensors"
+                ],
+                "{os}"
+            );
+            let snapshot = huggingface_repo_cache_path(data_dir, &context.repo)
+                .unwrap()
+                .join("snapshots/7445443349bc9abe3c96f01ff793e2098ca012b3");
+            // The GENERATION backbone's root files are not a depth install.
+            std::fs::create_dir_all(snapshot.join("depth")).unwrap();
+            for file in ["config.yaml", "model.safetensors"] {
+                std::fs::write(snapshot.join(file), b"weights").unwrap();
+            }
+            for file in &context.files[..2] {
+                std::fs::write(snapshot.join(file), b"weights").unwrap();
+            }
+            let torn = install_state_for(Some(context.clone()), &model, data_dir);
+            assert!(
+                !torn.installed,
+                "{os}: two of three export files is not installed"
+            );
+            std::fs::write(snapshot.join(&context.files[2]), b"weights").unwrap();
+            let installed = install_state_for(Some(context), &model, data_dir);
+            assert!(
+                installed.installed,
+                "{os}: the complete depth export is installed: {:?}",
+                installed.missing_required_files
+            );
+        }
+    }
+
     /// sc-13681 / sc-13686: each MOSS TTS entry advertises its RVQ codec as a HARD component
     /// coRequisite (`moss_ttsd_v05` → XY_Tokenizer, `moss_tts_realtime` → MOSS-Audio-Tokenizer). Because
     /// install-state gates on hard coRequisites, a MOSS entry stays not-installed until the codec
@@ -13767,6 +13821,79 @@ mod variant_delete_tests {
         }
         // The repo cache dir itself must NOT be pruned — the sibling still lives in it.
         assert!(repo.is_dir(), "shared repo cache survives a scoped delete");
+    }
+
+    /// sc-25682 (E4): the generation and depth TASK installs share `speridlabs/iris-3b`; deleting
+    /// either entry removes only its own files and keeps the other task's, driven by the SHIPPED
+    /// catalog entries.
+    #[tokio::test]
+    async fn deleting_one_iris_task_keeps_the_other_tasks_files() {
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .unwrap();
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        let catalog: Vec<Value> = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| matches!(entry["id"].as_str(), Some("iris_3b" | "iris_3b_depth")))
+            .cloned()
+            .collect();
+        assert_eq!(catalog.len(), 2);
+        let entry = |id: &str| catalog.iter().find(|e| e["id"] == id).unwrap().clone();
+
+        let depth_files: &[&str] = &[
+            "depth/config.yaml",
+            "depth/model.safetensors",
+            "depth/empty_prompt.safetensors",
+        ];
+        let generation_files: &[&str] = &["config.yaml", "model.safetensors"];
+        for (deleted, kept_files, removed_files) in [
+            ("iris_3b_depth", generation_files, depth_files),
+            ("iris_3b", depth_files, generation_files),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let data_dir = tmp.path();
+            let repo = huggingface_repo_cache_path(data_dir, "speridlabs/iris-3b").unwrap();
+            for (index, rel) in [
+                "config.yaml",
+                "model.safetensors",
+                "depth/config.yaml",
+                "depth/model.safetensors",
+                "depth/empty_prompt.safetensors",
+            ]
+            .iter()
+            .enumerate()
+            {
+                seed(&repo, rel, &format!("blob{index}"), 10 + index);
+            }
+            let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+            remove_whole_model_artifacts(
+                &catalog,
+                deleted,
+                &entry(deleted),
+                data_dir,
+                &allowed_roots,
+                true,
+            )
+            .await
+            .unwrap();
+            for rel in kept_files {
+                assert!(
+                    repo.join("snapshots/rev").join(rel).exists(),
+                    "deleting {deleted} must keep {rel}"
+                );
+            }
+            for rel in removed_files {
+                assert!(
+                    !repo.join("snapshots/rev").join(rel).exists(),
+                    "deleting {deleted} removes its own {rel}"
+                );
+            }
+        }
     }
 
     /// The exclusive-repo case is UNCHANGED: with no sibling claiming the repo, a whole-model delete
