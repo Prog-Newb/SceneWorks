@@ -626,8 +626,16 @@ async function api(method, route, body) {
     init.headers["content-type"] = "application/json";
     init.body = JSON.stringify(body);
   }
-  const res = await fetch(`${apiUrl(OPTS)}${route}`, init);
-  const text = await res.text();
+  // The health route answers before readiness-critical startup finishes; until then every other
+  // route is a 503 `api_initializing`. Wait it out (bounded) rather than failing the phase.
+  let res;
+  let text;
+  for (let attempt = 0; ; attempt += 1) {
+    res = await fetch(`${apiUrl(OPTS)}${route}`, init);
+    text = await res.text();
+    if (res.status !== 503 || !text.includes("api_initializing") || attempt >= 120) break;
+    await sleep(1000);
+  }
   let parsed = text;
   try {
     parsed = text ? JSON.parse(text) : null;
