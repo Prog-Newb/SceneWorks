@@ -1595,6 +1595,8 @@ fn materialize_external_item(
     now: &str,
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
+    crate::training::iris::validate_item_captions(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
     let source_path = fs::canonicalize(&input.source_path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             ProjectStoreError::NotFound("Verified dataset source was unavailable".to_owned())
@@ -1684,6 +1686,11 @@ fn materialize_item(
     now: &str,
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
+    // Per-item named captions (`captions: {field: text}`, the Iris trainer's `caption_field(s)`
+    // source) ride in the forward-compatible extra bag; refuse a malformed map at the store
+    // boundary rather than at the trainer mid-epoch.
+    crate::training::iris::validate_item_captions(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
     let source = resolve_item_source(project_path, project_id, &input, modality)?;
     // sc-6143: normalize a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to lossless PNG
     // as it lands in the dataset. Uploads are normalized at import, but a dataset built from a library

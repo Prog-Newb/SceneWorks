@@ -2139,6 +2139,8 @@ pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "anima_lora",
     // Mage-Flow adapters and full base fine-tunes have native MLX and Candle trainers.
     "mage_flow_lora",
+    // Iris-3B generation (epic 25678, sc-25685): the native `mlx-gen-iris` LoRA/LoKr/full trainer.
+    "iris_train",
 ];
 
 /// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
@@ -2163,6 +2165,8 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "wan_moe_lora",
     "anima_lora",
     "mage_flow_lora",
+    // Iris-3B generation (epic 25678, sc-25686): the native `candle-gen-iris` trainer.
+    "iris_train",
 ];
 
 /// Native-only training kernels — only a Rust worker can run them, so a generic worker descriptor
@@ -2179,6 +2183,7 @@ pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     "anima_lora",
     "krea_control",
     "mage_flow_lora",
+    "iris_train",
 ];
 
 #[cfg(test)]
@@ -2527,6 +2532,8 @@ mod tests {
         // kernel was in `MLX_ONLY_TRAINING_KERNELS` but in NO routed set, so every worker refused it
         // and Mage training jobs queued forever.
         "mage_flow_lora",
+        // sc-25685: the native Iris-3B generation trainer.
+        "iris_train",
     ];
 
     const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
@@ -2542,6 +2549,8 @@ mod tests {
         "wan_moe_lora",
         "anima_lora",
         "mage_flow_lora",
+        // sc-25686: the native Iris-3B generation trainer (Candle/CUDA).
+        "iris_train",
     ];
 
     const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
@@ -2551,6 +2560,7 @@ mod tests {
         "anima_lora",
         "krea_control",
         "mage_flow_lora",
+        "iris_train",
     ];
 
     #[test]

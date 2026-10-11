@@ -1330,6 +1330,11 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
             "mage_flow_base" => Some("mage_flow_base"),
             _ => None,
         },
+        // Iris-3B generation (sc-25685 MLX / sc-25686 Candle): both backends register ONE trainer
+        // under the generation install's id (`gen_core::iris::train::TRAINER_ID`), serving LoRA, LoKr
+        // and the full (weights- or random-init) run; the network type travels in the config. The
+        // depth/restoration exports are different task installs and are never a training base here.
+        "iris_train" => (base_model == "iris_3b").then_some(gen_core::iris::train::TRAINER_ID),
         _ => None,
     }
 }
@@ -1643,7 +1648,7 @@ fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> 
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-enum TrainEvent {
+pub(crate) enum TrainEvent {
     Progress(TrainingProgress),
     Done(TrainingOutput),
 }
@@ -1785,6 +1790,34 @@ pub(crate) async fn run_training_execution(
     job: &JobSnapshot,
     plan: &TrainingPlan,
 ) -> WorkerResult<()> {
+    run_training_execution_using(
+        api,
+        settings,
+        job,
+        plan,
+        crate::inference_runtime::load_trainer,
+    )
+    .await
+}
+
+/// [`run_training_execution`] with the trainer loader supplied by the caller — the training twin of
+/// the image lane's `generate_stream_using` seam. Every pre-load decision (plan preflight, the Iris
+/// memory floor + data walk, base/component resolution), the blocking drive, the progress/cancel
+/// consumer and the completion result are the production code; only the engine is injectable, so a
+/// test pins exactly what reaches `Trainer::train` and what the job API sees, without weights.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) async fn run_training_execution_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &TrainingPlan,
+    load_trainer: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn gen_core::Trainer>>
+        + Send
+        + 'static,
+) -> WorkerResult<()> {
     let backend = backend_label(&settings.gpu_id);
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
@@ -1802,6 +1835,21 @@ pub(crate) async fn run_training_execution(
     .await?;
 
     let prepared_run = preflight_training_run(settings, plan)?;
+
+    // Iris-3B (sc-25685/sc-25686): the declared memory floor refuses an undersized host BEFORE the
+    // model loads, and the trainer's unused-tail condition (it prints it on stderr only) is put in
+    // the job — progress message, structured log event and the result.
+    let run_notes = if sceneworks_core::training::iris::is_iris_training_kernel(&plan.target.kernel)
+    {
+        match iris_training_preflight(api, settings, job, plan, &prepared_run.request, backend)
+            .await
+        {
+            Ok(notes) => notes,
+            Err(error) => return prepared_run.finish(Err(error)),
+        }
+    } else {
+        JsonObject::new()
+    };
 
     let weights_dir = match resolve_app_managed_model_dir(
         settings,
@@ -1893,10 +1941,9 @@ pub(crate) async fn run_training_execution(
                 .into_iter()
                 .fold(spec, |spec, (id, source)| spec.with_component(id, source));
             let operation = (|| {
-                let mut trainer = crate::inference_runtime::load_trainer(engine_id, &spec)
-                    .map_err(|error| {
-                        WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
-                    })?;
+                let mut trainer = load_trainer(engine_id, &spec).map_err(|error| {
+                    WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
+                })?;
                 trainer.validate(&request).map_err(|error| {
                     WorkerError::InvalidPayload(format!(
                         "{engine_id} trainer rejected the plan: {error}"
@@ -1938,8 +1985,80 @@ pub(crate) async fn run_training_execution(
         rx,
         cancel,
         blocking,
+        run_notes,
     )
     .await
+}
+
+/// The Iris-only pre-load gate of [`run_training_execution_using`]: refuse a host under the
+/// declared memory floor (never admitted unbounded), and report the trainer's unused-tail condition.
+/// Returns the notes folded into the completion result (`dataWalk`, `warnings`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn iris_training_preflight(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &TrainingPlan,
+    request: &TrainingRequest,
+    backend: &str,
+) -> WorkerResult<JsonObject> {
+    let lane = crate::iris_training::training_lane();
+    #[cfg(target_os = "macos")]
+    let capacity = {
+        let _ = settings;
+        crate::iris_training::mlx_training_capacity_gb()
+    };
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let capacity = crate::iris_training::candle_training_capacity_gb(&settings.gpu_id).await;
+    let network_type = advanced_str(&plan.config.advanced, "networkType", "lora");
+    if let Some(refusal) = crate::iris_training::iris_memory_refusal(
+        lane,
+        &network_type,
+        plan.config.resolution,
+        capacity,
+    ) {
+        return Err(WorkerError::InvalidPayload(refusal));
+    }
+
+    let mut notes = JsonObject::new();
+    let Some(report) = crate::iris_training::iris_data_walk_report(
+        request.items.len(),
+        request.config.batch_size.max(1) as usize,
+    ) else {
+        return Ok(notes);
+    };
+    notes.insert(
+        "dataWalk".to_owned(),
+        serde_json::to_value(&report).unwrap_or(Value::Null),
+    );
+    if let Some(warning) = &report.warning {
+        tracing::warn!(
+            event = "iris_training_unused_tail",
+            job_id = %job.id,
+            items = report.items,
+            covered = report.covered,
+            unused_items = report.unused_items,
+            "{warning}"
+        );
+        notes.insert("warnings".to_owned(), json!([warning]));
+        update_job(
+            api,
+            &job.id,
+            training_progress(
+                JobStatus::Preparing,
+                ProgressStage::Preparing,
+                0.05,
+                warning,
+                None,
+                backend,
+            ),
+        )
+        .await?;
+    }
+    Ok(notes)
 }
 
 /// First-detection handling for the in-loop training cancel poller (sc-5516): trip the engine
@@ -2225,7 +2344,7 @@ fn resolve_sample_root(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[allow(clippy::too_many_arguments)]
-async fn consume_training_events(
+pub(crate) async fn consume_training_events(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -2236,6 +2355,7 @@ async fn consume_training_events(
     mut rx: tokio::sync::mpsc::Receiver<TrainEvent>,
     cancel: CancelFlag,
     blocking: tokio::task::JoinHandle<WorkerResult<()>>,
+    run_notes: JsonObject,
 ) -> WorkerResult<()> {
     // Bind the blocking training task to its cancel flag (sc-8804, F-003): every `update_job`/
     // `heartbeat` `?` below returns early on a transient POST failure or a 409 (stale-sweep
@@ -2247,6 +2367,11 @@ async fn consume_training_events(
     let mut canceled = false;
     let mut last_cancel_check = Instant::now();
     let mut checkpoints: Vec<Value> = Vec::new();
+    // A trainer that honours a cancel by finishing durably (Iris: a cancel after the first optimizer
+    // step publishes the checkpoint AND the export, then returns `Ok`) still reports `Done` after the
+    // cancel was requested. Keep that output so the terminal `Canceled` carries — and the API
+    // registers — what the trainer published, instead of dropping it with the drained events.
+    let mut canceled_output: Option<TrainingOutput> = None;
 
     // sc-5637 — preview-sample plumbing, now owned by `SamplePersister` (sc-8921): the resolved sample
     // config + destination paths + the accumulated cumulative/this-cadence record lists. The event
@@ -2285,6 +2410,15 @@ async fn consume_training_events(
                 }
             };
             if canceled {
+                // Only Iris finishes a cancel durably; every other trainer's post-cancel `Ok`
+                // (e.g. SDXL saving a partial adapter) stays a plain, result-less cancel (E8).
+                if let TrainEvent::Done(output) = event {
+                    if sceneworks_core::training::iris::is_iris_training_kernel(
+                        &plan.target.kernel,
+                    ) {
+                        canceled_output = Some(output);
+                    }
+                }
                 continue; // drain remaining events so the blocking sender never blocks.
             }
             match event {
@@ -2348,7 +2482,7 @@ async fn consume_training_events(
                     // F-115) with no keepalive benefit.
                 }
                 TrainEvent::Done(output) => {
-                    let result = training_result(
+                    let mut result = training_result(
                         plan,
                         &output,
                         &checkpoints,
@@ -2358,6 +2492,7 @@ async fn consume_training_events(
                         samples.cfg.sample_guidance_scale,
                         backend,
                     );
+                    result.extend(run_notes.clone());
                     let artifact = match &plan.target.output_kind {
                         sceneworks_core::training::TrainingOutputKind::BaseCheckpoint => {
                             "Full base checkpoint"
@@ -2403,7 +2538,35 @@ async fn consume_training_events(
         // write is what frees the worker row (`jobs_store::update_job_progress`), so it lands as
         // the worker returns to its claim loop — the next queued job waits only until the GPU is
         // genuinely free (sc-5516; mirrors the image path sc-5515).
-        let message = "LoRA training canceled by user.";
+        // A cancel the trainer honoured BEFORE its first optimizer step publishes nothing (the
+        // engine returns its typed cancellation). One honoured after it may have published a
+        // durable checkpoint + an export (Iris); report it as such so the API registers the export
+        // (`trainedArtifactExported`) and the run stays resumable from the checkpoint.
+        let (message, result) = match canceled_output.filter(|_| task_result.is_ok()) {
+            Some(output) => {
+                let mut result = training_result(
+                    plan,
+                    &output,
+                    &checkpoints,
+                    &samples.all_samples,
+                    &samples.cfg.sample_prompts,
+                    samples.cfg.sample_steps,
+                    samples.cfg.sample_guidance_scale,
+                    backend,
+                );
+                result.extend(run_notes);
+                result.insert("trainedArtifactExported".to_owned(), Value::Bool(true));
+                (
+                    format!(
+                        "Training canceled by user at step {}; the checkpoint and the export \
+                         were saved.",
+                        output.steps
+                    ),
+                    Some(result),
+                )
+            }
+            None => ("LoRA training canceled by user.".to_owned(), None),
+        };
         update_job(
             api,
             &job.id,
@@ -2411,13 +2574,13 @@ async fn consume_training_events(
                 JobStatus::Canceled,
                 ProgressStage::Canceled,
                 1.0,
-                message,
-                None,
+                &message,
+                result,
                 backend,
             ),
         )
         .await?;
-        return Err(WorkerError::Canceled(message.to_owned()));
+        return Err(WorkerError::Canceled(message));
     }
     task_result
 }

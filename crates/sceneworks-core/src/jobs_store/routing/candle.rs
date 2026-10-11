@@ -2142,6 +2142,11 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
             base_model == "mage_flow_base"
                 && (is_adapter || network_type.eq_ignore_ascii_case("full"))
         }
+        // Iris-3B generation (sc-25686): `candle-gen-iris` registers ONE trainer under the
+        // generation install's id, serving LoRA, LoKr and the full (weights- or random-init) run.
+        "iris_train" => {
+            base_model == "iris_3b" && (is_adapter || network_type.eq_ignore_ascii_case("full"))
+        }
         // Existing native families keep their established admission. Their trainers perform the
         // final typed validation; Krea ControlNet deliberately has no adapter-kind selector.
         _ => true,
