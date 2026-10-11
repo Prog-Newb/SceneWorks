@@ -4,6 +4,8 @@ import { BATCH_OPS } from "../batchOps.js";
 import { issue } from "../validation/issues.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
+import { IrisRestoreControls } from "./IrisRestoreControls.jsx";
+import { IRIS_RESTORE_DEFAULTS, irisRestoreControls } from "../irisRestore.js";
 
 // Batch operations panel (sc-6112): pick ONE op (upscale / detail / edit) + shared
 // params and apply it across the selected image assets. Presentational — it owns the
@@ -17,7 +19,7 @@ const STATUS_LABEL = { queued: "Queued", running: "Running…", completed: "Done
 // is a silent requirement — the panel's header count shows it. A missing model/engine or
 // a missing edit prompt used to only dim the button with no stated reason (the sc-10492
 // defect); now they say why.
-export function batchOperationValidation({ count, op, missingModel, missingPrompt } = {}) {
+export function batchOperationValidation({ count, op, missingModel, missingPrompt, restorePlan = null } = {}) {
   const issues = [];
   if (!(count > 0)) {
     issues.push(issue.requirement("selection", "Select at least one image"));
@@ -30,6 +32,15 @@ export function batchOperationValidation({ count, op, missingModel, missingPromp
   if (missingPrompt) {
     issues.push(issue.error("prompt", "Enter a prompt for the edit."));
   }
+  // Iris restoration (sc-25683): every selected image must plan before Run — a refused plan (or a
+  // still-loading preview) is never submitted, and the request is never silently changed.
+  if (op === "upscale" && restorePlan) {
+    if (restorePlan.blocked) {
+      issues.push(issue.error(null, restorePlan.error ? `Cannot restore: ${restorePlan.error}` : "The restoration cannot run as set."));
+    } else if (!restorePlan.ready) {
+      issues.push(issue.requirement("restorePlan", "Planning the restoration…"));
+    }
+  }
   return issues;
 }
 
@@ -38,6 +49,9 @@ export function BatchOperationsPanel({
   editModels = [],
   detailModels = [],
   upscaleEngines = [],
+  // For the Iris restoration preview (sc-25683): the selection's project and the API token.
+  projectId = null,
+  token = "",
   busy = false,
   items = null,
   progress = null,
@@ -49,6 +63,8 @@ export function BatchOperationsPanel({
   const [engine, setEngine] = useState(upscaleEngines[0]?.key ?? "real-esrgan");
   const [factor, setFactor] = useState(4);
   const [softness, setSoftness] = useState(0.5);
+  const [irisRestore, setIrisRestore] = useState(IRIS_RESTORE_DEFAULTS);
+  const [irisPlanStatus, setIrisPlanStatus] = useState({ ready: false, blocked: false, error: null });
   // Detail params.
   const [detailModel, setDetailModel] = useState(detailModels[0]?.id ?? "");
   const [strength, setStrength] = useState(0.55);
@@ -72,14 +88,21 @@ export function BatchOperationsPanel({
   const missingModel =
     (op === "detail" && !activeDetailModel) || (op === "edit" && !activeEditModel) || (op === "upscale" && !activeEngine);
   const missingPrompt = op === "edit" && !prompt.trim();
+  const restoring = op === "upscale" && Boolean(activeEngine?.restoration);
+  const restorePlan = restoring ? irisPlanStatus : null;
   // One summary gates Run and carries its reasons (epic 10644); `busy` stays a plain gate.
-  const runDraft = useMemo(() => ({ count, op, missingModel, missingPrompt }), [count, op, missingModel, missingPrompt]);
+  const runDraft = useMemo(
+    () => ({ count, op, missingModel, missingPrompt, restorePlan }),
+    [count, op, missingModel, missingPrompt, restorePlan],
+  );
   const runValidity = useValidation(batchOperationValidation, runDraft, undefined);
   const canRun = runValidity.ready && !busy;
 
   function run() {
     if (!canRun) return;
-    if (op === "upscale") {
+    if (op === "upscale" && activeEngine.restoration) {
+      onRun(op, { engine: activeEngine.key, restore: irisRestoreControls(irisRestore) });
+    } else if (op === "upscale") {
       onRun(op, { engine: activeEngine.key, factor: effectiveFactor, softness });
     } else if (op === "detail") {
       onRun(op, { model: activeDetailModel, strength, cnScale });
@@ -148,6 +171,16 @@ export function BatchOperationsPanel({
                   ))}
                 </select>
               </label>
+              {activeEngine?.restoration ? (
+                <IrisRestoreControls
+                  idPrefix="batch-iris"
+                  onChange={setIrisRestore}
+                  onStatus={setIrisPlanStatus}
+                  planBody={projectId && count ? { projectId, assetIds: assets.map((asset) => asset.id) } : null}
+                  token={token}
+                  value={irisRestore}
+                />
+              ) : (
               <label>
                 Factor
                 <select onChange={(e) => setFactor(Number(e.target.value))} value={effectiveFactor}>
@@ -158,6 +191,7 @@ export function BatchOperationsPanel({
                   ))}
                 </select>
               </label>
+              )}
               {activeEngine?.softness ? (
                 <label>
                   Softness {softness.toFixed(2)}

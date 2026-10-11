@@ -74,15 +74,35 @@ fn fixed_runtime_model_ids(job_type: &JobType, payload: &JsonObject) -> Vec<&'st
         }
         JobType::VideoUpscale => vec!["seedvr2_upscaler"],
         JobType::ImageUpscale => {
-            let seedvr2 = payload
+            let engine = payload
                 .get("engine")
                 .and_then(Value::as_str)
-                .is_some_and(|engine| engine.eq_ignore_ascii_case("seedvr2"));
-            vec![if seedvr2 {
+                .unwrap_or_default();
+            vec![if engine.eq_ignore_ascii_case("seedvr2") {
                 "seedvr2_upscaler"
+            } else if sceneworks_core::image_restoration::is_iris_engine(engine) {
+                // Iris restoration runs from its OWN task entry (sc-25683): the `upscaler/` export
+                // alone — never the generation backbone or its text encoder.
+                sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID
             } else {
                 "real_esrgan"
             }]
+        }
+        // The Image Studio inline post-processing pass with the Iris engine carries the restoration
+        // task as well as the generation model (sc-25683).
+        JobType::ImageGenerate | JobType::ImageEdit
+            if payload
+                .get("upscale")
+                .and_then(Value::as_object)
+                .is_some_and(|upscale| {
+                    upscale.get("enabled").and_then(Value::as_bool) == Some(true)
+                        && upscale
+                            .get("engine")
+                            .and_then(Value::as_str)
+                            .is_some_and(sceneworks_core::image_restoration::is_iris_engine)
+                }) =>
+        {
+            vec![sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID]
         }
         JobType::DatasetUpscale => vec!["real_esrgan"],
         JobType::PromptRefine

@@ -4038,6 +4038,28 @@ fn torch_worker_refuses_seedvr2_image_upscale_but_claims_real_esrgan() {
     ));
 }
 
+/// sc-25683: Iris-3B restoration (`engine=iris`) is registered by BOTH native bundles, so the mlx and
+/// candle workers claim it; like SeedVR2 it is native-only, so a generic GPU descriptor refuses it
+/// and it stays queued for a native worker.
+#[test]
+fn iris_image_upscale_is_claimed_by_both_native_lanes_and_refused_by_generic_workers() {
+    let job = image_upscale_job(json!({ "sourceAssetId": "a", "engine": "iris", "scale": 1.5 }));
+    assert!(upscale_job_is_mlx_eligible(&job));
+    let mlx = WorkerSnapshot {
+        gpu_id: "mlx".to_owned(),
+        ..gpu_worker(&["gpu", "image_upscale"])
+    };
+    assert!(worker_supports_job(&mlx, &job));
+    assert!(worker_supports_job(
+        &gpu_worker(&["gpu", "image_upscale", "candle"]),
+        &job
+    ));
+    assert!(!worker_supports_job(
+        &gpu_worker(&["gpu", "image_upscale"]),
+        &job
+    ));
+}
+
 // ---- Candle kps_extract lane (sc-5497, epic 5482) ----
 
 /// A queued `kps_extract` job carrying `payload`.

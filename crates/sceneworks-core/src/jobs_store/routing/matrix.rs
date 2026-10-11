@@ -2617,6 +2617,12 @@ fn utility_model_cells(
             JobType::ImageUpscale,
             json!({ "engine": "seedvr2", "sourceAssetId": "probe" }),
         )),
+        // Iris-3B restoration (sc-25683): its own task entry, served as the `iris` upscale engine.
+        "iris_3b_restore" => Some((
+            "engine:iris",
+            JobType::ImageUpscale,
+            json!({ "engine": "iris", "sourceAssetId": "probe" }),
+        )),
         "aura_sr_v2" => Some((
             "engine:aura-sr",
             JobType::ImageUpscale,

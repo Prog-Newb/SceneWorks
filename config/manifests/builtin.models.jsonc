@@ -25057,6 +25057,70 @@
       }
     },
     {
+      // Iris-3B RESTORATION (epic sc-25678, story sc-25683) — the `upscaler/` task of
+      // speridlabs/iris-3b, served as the `iris` engine of the image-upscale surfaces (Image Studio
+      // post-processing, Image Editor + Library restore actions) by the `iris_3b_restore` transform
+      // that BOTH native bundles register (`mlx-gen-iris` on Apple Silicon, `candle-gen-iris` on
+      // Windows/Linux NVIDIA).
+      //
+      // TASK IDENTITY (E4). Its own resource closure: EXACTLY the three files of the `upscaler/`
+      // export — the restoration backbone, its `config.yaml` (whose `task: restoration` section the
+      // engine checks) and the shipped `empty_prompt.safetensors` conditioning. No text encoder, no
+      // generation backbone (the root `config.yaml` / `model.safetensors` belong to `iris_3b`), and
+      // no `depth/` files: install state is per-file, so installing the generation model never marks
+      // restoration installed or vice versa. The worker resolves the folder cache-only at this
+      // revision (`iris_restore::resolve_restore_export_dir`, pinned to the same repo/revision by
+      // `manifest_declares_the_restore_closure_the_resolver_reads`); a missing / torn / wrong-task
+      // export is a typed refusal before anything loads, and nothing downloads at restore time.
+      //
+      // MEMORY. DECLARED conservative floors (`measured: false`, no calibration campaign — S6 /
+      // sc-25684 owns measured values) from the existing real-weight evidence for a 512x384 →
+      // 2048x1536 restore (6 tiles): MLX peak 11.7 GB, CUDA nvidia-smi peak 10.1 GB, rounded up ~20 %
+      // to 14 / 12 GB, plus each gate's 2 GB reserve (16 / 14). Tiles are a fixed 1024 px, so the
+      // model working set is per-tile bounded; on unified memory the worker adds the host output
+      // canvas beyond that reference geometry and refuses honestly rather than shrinking the request
+      // (`iris_restore::admission_error`). Mirrored by `declared_floors_match_the_catalog`.
+      "id": "iris_3b_restore",
+      "name": "Iris 3B Restoration",
+      "family": "iris",
+      "type": "utility",
+      "macOnly": false,
+      "capabilities": [],
+      "downloads": [
+        {
+          // Upstream, Apache-2.0, not re-hosted. EXACT bytes of the three pinned files.
+          "provider": "huggingface",
+          "repo": "speridlabs/iris-3b",
+          "revision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+          "files": ["upscaler/config.yaml", "upscaler/model.safetensors", "upscaler/empty_prompt.safetensors"],
+          "estimatedSizeBytes": 11986978607
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/speridlabs/iris-3b"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "mlx": {
+        // Declared, not measured (the `mlx` block carries no `measured` flag; see the note above).
+        "minMemoryGb": 16
+      },
+      "candle": {
+        "measured": false,
+        "minMemoryGb": 14
+      },
+      "ui": {
+        "label": "Iris 3B Restoration",
+        // No `promptGuide`: a utility entry never reaches a Studio prompt-guide surface.
+        "description": "Iris-3B one-step restoration and tiled upscaling (default 4×, any positive scale including 1× restore-only) behind the Iris engine of Image Studio post-processing and the Image Editor / Library restore actions. Runs natively on MLX (Apple Silicon) and Candle/CUDA (NVIDIA). Downloads only the ~12 GB `upscaler/` export — no text encoder; needs ~16 GB unified memory on a Mac or ~14 GB VRAM on an NVIDIA GPU.",
+        "recommendedFor": ["image_upscale"]
+      }
+    },
+    {
       // sc-17627 / sc-17629 — SAM3 was a JOB-TIME auto-download with no install-flow
       // representation at all: the repo and its pinned revision existed only as hardcoded
       // constants in `person_segment_sam3_common.rs`, and the weights landed in

@@ -284,6 +284,9 @@ use prompts::create_prompt_refine_job;
 // `face_likeness_compare` job scoring a candidate asset against a source identity reference asset.
 mod face_likeness;
 use face_likeness::create_face_likeness_compare_job;
+// Iris-3B restoration pre-submission plan preview (sc-25683): the engine's pure planner, no weights.
+mod image_restoration;
+use image_restoration::plan_image_restoration;
 mod poses;
 use poses::{create_pose_sources, create_poses, get_pose_preview, sweep_stale_pose_uploads};
 mod keypoints;
@@ -2151,6 +2154,10 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/prompt-batches/:batch_id/duplicate",
             post(duplicate_prompt_batch),
+        )
+        .route(
+            "/api/v1/image-restoration/plan",
+            post(plan_image_restoration),
         )
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/jobs/claim", post(claim_job))
@@ -5152,11 +5159,36 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         )?;
     }
     if payload.upscale.enabled {
-        if ![2, 4].contains(&payload.upscale.factor) {
-            return Err(ApiError::bad_request("upscale.factor must be 2 or 4"));
-        }
         if payload.upscale.engine.trim().is_empty() {
             return Err(ApiError::bad_request("upscale.engine is required"));
+        }
+        if payload.upscale.is_iris() {
+            // Iris restoration (sc-25683) is sized by `upscale.scale` (default 4×, any positive
+            // factor), not `factor`; a non-default `factor` would be silently ignored, so refuse it.
+            if payload.upscale.factor != sceneworks_core::contracts::default_image_upscale_factor()
+            {
+                return Err(ApiError::bad_request(
+                    "upscale.factor is not a control of the Iris restoration engine; use upscale.scale",
+                ));
+            }
+            if payload.upscale.extra.contains_key("softness") {
+                return Err(ApiError::bad_request(
+                    "upscale.softness is not a control of the Iris restoration engine",
+                ));
+            }
+            payload
+                .upscale
+                .iris_params()
+                .map_err(|error| ApiError::bad_request(format!("upscale.{error}")))?;
+        } else {
+            if ![2, 4].contains(&payload.upscale.factor) {
+                return Err(ApiError::bad_request("upscale.factor must be 2 or 4"));
+            }
+            sceneworks_core::image_restoration::reject_iris_only_keys(
+                &payload.upscale.iris_controls(),
+                &payload.upscale.engine,
+            )
+            .map_err(|error| ApiError::bad_request(format!("upscale.{error}")))?;
         }
     }
     Ok(())
