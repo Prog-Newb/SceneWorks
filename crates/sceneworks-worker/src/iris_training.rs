@@ -96,12 +96,30 @@ pub(crate) fn iris_memory_refusal(
              not be read, so the run is refused rather than admitted without a bound."
         ));
     };
-    (capacity + 0.05 < f64::from(floor)).then(|| {
+    // Unified memory is shared with macOS and the other apps, so an MLX floor is judged against the
+    // pool minus the same OS/app reserve the MLX generation gate holds out. (The Candle floors already
+    // fold their allocator reserve into the declared row; dedicated VRAM has no OS share.)
+    let reserve = if lane == "mlx" {
+        crate::mlx_fit_gate::OS_APP_RESERVE_GB
+    } else {
+        0.0
+    };
+    let usable = capacity - reserve;
+    (usable + 0.05 < f64::from(floor)).then(|| {
+        let reserve_note = if reserve > 0.0 {
+            format!(
+                " (~{} GB once the {} GB macOS/app reserve is held out)",
+                usable.max(0.0).round() as i64,
+                reserve.round() as i64
+            )
+        } else {
+            String::new()
+        };
         format!(
             "Iris 3B training needs at least {floor} GB of {noun} for {artifact} at \
-             {resolution}px (a declared floor, not yet measured), but this machine has ~{} GB. \
-             Lower the training resolution, train a LoRA/LoKr adapter instead of a full fine-tune, \
-             or run on a machine with more memory.",
+             {resolution}px (a declared floor, not yet measured), but this machine has ~{} GB\
+             {reserve_note}. Lower the training resolution, train a LoRA/LoKr adapter instead of \
+             a full fine-tune, or run on a machine with more memory.",
             capacity.round() as i64
         )
     })
@@ -180,8 +198,12 @@ mod tests {
 
     #[test]
     fn the_memory_gate_refuses_under_the_floor_and_without_evidence() {
-        // MLX LoRA at 256: floor 16 GB.
-        assert!(iris_memory_refusal("mlx", "lora", 256, Some(16.0)).is_none());
+        // MLX LoRA at 256: floor 16 GB, judged against unified memory minus the 4 GB OS/app
+        // reserve — a 16 GB Mac (12 GB usable) is refused, a 24 GB Mac (20 GB usable) admitted.
+        let sixteen = iris_memory_refusal("mlx", "lora", 256, Some(16.0))
+            .expect("a 16 GB Mac is under the floor once the OS/app reserve is held out");
+        assert!(sixteen.contains("reserve"), "{sixteen}");
+        assert!(iris_memory_refusal("mlx", "lora", 256, Some(24.0)).is_none());
         assert!(iris_memory_refusal("mlx", "lora", 256, Some(64.0)).is_none());
         let under = iris_memory_refusal("mlx", "lokr", 256, Some(8.0)).expect("8 GB is under");
         assert!(
@@ -841,5 +863,92 @@ mod job_tests {
         assert!(data
             .join("loras/lora_iris/iris_style.safetensors")
             .is_file());
+    }
+
+    /// Only Iris finishes a cancel durably. Another trainer that returns `Ok` after a cancel (SDXL
+    /// saves a partial adapter once a step has run) still ends a plain, result-less Canceled, so the
+    /// API registers nothing for it — the pre-Iris behaviour (E8). Drives the REAL event consumer.
+    #[test]
+    fn a_non_iris_trainer_returning_ok_after_cancel_publishes_no_result() {
+        use crate::training_jobs::{consume_training_events, TrainEvent};
+        let _env = isolated_env("64");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        let mut plan = plan(&data, &install.backbone, 2, |_| {});
+        plan.target.kernel = "sdxl_lora".to_owned();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (outcome, posts) = runtime.block_on(async {
+            let user_cancel = CancelSwitch::default();
+            let (base_url, posts) = spawn_job_api(Arc::clone(&user_cancel)).await;
+            let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
+            settings.api_url = base_url;
+            settings.data_dir = data.clone();
+            settings.heartbeat_seconds = 5;
+            let api = ApiClient::new(&settings);
+            let job: JobSnapshot =
+                serde_json::from_value(crate::tests::job_snapshot_json("job-iris-train", false))
+                    .unwrap();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let cancel = gen_core::CancelFlag::new();
+            let flag = cancel.clone();
+            let adapter = data.join("loras/lora_iris/partial.safetensors");
+            let blocking = tokio::task::spawn_blocking(move || {
+                let training = |step| {
+                    TrainEvent::Progress(TrainingProgress::Training {
+                        step,
+                        total: 40,
+                        loss: 0.5,
+                    })
+                };
+                let _ = tx.blocking_send(training(1));
+                // Outlive the consumer's 2 s cancel-poll throttle, then "click Cancel".
+                std::thread::sleep(Duration::from_millis(2_300));
+                user_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = tx.blocking_send(training(2));
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                while !flag.is_cancelled() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                assert!(flag.is_cancelled(), "the worker tripped the cancel flag");
+                let _ = tx.blocking_send(TrainEvent::Done(TrainingOutput {
+                    adapter_path: adapter,
+                    steps: 2,
+                    final_loss: 0.4,
+                }));
+                Ok(())
+            });
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(90),
+                consume_training_events(
+                    &api,
+                    &settings,
+                    &job,
+                    &plan,
+                    gen_core::TrainingConfig::default(),
+                    "mlx",
+                    40,
+                    rx,
+                    cancel,
+                    blocking,
+                    serde_json::Map::new(),
+                ),
+            )
+            .await
+            .expect("the consumer finished");
+            let posts = posts.lock().unwrap().clone();
+            (outcome, posts)
+        });
+        assert!(
+            matches!(outcome, Err(WorkerError::Canceled(_))),
+            "{outcome:?}"
+        );
+        let last = terminal(&posts);
+        assert_eq!(last["status"], "canceled", "{last:#}");
+        assert!(last["result"].is_null(), "{last:#}");
     }
 }

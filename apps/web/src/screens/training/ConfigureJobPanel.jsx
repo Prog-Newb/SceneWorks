@@ -323,8 +323,8 @@ export function ConfigureJobPanel({
             <p className="training-field-hint" aria-label="Declared memory floor">
               Memory floor (declared, not yet measured):{" "}
               {memoryFloors.map((floor) => `${laneNames[floor.lane] ?? floor.lane} ${floor.gb} GB`).join(" · ")} for a{" "}
-              {configDraft.resolution}px {isFullFinetune ? "full fine-tune" : "adapter"} run. A machine under its floor is
-              refused before the model loads.
+              {configDraft.resolution}px {isFullFinetune ? "full fine-tune" : "adapter"} run. On a Mac the floor must fit
+              after the macOS/app memory reserve. A machine under its floor is refused before the model loads.
             </p>
           ) : null}
 

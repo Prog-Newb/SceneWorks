@@ -449,6 +449,10 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
     std::fs::create_dir_all(&export).unwrap();
     std::fs::write(export.join("config.yaml"), b"model: {}\n").unwrap();
     write_test_safetensors(&export.join("model.safetensors"));
+    // The trainer's resumable checkpoints sit beside the export.
+    let checkpoints = output_dir.join(format!("{stem}.checkpoints"));
+    std::fs::create_dir_all(checkpoints.join("step_00000001")).unwrap();
+    std::fs::write(checkpoints.join("step_00000001/state.json"), b"{}").unwrap();
     let completed = complete(&app, &job_id, "completed", json!({})).await;
     assert_eq!(
         completed["result"]["baseCheckpointRegistered"], true,
@@ -485,6 +489,65 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
         entry["macSupport"]["supported"], true,
         "the export renders through iris_3b's MLX lane: {}",
         entry["macSupport"]
+    );
+
+    // The stored entry keeps the identity only; the generation surface is the engine's, read at
+    // catalog time — so a later change to the `iris_3b` entry reaches an already-registered export.
+    let manifests = settings.config_dir.join("manifests");
+    let stored: Value = serde_json::from_str(&crate::strip_jsonc_comments(
+        &std::fs::read_to_string(manifests.join("user.models.jsonc")).unwrap(),
+    ))
+    .unwrap();
+    let stored = stored["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == json!(model_id))
+        .expect("the export is stored")
+        .clone();
+    assert_eq!(stored["trainedCheckpoint"]["engineModel"], "iris_3b");
+    for key in [
+        "loraCompatibility",
+        "limits",
+        "defaults",
+        "capabilities",
+        "adapter",
+    ] {
+        assert!(
+            stored.get(key).is_none(),
+            "{key} is not snapshotted: {stored:#}"
+        );
+    }
+    let mut builtin: Value = serde_json::from_str(&crate::strip_jsonc_comments(include_str!(
+        "../../../../config/manifests/builtin.models.jsonc"
+    )))
+    .unwrap();
+    let engine = builtin["models"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|model| model["id"] == "iris_3b")
+        .expect("the builtin iris_3b entry");
+    engine["loraCompatibility"] =
+        json!({ "families": ["iris", "later_family"], "types": ["lora"] });
+    std::fs::write(
+        manifests.join("builtin.models.jsonc"),
+        serde_json::to_vec_pretty(&builtin).unwrap(),
+    )
+    .unwrap();
+    let later_app = create_app(settings.clone()).unwrap();
+    let (_, models) = request(later_app, "GET", "/api/v1/models", Value::Null).await;
+    let later = models
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == json!(model_id))
+        .expect("the export is still a catalog model")
+        .clone();
+    assert_eq!(
+        later["loraCompatibility"]["families"],
+        json!(["iris", "later_family"]),
+        "{later:#}"
     );
 
     // Generate it: the job runs `iris_3b` on the export, with the generation install's entry (its
@@ -527,6 +590,84 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
                 && download["coRequisite"] == true),
         "the generation install's text_encoder co-requisite still applies: {worker_entry}"
     );
+
+    // A duplicate that picks ANOTHER model is not re-aliased onto the recorded checkpoint.
+    let generation_id = generation["id"].as_str().unwrap().to_owned();
+    let (status, duplicate) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{generation_id}/duplicate"),
+        json!({ "payloadChanges": { "model": "sdxl" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{duplicate}");
+    let payload = &duplicate["payload"];
+    assert_eq!(payload["model"], "sdxl", "{payload:#}");
+    assert!(payload["checkpointModelId"].is_null(), "{payload:#}");
+    assert_eq!(payload["modelManifestEntry"]["id"], "sdxl", "{payload:#}");
+    // A plain duplicate of the aliased job still re-derives the checkpoint alias.
+    let (status, replay) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{generation_id}/duplicate"),
+        json!({ "payloadChanges": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replay}");
+    assert_eq!(replay["payload"]["checkpointModelId"], json!(model_id));
+    assert_eq!(
+        replay["payload"]["modelManifestEntry"]["trainedCheckpoint"]["modelId"],
+        json!(model_id)
+    );
+
+    // A client-authored `checkpointModelId` naming something that is not a trained checkpoint of
+    // `model` is dropped: `model`'s own manifest is what resolves.
+    let (status, spoofed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "iris_3b",
+            "checkpointModelId": "iris_adapter_host",
+            "mode": "text_to_image",
+            "prompt": "a lighthouse",
+            "width": 512,
+            "height": 512,
+            "count": 1
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{spoofed}");
+    let payload = &spoofed["payload"];
+    assert_eq!(payload["model"], "iris_3b");
+    assert!(payload.get("checkpointModelId").is_none(), "{payload:#}");
+    assert_eq!(
+        payload["modelManifestEntry"]["id"], "iris_3b",
+        "{payload:#}"
+    );
+    assert!(
+        payload["modelManifestEntry"]
+            .get("trainedCheckpoint")
+            .is_none(),
+        "{payload:#}"
+    );
+
+    // Model Manager delete removes the whole run directory — the export AND its checkpoints.
+    let (status, deleted) = request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/models/{model_id}?permanent=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert!(
+        !checkpoints.exists(),
+        "the run's checkpoints are not orphaned: {}",
+        checkpoints.display()
+    );
+    assert!(!output_dir.exists(), "{}", output_dir.display());
 }
 
 /// A cancel after the first optimizer step published an export: it registers; a cancel that

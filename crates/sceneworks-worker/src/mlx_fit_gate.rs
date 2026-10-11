@@ -4782,7 +4782,7 @@ const LENS_DENSE_HEADROOM_GB: f64 = 29.88;
 ///
 /// It applies to [`HEADROOM_GB`] ONLY. See [`HeadroomAllowance`] for why that distinction is load
 /// bearing rather than pedantic.
-const OS_APP_RESERVE_GB: f64 = 4.0;
+pub(crate) const OS_APP_RESERVE_GB: f64 = 4.0;
 
 /// A family's flat 1024² allowance, together with how much of it is fixed OS/app reserve rather than
 /// this request's area-dependent activation transient.

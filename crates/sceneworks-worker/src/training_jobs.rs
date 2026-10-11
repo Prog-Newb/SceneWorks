@@ -1648,7 +1648,7 @@ fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> 
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-enum TrainEvent {
+pub(crate) enum TrainEvent {
     Progress(TrainingProgress),
     Done(TrainingOutput),
 }
@@ -2344,7 +2344,7 @@ fn resolve_sample_root(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[allow(clippy::too_many_arguments)]
-async fn consume_training_events(
+pub(crate) async fn consume_training_events(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -2410,8 +2410,14 @@ async fn consume_training_events(
                 }
             };
             if canceled {
+                // Only Iris finishes a cancel durably; every other trainer's post-cancel `Ok`
+                // (e.g. SDXL saving a partial adapter) stays a plain, result-less cancel (E8).
                 if let TrainEvent::Done(output) = event {
-                    canceled_output = Some(output);
+                    if sceneworks_core::training::iris::is_iris_training_kernel(
+                        &plan.target.kernel,
+                    ) {
+                        canceled_output = Some(output);
+                    }
                 }
                 continue; // drain remaining events so the blocking sender never blocks.
             }

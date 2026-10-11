@@ -687,6 +687,13 @@ async fn validate_and_canonicalize_merged_generation_payload(
     }
     let canonical_model_entry =
         canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
+    // The store SHALLOW-merges this object over the persisted payload, so a recorded checkpoint
+    // alias the canonicalizer dropped (the replay picked another model) must be cleared explicitly
+    // or the persisted value would survive the merge.
+    let checkpoint_key = crate::iris_training::CHECKPOINT_MODEL_ID_KEY;
+    if persisted.contains_key(checkpoint_key) && !merged.contains_key(checkpoint_key) {
+        merged.insert(checkpoint_key.to_owned(), Value::Null);
+    }
     if matches!(
         job_type,
         JobType::VideoGenerate
@@ -886,21 +893,38 @@ pub(crate) async fn canonicalize_image_model_payload(
 
     // A retried/duplicated request for a trained checkpoint was aliased onto its engine model at
     // create time; re-resolve from the checkpoint the user picked so the alias is re-derived from
-    // the catalog (never trusted from the stored payload).
-    let model_id = match payload
+    // the catalog (never trusted from the stored payload). The recorded checkpoint is honoured ONLY
+    // while `model` is still that checkpoint's engine: a duplicate that picked another model, or a
+    // client-authored key naming something that is not a trained checkpoint of `model`, drops the
+    // key and resolves `model` itself.
+    let requested_checkpoint = payload
         .get(crate::iris_training::CHECKPOINT_MODEL_ID_KEY)
         .and_then(Value::as_str)
-        .map(str::to_owned)
-    {
-        Some(checkpoint) => {
-            validate_model_id(&checkpoint)?;
-            checkpoint
+        .map(str::to_owned);
+    let mut honoured_checkpoint = None;
+    if let Some(checkpoint) = requested_checkpoint {
+        validate_model_id(&checkpoint)?;
+        let entry = project_image_manifest_for_worker(
+            crate::models::resolve_model_manifest_entry(state, &checkpoint).await?,
+        );
+        let engine = entry
+            .as_object()
+            .and_then(crate::iris_training::trained_checkpoint_engine_model);
+        if engine == Some(model_id.as_str()) {
+            honoured_checkpoint = Some((checkpoint, entry));
+        } else {
+            payload.remove(crate::iris_training::CHECKPOINT_MODEL_ID_KEY);
         }
-        None => model_id,
+    }
+    let (model_id, mut model_manifest_entry) = match honoured_checkpoint {
+        Some(resolved) => resolved,
+        None => {
+            let entry = project_image_manifest_for_worker(
+                crate::models::resolve_model_manifest_entry(state, &model_id).await?,
+            );
+            (model_id, entry)
+        }
     };
-    let mut model_manifest_entry = project_image_manifest_for_worker(
-        crate::models::resolve_model_manifest_entry(state, &model_id).await?,
-    );
     // A trained Iris full-model export renders through the `iris_3b` generation engine on its own
     // backbone directory (sc-25685/sc-25686).
     if let Some(engine_entry) = crate::iris_training::alias_trained_checkpoint(
@@ -1459,8 +1483,17 @@ async fn apply_progress_side_effects(
     // A trainer that finishes a cancel durably (Iris after its first optimizer step) has published
     // a checkpoint AND an export; the worker marks that result `trainedArtifactExported`, and the
     // export registers exactly as a completed run's would (the registrars still verify the files).
+    // Only the Iris trainer finishes a cancel durably; any other trainer's canceled run registers
+    // nothing even if a result claims an export (E8: existing trainers keep their behaviour).
     let canceled_with_export = matches!(job.status, JobStatus::Canceled)
         && matches!(job.job_type, JobType::LoraTrain)
+        && job
+            .payload
+            .get("plan")
+            .and_then(|plan| plan.get("target"))
+            .and_then(|target| target.get("kernel"))
+            .and_then(Value::as_str)
+            .is_some_and(sceneworks_core::training::iris::is_iris_training_kernel)
         && accepted_result
             .get("trainedArtifactExported")
             .and_then(Value::as_bool)

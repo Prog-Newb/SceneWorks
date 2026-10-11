@@ -184,8 +184,9 @@ fn memory_floors_json() -> Value {
         "unit": "GB",
         "basis": "Declared floors (no measurement campaign): MLX LoRA 256px peak 15.3 GB and Candle \
                   LoRA 256px peak 21.8 GB on the real 3B backbone; larger resolutions and full \
-                  fine-tuning are conservative declarations. A machine under its floor is refused \
-                  before the model loads.",
+                  fine-tuning are conservative declarations. An MLX floor is judged against unified \
+                  memory minus the macOS/app reserve the MLX generation gate holds out. A machine \
+                  under its floor is refused before the model loads.",
         "lanes": Value::Object(lanes),
     })
 }

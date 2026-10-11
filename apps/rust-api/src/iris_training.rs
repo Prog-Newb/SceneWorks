@@ -383,14 +383,57 @@ pub(crate) fn trained_checkpoint_engine_model(entry: &JsonObject) -> Option<&str
     .then_some(engine)
 }
 
-/// The embedded builtin `iris_3b` catalog entry (the generation install a trained checkpoint
-/// inherits its surface and its text-encoder co-requisite from).
-fn builtin_iris_entry() -> Result<JsonObject, ApiError> {
-    crate::models::embedded_builtin_catalog_entry(|candidate| {
-        candidate.get("id").and_then(Value::as_str) == Some(IRIS_BASE_MODEL)
-    })?
-    .and_then(|entry| entry.as_object().cloned())
-    .ok_or_else(|| ApiError::internal("the builtin iris_3b catalog entry is missing"))
+/// The generation surface a trained checkpoint renders with — what its ENGINE declares. Never
+/// stored on the user entry: [`overlay_trained_checkpoint_surface`] reads it from the engine's
+/// catalog entry every time the catalog is read, so a registered export follows later changes to
+/// the engine entry (new adapter families, limits, capabilities) instead of a registration-time
+/// snapshot.
+const ENGINE_SURFACE_KEYS: [&str; 10] = [
+    "type",
+    "adapter",
+    "capabilities",
+    "image",
+    "defaults",
+    "limits",
+    "loraCompatibility",
+    "macOnly",
+    "mlx",
+    "candle",
+];
+
+/// Overlay a trained checkpoint's engine surface ([`ENGINE_SURFACE_KEYS`]) from its engine's
+/// builtin entry — found in `builtin` (the configured manifest), else the compiled-in manifest.
+/// A no-op for any entry that is not a trained checkpoint.
+pub(crate) fn overlay_trained_checkpoint_surface(
+    entry: &mut Value,
+    builtin: &[Value],
+) -> Result<(), ApiError> {
+    let Some(object) = entry.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(engine) = trained_checkpoint_engine_model(object).map(str::to_owned) else {
+        return Ok(());
+    };
+    let is_engine =
+        |candidate: &Value| candidate.get("id").and_then(Value::as_str) == Some(&engine);
+    let engine_entry = match builtin.iter().find(|candidate| is_engine(candidate)) {
+        Some(found) => Some(found.clone()),
+        None => crate::models::embedded_builtin_catalog_entry(is_engine)?,
+    };
+    let Some(engine_entry) = engine_entry.as_ref().and_then(Value::as_object) else {
+        return Ok(());
+    };
+    for key in ENGINE_SURFACE_KEYS {
+        match engine_entry.get(key) {
+            Some(value) => {
+                object.insert(key.to_owned(), value.clone());
+            }
+            None => {
+                object.remove(key);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Register a completed (or exported-on-cancel) Iris FULL run's export as a user image model.
@@ -420,26 +463,13 @@ pub(crate) fn iris_full_checkpoint_entry(
             export.display()
         )));
     }
-    let builtin = builtin_iris_entry()?;
-    let stem = file_stem(file_name).unwrap_or_default();
     let mut entry = manifest_entry;
-    // The generation surface is the generation install's: what the engine renders a backbone with.
-    for key in [
-        "type",
-        "adapter",
-        "capabilities",
-        "image",
-        "defaults",
-        "limits",
-        "loraCompatibility",
-        "macOnly",
-        "mlx",
-        "candle",
-    ] {
-        if let Some(value) = builtin.get(key) {
-            entry.insert(key.to_owned(), value.clone());
-        }
+    // The generation surface is the ENGINE's, overlaid at catalog read time
+    // ([`overlay_trained_checkpoint_surface`]); only the identity is stored here.
+    for key in ENGINE_SURFACE_KEYS {
+        entry.remove(key);
     }
+    entry.insert("type".to_owned(), Value::String("image".to_owned()));
     let name = entry
         .get("name")
         .and_then(Value::as_str)
@@ -473,7 +503,7 @@ pub(crate) fn iris_full_checkpoint_entry(
     );
     entry.insert(
         "source".to_owned(),
-        json!({ "provider": "training", "path": format!("models/finetunes/{model_id}/{stem}") }),
+        json!({ "provider": "training", "path": format!("models/finetunes/{model_id}") }),
     );
     entry.insert(
         "files".to_owned(),
