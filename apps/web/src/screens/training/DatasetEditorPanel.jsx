@@ -96,7 +96,7 @@ export function DatasetEditorPanel({
     onImportParquet, onDeleteDataset, deletingDataset,
   } = datasetSession;
   const {
-    captionDraftById, onPreview, updateCaption, captioning, addDialogOpen,
+    captionDraftById, namedCaptionsById = {}, onPreview, updateCaption, captioning, addDialogOpen,
     selectedAssetIds, addAssets, handleImport, captionDialog, updateCaptionSetting,
     runCaptionJob, toggleCaptionExtraOption, displayedCaptionPrompt, captionSettings,
     captionModelMissing = false, onDownloadCaptionModel, captionModelSizeLabel = "",
@@ -489,6 +489,12 @@ export function DatasetEditorPanel({
               const readinessEntry = readinessByKey?.get(asset.id);
               const savedItem = savedItemBySelection.get(asset.id);
               const preparedPath = savedItem?.ltxPreparedBundlePath;
+              // Named caption fields (sc-25685): a fresh `.json` import's, else the saved item's.
+              const namedCaptions = namedCaptionsById[asset.id] ?? savedItem?.captions;
+              const namedCaptionFields =
+                namedCaptions && typeof namedCaptions === "object" && !Array.isArray(namedCaptions)
+                  ? Object.keys(namedCaptions)
+                  : [];
               return (
                 <article
                   className={["training-caption-card", disabled ? "disabled" : ""].filter(Boolean).join(" ")}
@@ -529,6 +535,15 @@ export function DatasetEditorPanel({
                       rows={3}
                       value={draft.text ?? ""}
                     />
+                    {namedCaptionFields.length ? (
+                      <span
+                        className="training-field-hint training-caption-named-fields"
+                        title={namedCaptionFields.map((field) => `${field}: ${namedCaptions[field]}`).join("\n")}
+                      >
+                        +{namedCaptionFields.length} caption field{namedCaptionFields.length === 1 ? "" : "s"}:{" "}
+                        {namedCaptionFields.join(", ")}
+                      </span>
+                    ) : null}
                     <div className="training-caption-card-actions">
                       <label className="secondary-action strong">
                         {preparedUploadingId === asset.id
@@ -581,6 +596,8 @@ export function DatasetEditorPanel({
           onAdd={addAssets}
           onClose={() => setAddDialogOpen(false)}
           onImport={handleImport}
+          fileAccept="image/*,.txt,text/plain,.json,application/json"
+          fileHint="Drag images with caption .txt or .json sidecars here, or"
         />
       ) : null}
       {captionDialog ? (

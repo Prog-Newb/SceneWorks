@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "c9e76d0ddedc4937f89f1de6d587a78d1cc4b2d3",
+    "inferenceRevision": "c9bc4ac4ffc53117860f00b3b2b813b809119e55",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -370,6 +370,7 @@
     "anima_base_lora": "anima_base",
     "illustrious_xl_v1_lora": "sdxl",
     "illustrious_xl_v2_lora": "sdxl",
+    "iris_3b_generation": "iris_3b",
     "kolors_lora": "kolors",
     "krea_2_control": "krea_2_control",
     "krea_2_raw_lora": "krea_2_raw",

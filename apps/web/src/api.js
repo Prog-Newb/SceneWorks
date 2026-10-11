@@ -215,3 +215,17 @@ export async function fetchAssetWorkflow(projectId, assetId, { token, signal } =
     { signal },
   );
 }
+
+// ---- Training data-walk preflight (sc-25685) ------------------------------------
+// Which items of an N-item dataset a training target's sampler will actually visit at a given
+// batch size. Iris' upstream ranged sampler walks whole 640-item chunks, so a dataset of
+// 641–1279 items only trains on the first 640; the Studio shows `warning` inline before launch.
+// Resolves to `{ applies, items, covered, unusedItems, chunks, warning }`.
+export async function fetchTrainingDataWalk({ targetId, items, batchSize }, { token, signal } = {}) {
+  const params = new URLSearchParams({
+    targetId: String(targetId ?? ""),
+    items: String(items ?? 0),
+    batchSize: String(batchSize ?? 1),
+  });
+  return apiFetch(`/api/v1/training/data-walk?${params.toString()}`, token, { signal });
+}

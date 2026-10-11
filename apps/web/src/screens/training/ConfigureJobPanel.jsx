@@ -5,8 +5,11 @@ import { Icon } from "../../components/Icons.jsx";
 import { RequiredModelsNotice } from "../../components/RequiredModelsNotice.jsx";
 import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
+import { IrisTrainingOptions } from "./IrisTrainingOptions.jsx";
 import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Validation.jsx";
 import {
+  choiceOptionsForTarget,
+  gradientCheckpointingUnsupported,
   lossTypeOptions,
   ltx25WorkflowPlan,
   networkTypeLabel,
@@ -17,6 +20,7 @@ import {
   timestepTypeOptionsForTarget,
   trainingAdapterVersionLabels,
 } from "../../training/trainingConfig.js";
+import { irisMemoryFloors, irisUpstreamPromptsOn, isIrisTarget } from "../../training/irisOptions.js";
 
 // Configure-training-job panel. The Purpose zone of the Training Studio under the
 // page-frame standard (sc-10475): one work-panel holding the twelve basic plan
@@ -94,6 +98,10 @@ export function ConfigureJobPanel({
   onOpenModels,
   onOpenQueue,
   onCancelJob,
+  // Iris-3B (sc-25685): the previous runs a new run can resume / start from, the active dataset's
+  // caption field names, the active training lane ("mlx" | "candle" | null = unknown) for the
+  // declared memory floor, and the data-walk preflight result for the selected dataset/batch.
+  irisContext = {},
 }) {
   // ControlNet training (epic 10159) reuses this panel: a `control_branch` target renders the
   // per-image control condition from the selected dataset (the data source) and trains a control
@@ -107,6 +115,19 @@ export function ConfigureJobPanel({
   const requiredFullPrecision = fullFinetuneConfig?.mixedPrecision;
   const fullCheckpointingUnsupported = fullFinetuneConfig?.gradientCheckpointing === false;
   const visibleTimestepTypeOptions = timestepTypeOptionsForTarget(selectedTarget);
+  // Limit-driven menus: a target that advertises the list gets exactly it; one that advertises a
+  // single value (Iris: balanced bias, MSE loss) shows it read-only rather than offering a refusal.
+  const visibleTimestepBiasOptions = choiceOptionsForTarget(selectedTarget, "timestepBiases", timestepBiasOptions);
+  const visibleLossTypeOptions = choiceOptionsForTarget(selectedTarget, "lossTypes", lossTypeOptions);
+  const advertisedPrecisions = choiceOptionsForTarget(selectedTarget, "mixedPrecisions", null);
+  const checkpointingUnsupported = gradientCheckpointingUnsupported(selectedTarget);
+  const sampleCountRange = Array.isArray(selectedTarget?.limits?.sampleCount) ? selectedTarget.limits.sampleCount : null;
+  const iris = isIrisTarget(selectedTarget);
+  const upstreamPrompts = iris && irisUpstreamPromptsOn(configDraft);
+  const memoryFloors = iris
+    ? irisMemoryFloors(selectedTarget, configDraft.networkType, configDraft.resolution, irisContext.trainingLane ?? null)
+    : [];
+  const laneNames = { mlx: "MLX (Apple Silicon unified memory)", candle: "Candle/CUDA (GPU memory)" };
   const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
     ? (selectedTarget?.limits?.ltxWorkflows ?? [])
     : [];
@@ -271,10 +292,12 @@ export function ConfigureJobPanel({
             <label>
               Sample count
               <input
+                max={sampleCountRange?.[1]}
                 min="0"
                 onChange={(event) => updateConfigDraft("sampleCount", event.target.value)}
                 type="number"
                 value={configDraft.sampleCount ?? ""}
+                {...invalidProps(configValidity, "sampleCount")}
               />
             </label>
             <label>
@@ -291,9 +314,19 @@ export function ConfigureJobPanel({
                 onChange={(event) => updateConfigDraft("sampleEvery", event.target.value)}
                 type="number"
                 value={configDraft.sampleEvery ?? ""}
+                {...invalidProps(configValidity, "sampleEvery")}
               />
             </label>
           </div>
+
+          {memoryFloors.length ? (
+            <p className="training-field-hint" aria-label="Declared memory floor">
+              Memory floor (declared, not yet measured):{" "}
+              {memoryFloors.map((floor) => `${laneNames[floor.lane] ?? floor.lane} ${floor.gb} GB`).join(" · ")} for a{" "}
+              {configDraft.resolution}px {isFullFinetune ? "full fine-tune" : "adapter"} run. A machine under its floor is
+              refused before the model loads.
+            </p>
+          ) : null}
 
           {ltxWorkflows.length ? (
             <section className="training-control-note" aria-label="LTX-2.5 workflow">
@@ -542,6 +575,7 @@ export function ConfigureJobPanel({
                   onChange={(event) => updateConfigDraft("lrWarmupSteps", event.target.value)}
                   type="number"
                   value={configDraft.lrWarmupSteps ?? ""}
+                  {...invalidProps(configValidity, "lrWarmupSteps")}
                 />
               </label>
               <label>
@@ -556,8 +590,12 @@ export function ConfigureJobPanel({
               </label>
               <label>
                 Timestep bias
-                <select onChange={(event) => updateConfigDraft("timestepBias", event.target.value)} value={configDraft.timestepBias ?? ""}>
-                  {timestepBiasOptions.map((option) => (
+                <select
+                  disabled={visibleTimestepBiasOptions.length < 2}
+                  onChange={(event) => updateConfigDraft("timestepBias", event.target.value)}
+                  value={configDraft.timestepBias ?? ""}
+                >
+                  {visibleTimestepBiasOptions.map((option) => (
                     <option key={option} value={option}>
                       {optionLabel(option)}
                     </option>
@@ -566,8 +604,12 @@ export function ConfigureJobPanel({
               </label>
               <label>
                 Loss type
-                <select onChange={(event) => updateConfigDraft("lossType", event.target.value)} value={configDraft.lossType ?? ""}>
-                  {lossTypeOptions.map((option) => (
+                <select
+                  disabled={visibleLossTypeOptions.length < 2}
+                  onChange={(event) => updateConfigDraft("lossType", event.target.value)}
+                  value={configDraft.lossType ?? ""}
+                >
+                  {visibleLossTypeOptions.map((option) => (
                     <option key={option} value={option}>
                       {option === "mse" ? "Mean Squared Error" : optionLabel(option)}
                     </option>
@@ -606,11 +648,21 @@ export function ConfigureJobPanel({
               </label>
               <label>
                 Precision
-                <input
-                  disabled={Boolean(requiredFullPrecision)}
-                  onChange={(event) => updateConfigDraft("precision", event.target.value)}
-                  value={requiredFullPrecision ?? configDraft.precision ?? ""}
-                />
+                {advertisedPrecisions && !requiredFullPrecision ? (
+                  <select onChange={(event) => updateConfigDraft("precision", event.target.value)} value={configDraft.precision ?? ""}>
+                    {advertisedPrecisions.map((option) => (
+                      <option key={option} value={option}>
+                        {option.toUpperCase()}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    disabled={Boolean(requiredFullPrecision)}
+                    onChange={(event) => updateConfigDraft("precision", event.target.value)}
+                    value={requiredFullPrecision ?? configDraft.precision ?? ""}
+                  />
+                )}
                 {requiredFullPrecision ? (
                   <span className="training-field-hint">
                     This backend requires {requiredFullPrecision.toUpperCase()} for full base fine-tuning.
@@ -631,18 +683,26 @@ export function ConfigureJobPanel({
             <label className="training-sample-prompts">
               Sample prompts
               <textarea
+                disabled={upstreamPrompts}
                 onChange={(event) => updateConfigDraft("samplePrompts", event.target.value)}
                 placeholder="One prompt per line. Leave blank to use the trigger-phrase defaults."
                 rows={4}
                 value={configDraft.samplePrompts ?? ""}
               />
               <span className="training-field-hint">
-                One prompt per line. Renders one preview per prompt, up to the sample count.
+                {upstreamPrompts
+                  ? "Iris' seven built-in validation prompts replace these for this run (Iris training options → Previews)."
+                  : "One prompt per line. Renders one preview per prompt, up to the sample count."}
               </span>
             </label>
 
             <div className="training-advanced-toggles">
-              {fullCheckpointingUnsupported ? (
+              {checkpointingUnsupported ? (
+                <p className="training-field-hint">
+                  This target's trainer does not implement gradient checkpointing, so it is not applied. Lower the
+                  training resolution if the run does not fit.
+                </p>
+              ) : fullCheckpointingUnsupported ? (
                 <p className="training-field-hint">
                   Gradient checkpointing is not available for a full base fine-tune yet, so it is not applied to this
                   run. Lower the training resolution if the run does not fit.
@@ -658,6 +718,17 @@ export function ConfigureJobPanel({
                 </label>
               )}
             </div>
+
+            {iris ? (
+              <IrisTrainingOptions
+                captionFieldOptions={irisContext.captionFieldOptions}
+                configDraft={configDraft}
+                configValidity={configValidity}
+                fullRuns={irisContext.fullRuns}
+                previousRuns={irisContext.previousRuns}
+                updateConfigDraft={updateConfigDraft}
+              />
+            ) : null}
           </AdvancedSection>
 
           {/* Dataset Doctor readout before the Train button (sc-6534). Advisory: it
@@ -666,6 +737,13 @@ export function ConfigureJobPanel({
               chip row below as one of configValidity's errors (sc-10648), so the
               hand-rolled "isn't ready to train" paragraph is gone. */}
           <DatasetDoctorReadout {...datasetDoctor} compact />
+
+          {/* Iris data-walk preflight (sc-25685): upstream's ranged sampler only visits whole
+              640-item chunks, so part of a dataset can go unused. Non-blocking — the run is
+              valid, the user should just know before launching. */}
+          {iris && irisContext.dataWalk?.warning ? (
+            <p className="inline-warning" role="status">{irisContext.dataWalk.warning}</p>
+          ) : null}
 
           {/* Only broken values, never the "you haven't picked a dataset yet" hints —
               those are obvious from the form. Sits against the actions row so it reads

@@ -5335,7 +5335,7 @@ pub(crate) fn sum_text_encoder_bytes(dir: &Path) -> u64 {
 /// on the generator-cache thread, which is already blocking on the weight load, so a one-shot
 /// subprocess probe there is free. `None` off macOS or when the probe fails ⇒ the gate no-ops (a
 /// cached `None` is a deliberate fail-open, consistent with `Unknown` never blocking).
-fn probe_total_unified_memory_gib() -> Option<f64> {
+pub(crate) fn probe_total_unified_memory_gib() -> Option<f64> {
     probe_total_unified_memory_bytes().map(|bytes| bytes as f64 / BYTES_PER_GIB)
 }
 

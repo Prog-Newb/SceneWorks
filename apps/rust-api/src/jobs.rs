@@ -884,9 +884,37 @@ pub(crate) async fn canonicalize_image_model_payload(
     };
     validate_model_id(&model_id)?;
 
-    let model_manifest_entry = project_image_manifest_for_worker(
+    // A retried/duplicated request for a trained checkpoint was aliased onto its engine model at
+    // create time; re-resolve from the checkpoint the user picked so the alias is re-derived from
+    // the catalog (never trusted from the stored payload).
+    let model_id = match payload
+        .get(crate::iris_training::CHECKPOINT_MODEL_ID_KEY)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    {
+        Some(checkpoint) => {
+            validate_model_id(&checkpoint)?;
+            checkpoint
+        }
+        None => model_id,
+    };
+    let mut model_manifest_entry = project_image_manifest_for_worker(
         crate::models::resolve_model_manifest_entry(state, &model_id).await?,
     );
+    // A trained Iris full-model export renders through the `iris_3b` generation engine on its own
+    // backbone directory (sc-25685/sc-25686).
+    if let Some(engine_entry) = crate::iris_training::alias_trained_checkpoint(
+        state,
+        &model_id,
+        &model_manifest_entry,
+        payload,
+    )
+    .await?
+    {
+        model_manifest_entry = engine_entry;
+    } else {
+        payload.remove(crate::iris_training::CHECKPOINT_MODEL_ID_KEY);
+    }
     if matches!(job_type, JobType::ImageDetail)
         && !model_manifest_entry
             .as_object()
@@ -921,7 +949,7 @@ pub(crate) async fn canonicalize_image_model_payload(
 ///
 /// Keep every other soft component: selected decoders and other request-specific features resolve
 /// their own authored component ids from this worker-private entry.
-fn project_image_manifest_for_worker(mut entry: Value) -> Value {
+pub(crate) fn project_image_manifest_for_worker(mut entry: Value) -> Value {
     if let Some(downloads) = entry.get_mut("downloads").and_then(Value::as_array_mut) {
         downloads.retain(|download| {
             !(download.get("coRequisite").and_then(Value::as_bool) == Some(true)
@@ -1428,7 +1456,16 @@ async fn apply_progress_side_effects(
     // On a completing real training run, register the produced adapter as a
     // SceneWorks LoRA after authoritative completion acceptance, then fold the
     // registration outcome into the persisted result (story 1418).
-    if matches!(job.status, JobStatus::Completed) {
+    // A trainer that finishes a cancel durably (Iris after its first optimizer step) has published
+    // a checkpoint AND an export; the worker marks that result `trainedArtifactExported`, and the
+    // export registers exactly as a completed run's would (the registrars still verify the files).
+    let canceled_with_export = matches!(job.status, JobStatus::Canceled)
+        && matches!(job.job_type, JobType::LoraTrain)
+        && accepted_result
+            .get("trainedArtifactExported")
+            .and_then(Value::as_bool)
+            == Some(true);
+    if matches!(job.status, JobStatus::Completed) || canceled_with_export {
         if let Some(status) = register_completed_training_lora(state, &job_id).await {
             result.extend(status);
         }
@@ -2027,6 +2064,62 @@ pub(crate) async fn register_trained_base_checkpoint(
         .to_owned();
     validate_lora_id_component(&model_id)?;
     let (output_dir, manifest_path) = resolve_finetune_output_location(state, &model_id);
+
+    // Iris-3B (sc-25685/sc-25686): the full-model export is `<output_dir>/<stem>/{config.yaml,
+    // model.safetensors}` — upstream's export layout, which the generation engine loads as its
+    // backbone resource unchanged — not Mage's diffusers transformer tree.
+    if manifest_entry.get("family").and_then(Value::as_str)
+        == Some(sceneworks_core::training::iris::IRIS_FAMILY)
+    {
+        let entry = crate::iris_training::iris_full_checkpoint_entry(
+            job,
+            manifest_entry,
+            &output_dir,
+            &model_id,
+        )?;
+        let export = entry
+            .get("paths")
+            .and_then(|paths| paths.get("model"))
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .ok_or_else(|| ApiError::internal("Iris export path missing"))?;
+        tokio::fs::write(
+            export.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec_pretty(&json!({
+                "modelId": model_id,
+                "provider": "training",
+                "jobId": job.id,
+                "completedAt": now_rfc3339(),
+            }))
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+        )
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!(
+                "Could not mark the Iris export at {} as installed: {error}",
+                export.display()
+            ))
+        })?;
+        let upsert_id = model_id.clone();
+        mutate_manifest_entries(state, &manifest_path, "models", move |entries| {
+            let created_at = entries
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(upsert_id.as_str()))
+                .and_then(|item| item.get("createdAt").cloned());
+            let mut entries = entries
+                .into_iter()
+                .filter(|item| item.get("id").and_then(Value::as_str) != Some(upsert_id.as_str()))
+                .collect::<Vec<_>>();
+            let mut entry = entry;
+            if let Some(created_at) = created_at {
+                entry.insert("createdAt".to_owned(), created_at);
+            }
+            entries.push(Value::Object(entry));
+            Ok((entries, ()))
+        })
+        .await?;
+        return Ok(Some((model_id, manifest_path)));
+    }
 
     let Some(files) = trusted_base_checkpoint_files(&output_dir) else {
         return Err(ApiError::internal(format!(
