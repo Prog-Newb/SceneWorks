@@ -605,6 +605,8 @@ mod tests {
     /// stub engine ran, and any file written under the project.
     struct ArmRun {
         outcome: WorkerResult<()>,
+        /// How many times the arm called the loader (0 ⇒ refused before load).
+        load_calls: u32,
         posts: Vec<Value>,
         asset_writes: Vec<Value>,
         generate_calls: u32,
@@ -634,15 +636,28 @@ mod tests {
     /// Drive `generate_stream_using` for one iris text-to-image job; `extra` is merged into the
     /// job payload.
     fn run_iris_arm(behavior: ArmBehavior, cancel_requested: bool, extra: Value) -> ArmRun {
-        // The arm admits against the host's unified memory before loading; pin an emulated budget
-        // the iris pipeline fits so the stub engine runs on any host (a 7 GiB hosted runner
-        // otherwise refuses the request before the arm under test is reached).
+        run_iris_arm_with_memory_cap(behavior, cancel_requested, extra, "64")
+    }
+
+    /// [`run_iris_arm`] against an emulated `memory_cap_gb` budget: the MLX unified-memory cap on
+    /// macOS, the `SCENEWORKS_CUDA_VRAM_CAP_GB` card cap on the Candle lane.
+    fn run_iris_arm_with_memory_cap(
+        behavior: ArmBehavior,
+        cancel_requested: bool,
+        extra: Value,
+        memory_cap_gb: &str,
+    ) -> ArmRun {
+        // The arm admits against the host's memory before loading; pin an emulated budget so the
+        // outcome does not depend on the host (a 7 GiB hosted runner otherwise refuses the request
+        // before the arm under test is reached, and a GPU-less runner yields no budget at all).
         let _env = crate::test_env::EnvVars::set(&[
             ("HF_HUB_CACHE", ""),
             ("HUGGINGFACE_HUB_CACHE", ""),
             ("HF_HOME", ""),
             #[cfg(target_os = "macos")]
-            (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64"),
+            (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, memory_cap_gb),
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            (crate::vram_gate::CUDA_VRAM_CAP_ENV, memory_cap_gb),
         ]);
         let data = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
@@ -659,6 +674,7 @@ mod tests {
             std::fs::write(refs.join("main"), revision).unwrap();
         }
         let calls = Arc::new(Mutex::new(0_u32));
+        let loads = Arc::new(Mutex::new(0_u32));
         let seen = Arc::new(Mutex::new(None));
         let stopped_on_cancel = Arc::new(Mutex::new(false));
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -698,9 +714,11 @@ mod tests {
                     .expect("iris_3b is linked")
                     .descriptor;
                 let loader_calls = Arc::clone(&calls);
+                let loader_loads = Arc::clone(&loads);
                 let loader_seen = Arc::clone(&seen);
                 let loader_stopped = Arc::clone(&stopped_on_cancel);
                 let loader = move |_engine: &str, _spec: &LoadSpec| {
+                    *loader_loads.lock().unwrap() += 1;
                     Ok(Box::new(IrisArmProbe {
                         descriptor,
                         behavior,
@@ -745,8 +763,10 @@ mod tests {
         let generate_calls = *calls.lock().unwrap();
         let seen = seen.lock().unwrap().clone();
         let stopped_on_cancel = *stopped_on_cancel.lock().unwrap();
+        let load_calls = *loads.lock().unwrap();
         ArmRun {
             outcome,
+            load_calls,
             posts,
             asset_writes,
             generate_calls,
@@ -786,6 +806,7 @@ mod tests {
             "a user-cancelled iris job ends Canceled, got {:?}",
             run.outcome
         );
+        assert_eq!(run.load_calls, 1, "an admitted job loads exactly once");
         assert_eq!(run.generate_calls, 1, "the stub engine ran exactly once");
         assert!(
             run.stopped_on_cancel,
@@ -888,5 +909,56 @@ mod tests {
             Some((Some(3.0), Some("blurry".to_owned()), None))
         );
         assert_eq!(knob_events(&honored.logged, "job-iris"), Vec::new());
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // sc-25680 review — the Candle lane's declared VRAM floor (E8). Candle-only: `vram_gate` and
+    // the Candle arm compile only off-Mac with `backend-candle`, so these run on the
+    // windows-candle lane, never on a Mac.
+    // ---------------------------------------------------------------------------------------
+
+    /// Every tier key the Candle gate can name for the single bf16 artifact resolves a resident
+    /// AND a staged prediction, so `fit_decision` is never `Unknown` (admit-anything) for iris.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn the_candle_gate_has_a_resident_and_a_staged_prediction_for_every_iris_tier_key() {
+        let iris = shipped_iris_entry();
+        for advanced in [
+            json!({}),
+            json!({ "mlxQuantize": 0 }),
+            json!({ "mlxQuantize": 4 }),
+            json!({ "mlxQuantize": 8 }),
+        ] {
+            let tier =
+                crate::vram_gate::requested_tier_key(advanced.as_object().unwrap(), &iris, false);
+            assert_eq!(
+                crate::vram_gate::predicted_peak_gb(&iris, tier),
+                Some(24.0),
+                "{tier}: the padded resident floor"
+            );
+            assert_eq!(
+                crate::vram_gate::predicted_sequential_peak_gb(&iris, tier),
+                Some(21.4 + crate::vram_gate::HEADROOM_GB),
+                "{tier}: the staged bound (recorded resident peak + reserve)"
+            );
+        }
+    }
+
+    /// A card under the floor gets a typed refusal BEFORE the loader runs — not a load that OOMs.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn a_card_under_the_iris_candle_floor_is_refused_before_load() {
+        let run = run_iris_arm_with_memory_cap(ArmBehavior::Fails, false, json!({}), "16");
+        match &run.outcome {
+            Err(crate::error::WorkerError::InvalidPayload(message)) => assert!(
+                message.contains("iris_3b") && message.contains("VRAM"),
+                "the refusal names the model and its VRAM need: {message}"
+            ),
+            other => panic!("a 16 GB card must be refused before load, got {other:?}"),
+        }
+        assert_eq!(run.load_calls, 0, "refused before the loader ran");
+        assert_eq!(run.generate_calls, 0);
+        assert!(run.asset_writes.is_empty(), "{:?}", run.asset_writes);
+        assert!(run.project_files.is_empty(), "{:?}", run.project_files);
     }
 }

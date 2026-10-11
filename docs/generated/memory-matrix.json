@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:fde2746212fcc9dce6edc8e28b1d1304c3e42ced5890c2a3e6cec05f3388d367",
+    "sceneWorksRevision": "source-tree:671e02993bad8bb45ff4ba8b5d7ea7e6ada305c24f9127f44a29fc34665c01a0",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "6ec94b7d26394254c29cd79fb4a23af81fb282be1a2bf9615819ca18521560fa"
+        "sha256": "f3ae84d3e010ece415f513cb13d2753773eac645a0fd77f7df7367f688326c25"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -141,8 +141,8 @@
     "publishedCells": 3855,
     "elidedCells": 5735,
     "elidedByState": {
-      "Implemented": 1218,
-      "Missing": 4517
+      "Implemented": 1222,
+      "Missing": 4513
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 49,
@@ -13220,9 +13220,9 @@
       "coordinates": 2,
       "published": 0,
       "elided": 2,
-      "implemented": 0,
+      "implemented": 2,
       "states": {
-        "Missing": 2
+        "Implemented": 2
       }
     },
     {
@@ -13232,9 +13232,9 @@
       "coordinates": 2,
       "published": 0,
       "elided": 2,
-      "implemented": 0,
+      "implemented": 2,
       "states": {
-        "Missing": 2
+        "Implemented": 2
       }
     },
     {
