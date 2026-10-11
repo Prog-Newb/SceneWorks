@@ -145,6 +145,7 @@ import {
 } from "../components/generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { useBatchPromptState } from "./imageStudio/useBatchPromptState.js";
+import { CAPTION_OVERFLOW_LABELS, promptBatchSize, resolveCfgInterval } from "./imageStudio/samplingControls.js";
 import { usePidState, useStrictControlState } from "./imageStudio/useImageControlState.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import {
@@ -213,13 +214,8 @@ import {
   guidanceMethodOptionsFromModel,
   maxStepsForModel,
   negativePromptInertAtGuidance,
-  CAPTION_OVERFLOW_LABELS,
-  captionOverflowOptions,
   guidanceIsOff,
   patchGridHint,
-  resolveCfgInterval,
-  supportsCfgIntervalAxis,
-  supportsSchedulerShiftAxis,
   samplerDefaultFromModel,
   samplerOptionsFromModel,
   schedulerDefaultFromModel,
@@ -590,8 +586,7 @@ export function ImageStudio() {
   const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? null);
   // sc-25681: the CFG interval (two raw inputs, "" = the model's own bound) and the caption-
   // overflow policy ("default" = the checkpoint's own), for a model that declares them (Iris-3B).
-  const [cfgIntervalStart, setCfgIntervalStart] = useState(saved.cfgIntervalStart ?? "");
-  const [cfgIntervalEnd, setCfgIntervalEnd] = useState(saved.cfgIntervalEnd ?? "");
+  const [cfgInterval, setCfgInterval] = useState(saved.cfgInterval ?? "");
   const [captionOverflow, setCaptionOverflow] = useState(saved.captionOverflow ?? "default");
   // Guidance method (epic 7434). "cfg" is the engine-standard no-op default; the
   // picker only surfaces alternatives a model advertises on the active backend
@@ -1459,21 +1454,20 @@ export function ImageStudio() {
   // menu shows the Schedule shift control on its own; the CFG interval is disabled (and not sent)
   // while CFG is off, exactly like the CFG-bound negative prompt; the caption-overflow menu only
   // appears for a model that offers policies.
-  const supportsSchedulerShift = supportsSchedulerShiftAxis(selectedModel);
+  const supportsSchedulerShift = selectedModel?.image?.supportsSchedulerShift === true;
   // `null` = no explicit value yet (a fresh workspace, or a recipe that recorded none): the model's
   // own default, which for a shift-axis model (Iris-3B) is its checkpoint's flow shift — not the
   // historical blanket 3.0, which would be SENT for it and silently change the schedule.
   const effectiveSchedulerShift = schedulerShift ?? schedulerShiftDefaultFromModel(selectedModel);
   const showSchedulerShift = supportsSchedulerShift || (showSchedulerPicker && scheduler !== "default");
-  const supportsCfgInterval = supportsGuidance && supportsCfgIntervalAxis(selectedModel);
+  const supportsCfgInterval = supportsGuidance && selectedModel?.image?.supportsCfgInterval;
   const cfgIntervalDisabled = guidanceIsOff(selectedModel, guidanceOverride);
   const { interval: resolvedCfgInterval, error: cfgIntervalError } = resolveCfgInterval({
     model: supportsGuidance ? selectedModel : null,
-    start: cfgIntervalStart,
-    end: cfgIntervalEnd,
+    text: cfgInterval,
     guidanceOverride,
   });
-  const captionOverflowChoices = captionOverflowOptions(selectedModel);
+  const captionOverflowChoices = selectedModel?.image?.captionOverflowPolicies ?? [];
   const outgoingCaptionOverflow = captionOverflowChoices.includes(captionOverflow)
     ? captionOverflow
     : "default";
@@ -1534,8 +1528,7 @@ export function ImageStudio() {
     setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions));
     setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions));
     setSchedulerShift(schedulerShiftDefaultFromModel(selectedModel));
-    setCfgIntervalStart("");
-    setCfgIntervalEnd("");
+    setCfgInterval("");
     setCaptionOverflow("default");
     setGuidanceMethod(
       preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions),
@@ -1880,13 +1873,14 @@ export function ImageStudio() {
     setScheduler(rawSettings.scheduler ?? "default");
     setSchedulerShift(rawSettings.schedulerShift ?? rawSettings.timestepShift ?? null);
     // sc-25681: the recorded CFG interval / caption-overflow policy (absent = the model's own).
-    setCfgIntervalStart(
-      Array.isArray(rawSettings.cfgInterval) ? String(rawSettings.cfgInterval[0]) : "",
-    );
-    setCfgIntervalEnd(
-      Array.isArray(rawSettings.cfgInterval) ? String(rawSettings.cfgInterval[1]) : "",
-    );
+    setCfgInterval(rawSettings.cfgInterval?.join?.(", ") ?? "");
     setCaptionOverflow(rawSettings.captionOverflow ?? "default");
+    // sc-25681: an image of a native prompt batch reopens the whole batch.
+    const batch = rawSettings.promptBatch;
+    if (Array.isArray(batch) && batch.length > 1) {
+      setBatchMode(true);
+      setBatchPromptsText(batch.join(batch.some((p) => p.includes("\n")) ? "\n---\n" : "\n"));
+    }
     setGuidanceMethod(rawSettings.guidanceMethod ?? "cfg");
     setCharacterId(settings.characterId ?? "");
     setCharacterLookId(settings.characterLookId ?? "");
@@ -2150,10 +2144,7 @@ export function ImageStudio() {
       ["schedulerShift", setSchedulerShift],
       [
         "cfgInterval",
-        (value) => {
-          setCfgIntervalStart(Array.isArray(value) ? String(value[0]) : "");
-          setCfgIntervalEnd(Array.isArray(value) ? String(value[1]) : "");
-        },
+        (value) => setCfgInterval(value?.join?.(", ") ?? ""),
       ],
       ["captionOverflow", setCaptionOverflow],
       ["guidanceMethod", setGuidanceMethod],
@@ -2283,8 +2274,7 @@ export function ImageStudio() {
     sampler,
     scheduler,
     schedulerShift,
-    cfgIntervalStart,
-    cfgIntervalEnd,
+    cfgInterval,
     captionOverflow,
     guidanceMethod,
     steps: stepsOverride,
@@ -2727,14 +2717,31 @@ export function ImageStudio() {
         }
       }
     }
-    for (const entry of iterateBatch(batchPrompts, batchVariables)) {
+    // sc-25681: a model with a native prompt batch (Iris-3B) packs consecutive same-size prompts
+    // into one job of up to `promptBatchSize` prompts; every other model keeps one job per prompt.
+    // The job's own `count` (a preset stack may override the studio's), so prompts × count fits.
+    const size = promptBatchSize(selectedModel, buildBatchJobRequest("").count);
+    function* chunks() {
+      let chunk = [];
+      for (const entry of iterateBatch(batchPrompts, batchVariables)) {
+        // Strip a leading [WxH] directive (sc-10063): the model gets the clean prompt, the job
+        // gets that per-prompt resolution.
+        const item = parsePromptResolution(entry.prompt);
+        if (chunk.length >= size || (chunk[0] && JSON.stringify(chunk[0].resolution) !== JSON.stringify(item.resolution))) {
+          yield chunk;
+          chunk = [];
+        }
+        chunk.push(item);
+      }
+      if (chunk.length) yield chunk;
+    }
+    for (const chunk of chunks()) {
       await waitForBatchSlot();
       if (batchAbortRef.current) {
         break;
       }
-      // Strip a leading [WxH] directive (sc-10063): the model gets the clean prompt, the job
-      // gets that per-prompt resolution.
-      const { prompt: cleanPrompt, resolution } = parsePromptResolution(entry.prompt);
+      const [{ prompt: cleanPrompt, resolution }] = chunk;
+      const n = chunk.length;
       try {
         let request;
         if (structuredPromptModel) {
@@ -2755,20 +2762,27 @@ export function ImageStudio() {
           });
         } else {
           request = buildBatchJobRequest(cleanPrompt, { resolution });
+          // Each prompt composed exactly as its own job would be; `prompt` stays prompts[0].
+          if (n > 1) request.prompts = chunk.map((item) => buildBatchJobRequest(item.prompt, { resolution }).prompt);
         }
         const job = await createImageJob(request);
         const current = batchRunRef.current;
         if (!current) break;
         replaceBatchRun(
           job?.id
-            ? { ...current, submitted: current.submitted + 1, activeJobIds: [...current.activeJobIds, job.id] }
-            : { ...current, submitted: current.submitted + 1, failed: current.failed + 1 },
+            ? {
+                ...current,
+                submitted: current.submitted + n,
+                activeJobIds: [...current.activeJobIds, job.id],
+                sizes: { ...current.sizes, [job.id]: n },
+              }
+            : { ...current, submitted: current.submitted + n, failed: current.failed + n },
         );
         if (batchAbortRef.current && job?.id) jobAction(job, "cancel");
       } catch {
         const current = batchRunRef.current;
         if (!current) break;
-        replaceBatchRun({ ...current, submitted: current.submitted + 1, failed: current.failed + 1 });
+        replaceBatchRun({ ...current, submitted: current.submitted + n, failed: current.failed + n });
       }
     }
     const current = batchRunRef.current;
@@ -3768,7 +3782,7 @@ export function ImageStudio() {
                 </select>
                 {/* sc-25681: informational only — the size is never restricted. */}
                 {patchGridNotice ? (
-                  <span className="field-hint patch-grid-hint" role="note">
+                  <span className="field-hint" role="note">
                     {patchGridNotice}
                   </span>
                 ) : null}
@@ -4059,41 +4073,20 @@ export function ImageStudio() {
                   [start, end] (1 = noise, 0 = clean). Disabled, and not sent, while guidance is
                   1.0: the engine refuses an interval there because it would do nothing. */}
               {supportsCfgInterval ? (
-                <fieldset className="cfg-interval" disabled={cfgIntervalDisabled}>
-                  <legend>Guidance interval</legend>
-                  <label>
-                    Start
-                    <input
-                      aria-label="Guidance interval start"
-                      max="1"
-                      min="0"
-                      onChange={(event) => setCfgIntervalStart(event.target.value)}
-                      placeholder="0"
-                      step="0.05"
-                      type="number"
-                      value={cfgIntervalStart}
-                    />
-                  </label>
-                  <label>
-                    End
-                    <input
-                      aria-label="Guidance interval end"
-                      max="1"
-                      min="0"
-                      onChange={(event) => setCfgIntervalEnd(event.target.value)}
-                      placeholder="1"
-                      step="0.05"
-                      type="number"
-                      value={cfgIntervalEnd}
-                    />
-                  </label>
+                <label>
+                  Guidance interval
+                  <input
+                    disabled={cfgIntervalDisabled}
+                    onChange={(event) => setCfgInterval(event.target.value)}
+                    placeholder="0, 1"
+                    value={cfgInterval}
+                  />
                   <span className="field-hint" role={cfgIntervalError ? "alert" : undefined}>
                     {cfgIntervalDisabled
-                      ? "The guidance interval only applies with guidance above 1.0 for this model."
-                      : cfgIntervalError ||
-                        "Guidance runs only at model times inside [start, end] (1 = noise, 0 = clean)."}
+                      ? "Needs guidance above 1."
+                      : cfgIntervalError || "start, end: guidance runs only between (1 = noise)."}
                   </span>
-                </fieldset>
+                </label>
               ) : null}
               {captionOverflowChoices.length ? (
                 <label>

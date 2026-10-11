@@ -357,6 +357,8 @@ mod tests {
         scheduler_shift: Option<f32>,
         cfg_interval: Option<(f32, f32)>,
         caption_overflow: Option<gen_core::CaptionOverflowPolicy>,
+        prompt_batch: Vec<String>,
+        count: u32,
     }
 
     impl Seen {
@@ -374,6 +376,8 @@ mod tests {
                 scheduler_shift: req.scheduler_shift,
                 cfg_interval: req.cfg_interval,
                 caption_overflow: req.caption_overflow,
+                prompt_batch: req.prompt_batch.clone(),
+                count: req.count,
             }
         }
     }
@@ -439,12 +443,20 @@ mod tests {
                 current: 1,
                 total: 100,
             });
+            // One image per prompt per `count` repetition, like the engine: a native prompt batch
+            // returns `prompt_batch.len() × count`, an ordinary request `count` (always 1 here).
+            // Image `k`'s pixels are all `k`, so the test can see which asset got which image.
             let image = || {
-                GenerationOutput::Images(vec![gen_core::Image {
-                    width: req.width,
-                    height: req.height,
-                    pixels: vec![0; (req.width * req.height * 3) as usize],
-                }])
+                let images = req.prompt_batch.len().max(1) * req.count as usize;
+                GenerationOutput::Images(
+                    (0..images)
+                        .map(|k| gen_core::Image {
+                            width: req.width,
+                            height: req.height,
+                            pixels: vec![k as u8; (req.width * req.height * 3) as usize],
+                        })
+                        .collect(),
+                )
             };
             match self.behavior {
                 ArmBehavior::Fails => Err(gen_core::Error::Unsupported(
@@ -703,7 +715,10 @@ mod tests {
                 let request = sceneworks_core::image_request::ImageRequest::from_payload(
                     payload.as_object().unwrap(),
                 );
-                let plan = super::super::ImagePlan::with_count(&request, request.count, None);
+                // The generic routes' image count (`ImageRoute::Mlx` / `CandleTxt2Img`): `count`,
+                // or `prompts × count` for a native prompt batch.
+                let plan =
+                    super::super::ImagePlan::with_count(&request, request.image_count(), None);
                 let descriptor = crate::engines::mlx_model("iris_3b")
                     .expect("iris_3b is linked")
                     .descriptor;
@@ -868,6 +883,8 @@ mod tests {
             scheduler_shift: None,
             cfg_interval: None,
             caption_overflow: None,
+            prompt_batch: Vec::new(),
+            count: 1,
         }
     }
 
@@ -1154,6 +1171,176 @@ mod tests {
             json!([{ "code": "caption_truncated", "message": FIXTURE_WARNING }])
         );
         assert!(settings.get("adapterApply").is_none(), "{settings}");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // sc-25681 — the NATIVE prompt batch through the real arm (MLX on macOS, Candle off-Mac).
+    // ---------------------------------------------------------------------------------------
+
+    /// An emulated budget that admits ONE weightless 64² Iris image but not eight: the MLX generic
+    /// estimate charges its activation term per batched image; the Candle gate adds
+    /// `(images − 1) × candle.promptBatchImageGb` to the 24 GB floor (8 images: 66 GB).
+    #[cfg(target_os = "macos")]
+    const BATCH_ADMISSION_CAP_GB: &str = "40";
+    #[cfg(not(target_os = "macos"))]
+    const BATCH_ADMISSION_CAP_GB: &str = "28";
+
+    fn batch_payload(prompts: &[&str], count: u32) -> Value {
+        json!({
+            "prompt": prompts[0],
+            "prompts": prompts,
+            "count": count,
+            "seed": 40,
+            "advanced": { "sampler": "euler", "cfgInterval": [0.1, 0.9] },
+        })
+    }
+
+    /// A 2-prompt × count-2 job is ONE engine call carrying `prompt_batch` + `count` (and no
+    /// `prompt`), published as four assets in the engine's prompt-minor order — image `k` renders
+    /// `prompts[k % 2]` on seed `40 + k` — each recording its own prompt, its seed and the batch.
+    ///
+    /// *Mutation that reds this:* route the batch through the per-seed loop (drop the
+    /// `drive_native_prompt_batch` branch), or publish image `k` on the base seed.
+    #[test]
+    fn a_native_prompt_batch_is_one_engine_call_published_as_one_asset_per_image() {
+        // A budget roomy enough for four images: admission charges every image of the batch.
+        let run = run_iris_arm_with_memory_cap(
+            ArmBehavior::Completes,
+            false,
+            batch_payload(&["a red fox", "a blue whale"], 2),
+            "128",
+        );
+        assert!(run.outcome.is_ok(), "{:?}", run.outcome);
+        assert_eq!(run.load_calls, 1);
+        assert_eq!(
+            run.generate_calls, 1,
+            "one engine call renders the whole batch"
+        );
+        assert_eq!(
+            run.seen,
+            vec![Seen {
+                prompt: String::new(),
+                prompt_batch: vec!["a red fox".to_owned(), "a blue whale".to_owned()],
+                count: 2,
+                seed: Some(40),
+                sampler: Some("euler".to_owned()),
+                cfg_interval: Some((0.1, 0.9)),
+                ..default_seen(None)
+            }],
+            "the engine gets the list alone, the base seed, and the count"
+        );
+        let published: Vec<(Value, Value, Value)> = run
+            .asset_writes
+            .iter()
+            .map(|asset| {
+                (
+                    asset["prompt"].clone(),
+                    asset["seed"].clone(),
+                    asset["index"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            published,
+            vec![
+                (json!("a red fox"), json!(40), json!(0)),
+                (json!("a blue whale"), json!(41), json!(1)),
+                (json!("a red fox"), json!(42), json!(2)),
+                (json!("a blue whale"), json!(43), json!(3)),
+            ]
+        );
+        for asset in &run.asset_writes {
+            let settings = &asset["rawAdapterSettings"];
+            assert_eq!(
+                settings["promptBatch"],
+                json!(["a red fox", "a blue whale"])
+            );
+            assert_eq!(
+                settings["generationWarnings"][0]["code"], "caption_truncated",
+                "every image of the call carries the call's warnings: {settings}"
+            );
+            assert_eq!(asset["count"], 4, "the generation set expects every image");
+        }
+        assert!(
+            run.posts
+                .iter()
+                .any(|post| message(post).contains("Batch of 4 — step 1/100")),
+            "progress names the batch, not image 1 of 4: {:#?}",
+            run.posts
+        );
+    }
+
+    /// A cancel mid-batch publishes NOTHING: the one engine call stops on its own request flag and
+    /// returns no image, so no asset (and no file) is written.
+    #[test]
+    fn a_cancelled_native_prompt_batch_publishes_no_asset() {
+        let run = run_iris_arm(
+            ArmBehavior::CancelAware,
+            true,
+            batch_payload(&["a red fox", "a blue whale"], 1),
+        );
+        assert!(
+            matches!(run.outcome, Err(crate::error::WorkerError::Canceled(_))),
+            "{:?}",
+            run.outcome
+        );
+        assert_eq!(run.generate_calls, 1);
+        assert!(run.stopped_on_cancel);
+        assert!(run.asset_writes.is_empty(), "{:?}", run.asset_writes);
+        assert!(run.project_files.is_empty(), "{:?}", run.project_files);
+    }
+
+    /// A batch the engine cannot render, or one combined with a per-image lane feature, is a typed
+    /// refusal BEFORE load: over the engine's `max_count` (`prompts × count`), a single-entry list,
+    /// and hires fix.
+    ///
+    /// *Mutation that reds this:* drop the `resolve_native_prompt_batch` call in the arm.
+    #[test]
+    fn an_unrenderable_native_prompt_batch_is_refused_before_load() {
+        let mut hires = batch_payload(&["a red fox", "a blue whale"], 1);
+        hires["hiresFix"] = json!({ "enabled": true });
+        let cases = [
+            (batch_payload(&["a", "b", "c"], 4), "12 images"),
+            (batch_payload(&["only"], 1), "at least two"),
+            (hires, "hires fix"),
+        ];
+        for (extra, fragment) in cases {
+            let run = run_iris_arm(ArmBehavior::Completes, false, extra.clone());
+            match &run.outcome {
+                Err(crate::error::WorkerError::InvalidPayload(message)) => assert!(
+                    message.contains("iris_3b") && message.contains(fragment),
+                    "{extra}: {message}"
+                ),
+                other => panic!("{extra}: expected a typed refusal, got {other:?}"),
+            }
+            assert_eq!(run.load_calls, 0, "{extra}: refused before load");
+            assert!(run.asset_writes.is_empty(), "{extra}");
+        }
+    }
+
+    /// Admission is scaled for the batch: a budget that admits a single image refuses an
+    /// eight-image native batch BEFORE load, instead of admitting it on a one-image estimate.
+    ///
+    /// *Mutation that reds this:* `request_batch` back to a constant 1 (MLX) /
+    /// `native_batch_overlay_bytes` back to 0 (Candle).
+    #[test]
+    fn a_native_prompt_batch_is_admitted_against_its_whole_image_count() {
+        let cap = BATCH_ADMISSION_CAP_GB;
+        let single = run_iris_arm_with_memory_cap(ArmBehavior::Fails, false, json!({}), cap);
+        assert_eq!(single.load_calls, 1, "one image fits: {:?}", single.outcome);
+        let batch = run_iris_arm_with_memory_cap(
+            ArmBehavior::Fails,
+            false,
+            batch_payload(&["a", "b"], 4),
+            cap,
+        );
+        match &batch.outcome {
+            Err(crate::error::WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("iris_3b"), "{message}")
+            }
+            other => panic!("an 8-image batch must be refused before load, got {other:?}"),
+        }
+        assert_eq!(batch.load_calls, 0, "refused before the loader ran");
     }
 
     // ---------------------------------------------------------------------------------------

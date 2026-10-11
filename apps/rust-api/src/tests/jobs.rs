@@ -12375,14 +12375,9 @@ async fn image_sampler_off_the_models_menu_is_rejected() {
     );
 }
 
-/// sc-25681: the SHIPPED Iris-3B row's sampling controls at image enqueue. Every control it
-/// declares (solver order as a sampler, schedule shift, CFG interval, caption-overflow policy,
-/// negative prompt under CFG) is admitted and travels VERBATIM into the job payload; a malformed
-/// value, an off-menu policy, and an interval or negative prompt at guidance 1.0 (inert there, and
-/// refused by the engine) are 400s before a job exists. A model that declares none of the new
-/// controls refuses them by name.
-#[tokio::test]
-async fn iris_sampling_controls_are_typed_at_image_enqueue() {
+/// A temp app whose catalog is the SHIPPED `iris_3b` row plus an undeclaring `plain_image`, and
+/// a project in it.
+async fn iris_and_plain_app() -> (tempfile::TempDir, axum::Router, String) {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -12435,7 +12430,20 @@ async fn iris_sampling_controls_are_typed_at_image_enqueue() {
         json!({ "name": "Iris Controls Project" }),
     )
     .await;
-    let project_id = project["id"].as_str().expect("project id");
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    (temp_dir, app, project_id)
+}
+
+/// sc-25681: the SHIPPED Iris-3B row's sampling controls at image enqueue. Every control it
+/// declares (solver order as a sampler, schedule shift, CFG interval, caption-overflow policy,
+/// negative prompt under CFG) is admitted and travels VERBATIM into the job payload; a malformed
+/// value, an off-menu policy, and an interval or negative prompt at guidance 1.0 (inert there, and
+/// refused by the engine) are 400s before a job exists. A model that declares none of the new
+/// controls refuses them by name.
+#[tokio::test]
+async fn iris_sampling_controls_are_typed_at_image_enqueue() {
+    let (_temp_dir, app, project_id) = iris_and_plain_app().await;
+    let project_id = project_id.as_str();
     let post = |model: &'static str, negative: &'static str, advanced: Value| {
         let app = app.clone();
         let body = json!({
@@ -12513,6 +12521,75 @@ async fn iris_sampling_controls_are_typed_at_image_enqueue() {
     // The undeclared model keeps its historical behaviour for everything else.
     let (status, body) = post("plain_image", "blurry", json!({ "guidanceScale": 1.0 })).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+/// sc-25681: a NATIVE prompt batch at image enqueue against the shipped Iris-3B row. Admitted
+/// (and forwarded verbatim) within the declared `prompts × count <= 8` cap with `prompt ==
+/// prompts[0]`; over the cap, a single-entry list, a `prompt` that is not `prompts[0]`, and a model
+/// that renders no native batch are 400s before a job exists.
+///
+/// *Mutation that reds this:* drop the `prompt_batch_error` call in `create_image_job`.
+#[tokio::test]
+async fn a_native_prompt_batch_is_typed_at_image_enqueue() {
+    let (_temp_dir, app, project_id) = iris_and_plain_app().await;
+    let post = |model: &'static str, prompt: &'static str, prompts: Value, count: u32| {
+        let app = app.clone();
+        let body = json!({
+            "projectId": project_id,
+            "model": model,
+            "prompt": prompt,
+            "prompts": prompts,
+            "width": 768,
+            "height": 768,
+            "count": count,
+            "seed": 11
+        });
+        async move { request(app, "POST", "/api/v1/image/jobs", body).await }
+    };
+    let (status, body) = post("iris_3b", "a cat", json!(["a cat", "a dog"]), 4).await;
+    assert_eq!(status, StatusCode::CREATED, "2 × 4 = 8 fits: {body}");
+    assert_eq!(body["payload"]["prompts"], json!(["a cat", "a dog"]));
+    assert_eq!(body["payload"]["prompt"], "a cat");
+    assert_eq!(body["payload"]["count"], 4);
+    // An ordinary request carries no `prompts` key at all.
+    let (status, body) = post("iris_3b", "a cat", json!([]), 1).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(body["payload"].get("prompts").is_none(), "{body}");
+    for (model, prompt, prompts, count, fragment) in [
+        (
+            "iris_3b",
+            "a cat",
+            json!(["a cat", "a dog"]),
+            5,
+            "10 images",
+        ),
+        ("iris_3b", "a cat", json!(["a cat"]), 1, "at least two"),
+        (
+            "iris_3b",
+            "a bird",
+            json!(["a cat", "a dog"]),
+            1,
+            "prompts[0]",
+        ),
+        (
+            "plain_image",
+            "a cat",
+            json!(["a cat", "a dog"]),
+            1,
+            "one job per prompt",
+        ),
+    ] {
+        let (status, body) = post(model, prompt, prompts.clone(), count).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{model} {prompts} ×{count}: {body}"
+        );
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(detail.contains(fragment), "{model} {prompts}: {detail}");
+    }
+    let (status, body) = post("iris_3b", "a cat", json!(["a cat", ""]), 1).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
 
 /// sc-24113: the rest of Qwen-Image 2.1's declared control surface, enforced at image enqueue —

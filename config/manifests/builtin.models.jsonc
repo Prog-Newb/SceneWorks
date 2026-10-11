@@ -5904,7 +5904,11 @@
         "captionOverflowPolicies": ["warn", "error", "silent"],
         // The released checkpoint shows its 16-px patch grid below 1024² (upstream fp32 does too);
         // Image Studio hints at it and never restricts the size.
-        "patchGridVisibleBelow": 1024
+        "patchGridVisibleBelow": 1024,
+        // Upstream generate(prompts=[…]): one batched pass renders prompts × count <= 8 images
+        // (the engine's max_count), prompt-minor, image k on seed + k. Image Studio packs its prompt
+        // batch into these native jobs.
+        "maxPromptBatchImages": 8
       },
       "downloads": [
         // The upstream generation backbone, pulled directly (Apache-2.0; no SceneWorks re-host).
@@ -5992,9 +5996,14 @@
         //   bits-derived key the gate can name: the single bf16 artifact has no tier subdir, so the gate
         //   names it from `advanced.mlxQuantize` (q8 by default).
         // Replaced by measured evidence at the epic-end campaign.
+        // * `promptBatchImageGb` — each EXTRA image of a native prompt batch (image.maxPromptBatchImages)
+        //   adds its pixel-space activations: the recorded 1024² resident peak minus the load peak
+        //   (21.4 − 15.7 = 5.7 GB), rounded up. The gate charges (images − 1) × this × max(1, MP) on
+        //   both predictions above; S6 (sc-25684) owns the measured value.
         "measured": false,
         "minMemoryGb": 24,
-        "sequentialPeakGb": { "bf16": 21.4, "q8": 21.4, "q4": 21.4 }
+        "sequentialPeakGb": { "bf16": 21.4, "q8": 21.4, "q4": 21.4 },
+        "promptBatchImageGb": 6.0
       },
       "ui": {
         "label": "Iris 3B",

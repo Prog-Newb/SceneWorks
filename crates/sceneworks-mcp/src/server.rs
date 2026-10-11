@@ -246,6 +246,10 @@ pub struct GenerateImageArgs {
         description = "What to do with a prompt longer than the text encoder's caption budget: \"warn\" (truncate and report a caption_truncated warning on the job and image), \"error\" (refuse the render) or \"silent\" (truncate quietly). Only for a model that offers it (Iris-3B); omit for the checkpoint's own policy."
     )]
     pub caption_overflow: Option<String>,
+    #[schemars(
+        description = "A native prompt batch: 2+ prompts rendered together in ONE pass, prompts × count <= the model's imageControls.maxPromptBatchImages (Iris-3B: 8). `prompt` must equal prompts[0]. Image k renders prompts[k % len] on seed seed + k. Only for a model declaring maxPromptBatchImages; omit otherwise."
+    )]
+    pub prompts: Option<Vec<String>>,
 }
 
 /// Arguments for `submit_video_job`, mapped onto the API's `VideoJobRequest`
@@ -392,7 +396,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "List the generation model catalog. Returns compact entries: id (use as the model for a job), name, family, type (image/video), capabilities, installState, defaults (resolution/steps/guidanceScale/count), the supported resolutions/durations/fps menus, the sampler menu (samplers) and image sampling-control declarations (imageControls: supportsSchedulerShift / supportsCfgInterval / captionOverflowPolicies / negativePromptRequiresGuidance), minSteps, the reference-media caps (maxReferenceAssets / maxSourceClipAssets / maxReferenceAudioAssets / maxCombinedReferenceAssets), promptGuide, and any licence-required attribution string. An fps menu is EXHAUSTIVE — an off-menu fps is refused, never rounded. A durations menu lists the model's exactly renderable clip lengths: a duration outside the model's hard min/max bounds is refused, but an in-range off-menu value is silently snapped onto the model's frame lattice (MiniMax-H3 rounds UP to the next 17n+5 rung) — send a menu value to get exactly the length you asked for."
+        description = "List the generation model catalog. Returns compact entries: id (use as the model for a job), name, family, type (image/video), capabilities, installState, defaults (resolution/steps/guidanceScale/count), the supported resolutions/durations/fps menus, the sampler menu (samplers) and image sampling-control declarations (imageControls: supportsSchedulerShift / supportsCfgInterval / captionOverflowPolicies / negativePromptRequiresGuidance / maxPromptBatchImages), minSteps, the reference-media caps (maxReferenceAssets / maxSourceClipAssets / maxReferenceAudioAssets / maxCombinedReferenceAssets), promptGuide, and any licence-required attribution string. An fps menu is EXHAUSTIVE — an off-menu fps is refused, never rounded. A durations menu lists the model's exactly renderable clip lengths: a duration outside the model's hard min/max bounds is refused, but an in-range off-menu value is silently snapped onto the model's frame lattice (MiniMax-H3 rounds UP to the next 17n+5 rung) — send a menu value to get exactly the length you asked for."
     )]
     async fn list_models(&self) -> Result<CallToolResult, ErrorData> {
         let models = self
@@ -1128,6 +1132,13 @@ pub(crate) fn image_job_body(args: &GenerateImageArgs) -> Result<Value, String> 
             args.reference_asset_ids.as_ref().map(|v| json!(v)),
         ),
         ("maskAssetId", args.mask_asset_id.as_ref().map(|v| json!(v))),
+        (
+            "prompts",
+            args.prompts
+                .as_ref()
+                .filter(|prompts| !prompts.is_empty())
+                .map(|v| json!(v)),
+        ),
     ];
     for (key, value) in optional {
         if let Some(value) = value {
@@ -2107,6 +2118,22 @@ mod tests {
         let bare = image_job_body(&args_from(json!({ "projectId": "p1", "prompt": "x" })))
             .expect("body builds");
         assert!(bare.get("advanced").is_none(), "{bare}");
+        assert!(bare.get("prompts").is_none(), "{bare}");
+    }
+
+    /// sc-25681: a native prompt batch rides the top-level `prompts` list the API reads, verbatim.
+    #[test]
+    fn image_job_body_forwards_a_native_prompt_batch() {
+        let body = image_job_body(&args_from(json!({
+            "projectId": "p1",
+            "prompt": "a cat",
+            "prompts": ["a cat", "a dog"],
+            "model": "iris_3b",
+            "count": 2
+        })))
+        .expect("body builds");
+        assert_eq!(body["prompts"], json!(["a cat", "a dog"]));
+        assert_eq!(body["prompt"], "a cat");
     }
 
     /// The Iris row's request-shaping surface reaches `list_models`.

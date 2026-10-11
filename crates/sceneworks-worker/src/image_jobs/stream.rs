@@ -349,6 +349,51 @@ where
     Ok(())
 }
 
+/// Drive ONE engine call that renders a whole native prompt batch (sc-25681): its progress rides
+/// image 0's channel, then each returned image `k` (engine order — prompt-minor) is published as
+/// image `k` on seed `seed + k`, the seed the engine drew its noise from, after its provenance
+/// `facts`. A cancel or an engine failure inside the call returns before any image is sent, so a
+/// partial batch is never published; a count that is not `expected` is a typed engine failure.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+fn drive_native_prompt_batch<F>(
+    tx: tokio::sync::mpsc::Sender<GenEvent>,
+    seed: i64,
+    expected: usize,
+    generate: F,
+) -> WorkerResult<()>
+where
+    F: FnOnce(
+        gen_core::PreviewSink,
+        &mut dyn FnMut(Progress),
+    ) -> WorkerResult<(Vec<(u32, u32, Vec<u8>)>, Option<JsonObject>)>,
+{
+    let _cache_release = RequestCacheRelease;
+    let mut on_progress = |progress| send_gen_progress(&tx, 0, progress);
+    let (images, facts) = generate(preview_sink_for(&tx, 0), &mut on_progress)?;
+    if images.len() != expected {
+        return Err(WorkerError::Engine(format!(
+            "the prompt batch returned {} images, expected {expected}",
+            images.len()
+        )));
+    }
+    for (index, (width, height, pixels)) in images.into_iter().enumerate() {
+        if let Some(facts) = facts.clone() {
+            let _ = tx.blocking_send(GenEvent::ImageFacts { index, facts });
+        }
+        let image = (seed.wrapping_add(index as i64), width, height, pixels);
+        if !send_generated_image(&tx, index, image) {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Release MLX's freed-buffer cache between batch images so peak memory doesn't carry
 /// forward across a `drive_gen_items` loop (sc-5567). `clear_cache()` returns only the
 /// retained-for-reuse buffers to the OS — live arrays (the cached model weights) are not

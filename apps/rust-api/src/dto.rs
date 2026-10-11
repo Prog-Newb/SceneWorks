@@ -720,6 +720,11 @@ pub(crate) struct ImageJobRequest {
     #[serde(default = "default_image_mode")]
     pub(crate) mode: String,
     pub(crate) prompt: String,
+    /// A NATIVE prompt batch (sc-25681): prompts the model renders together in one pass, only for a
+    /// model declaring `image.maxPromptBatchImages` (Iris-3B). `prompt` must equal `prompts[0]`.
+    /// Typed so serde forwards it; empty (and omitted from the job payload) for an ordinary request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) prompts: Vec<String>,
     #[serde(default)]
     pub(crate) negative_prompt: String,
     #[serde(default = "default_image_model")]

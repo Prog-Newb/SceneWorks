@@ -18,6 +18,9 @@
 //! cargo test -p sceneworks-worker --features backend-candle --release iris_worker_gpu_smoke -- --ignored --nocapture --test-threads=1
 //! ```
 
+// The single-image + LoRA smoke is CUDA-only; on macOS only the native-batch smoke compiles.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -38,6 +41,7 @@ const LORA_RANK: usize = 4;
 /// Write a tiny random-init Iris generation-task LoRA (PEFT `lora_A`/`lora_B`, bare keys) on three
 /// real backbone projections, with the identity stamps the engine requires. Small magnitudes: it
 /// probes the adapter path on real weights, it is not a style.
+#[cfg(not(target_os = "macos"))]
 fn write_stamped_smoke_lora(path: &std::path::Path) {
     let targets: [(&str, usize, usize); 3] = [
         ("blocks.23.attn_proj", 2560, 2560),
@@ -187,6 +191,7 @@ fn shipped_iris_entry() -> Value {
         .expect("iris_3b is in the builtin catalog")
 }
 
+#[cfg(not(target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real-weight worker GPU smoke; needs the pinned speridlabs/iris-3b and Qwen3-VL-4B-Instruct snapshots under HF_HUB_CACHE and a CUDA device"]
 async fn iris_worker_gpu_smoke() {
@@ -343,5 +348,94 @@ async fn iris_worker_gpu_smoke() {
         applied["applied"],
         elapsed.as_secs_f64(),
         rendered_path.display(),
+    );
+}
+
+/// sc-25681: the NATIVE prompt batch on real weights — a 2-prompt × count-1 job is one
+/// `candle-gen-iris` call (`prompt_batch`), published as two non-degenerate assets in prompt order
+/// on seeds `seed` and `seed + 1`, each recording its own prompt and the batch. Runs in the same
+/// `iris_worker_gpu_smoke` filter as the single-image smoke above on CUDA, and as the bounded MLX
+/// real-weight check on a Mac (768², 20 steps).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "real-weight worker GPU smoke; needs the pinned speridlabs/iris-3b and Qwen3-VL-4B-Instruct snapshots in the HF cache and a CUDA device or Apple GPU"]
+async fn iris_worker_gpu_smoke_native_prompt_batch() {
+    const BATCH_JOB: &str = "iris-cuda-native-batch";
+    const BATCH_STEPS: u32 = 20;
+    const BATCH_SIZE: u32 = 768;
+    let prompts = [
+        "a red fox in fresh snow, morning light",
+        "a blue whale breaching at sunset",
+    ];
+    let temp = tempfile::tempdir().expect("smoke tempdir creates");
+    let (api_url, posts) = spawn_worker_api_stub().await;
+    let mut settings = Settings::for_test(temp.path().join("data"));
+    settings.api_url = api_url;
+    settings.config_dir = temp.path().join("config");
+    settings.worker_id = "iris-smoke-worker".to_owned();
+    #[cfg(not(target_os = "macos"))]
+    {
+        settings.gpu_id = "cuda".to_owned();
+        settings.backend_candle_enabled = true;
+    }
+    settings.heartbeat_seconds = 30;
+    let project = ProjectStore::new(settings.data_dir.clone(), "iris-smoke")
+        .create_project("Iris-3B native batch smoke")
+        .expect("smoke project creates");
+    let mut snapshot = stub_job_snapshot(BATCH_JOB);
+    snapshot["payload"] = json!({
+        "projectId": project.id,
+        "model": "iris_3b",
+        "mode": "text_to_image",
+        "prompt": prompts[0],
+        "prompts": prompts,
+        "width": BATCH_SIZE,
+        "height": BATCH_SIZE,
+        "count": 1,
+        "seed": 11,
+        "advanced": { "steps": BATCH_STEPS },
+        "modelManifestEntry": shipped_iris_entry(),
+    });
+    let job: JobSnapshot = serde_json::from_value(snapshot).expect("smoke job deserializes");
+    let api = ApiClient::new(&settings);
+    let started = std::time::Instant::now();
+    crate::image_jobs::run_image_generate_job(&api, &settings, &job)
+        .await
+        .expect("the Iris-3B native batch job completes");
+    let elapsed = started.elapsed();
+    let posts = posts.lock().expect("progress posts lock").clone();
+    let result = posts
+        .iter()
+        .rev()
+        .find(|(id, body)| id == BATCH_JOB && body["status"] == "completed")
+        .map(|(_, body)| body["result"].clone())
+        .expect("the job posted a completed result");
+    let assets = result["assetWrites"].as_array().expect("asset writes");
+    assert_eq!(assets.len(), 2, "one asset per prompt: {result}");
+    let mut stds = Vec::new();
+    for (index, asset) in assets.iter().enumerate() {
+        assert_eq!(asset["prompt"], prompts[index]);
+        assert_eq!(asset["seed"], 11 + index as i64);
+        assert_eq!(asset["rawAdapterSettings"]["promptBatch"], json!(prompts));
+        let path = PathBuf::from(&project.path).join(asset["mediaPath"].as_str().expect("media"));
+        let decoded = image::open(&path).expect("open rendered asset").to_rgb8();
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (BATCH_SIZE, BATCH_SIZE)
+        );
+        let std = crate::smoke_support::image_std(&gen_core::Image {
+            width: decoded.width(),
+            height: decoded.height(),
+            pixels: decoded.into_raw(),
+        });
+        assert!(
+            std > crate::smoke_support::DEGENERATE_STD_FLOOR_DEFAULT,
+            "batch image {index} looks degenerate (RGB std {std:.2})"
+        );
+        stds.push(std);
+    }
+    eprintln!(
+        "RESULT status=pass model=iris_3b native_batch=2x1 geometry={BATCH_SIZE}x{BATCH_SIZE} \
+         steps={BATCH_STEPS} elapsed_s={:.1} rgb_std={stds:?}",
+        elapsed.as_secs_f64(),
     );
 }

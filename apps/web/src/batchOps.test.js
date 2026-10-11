@@ -225,3 +225,22 @@ describe("summarizeBatchRun (sc-9980)", () => {
     expect(observed.has("j1")).toBe(false);
   });
 });
+
+// sc-25681: a native prompt-batch job carries several prompts; the run counts every one of them.
+// Mutation that reds this: count each settled/active job as 1 regardless of `sizes`.
+describe("prompt-batch runs weighted by native batch size (sc-25681)", () => {
+  it("settles and summarizes a multi-prompt job as all of its prompts", () => {
+    const run = { total: 3, submitted: 3, completed: 0, failed: 0, activeJobIds: ["a", "b"], sizes: { a: 2 } };
+    const jobs = [
+      { id: "a", status: "completed" },
+      { id: "b", status: "running" },
+    ];
+    expect(summarizeBatchRun(run, [{ id: "a", status: "running" }, { id: "b", status: "queued" }], new Map())).toMatchObject({
+      running: 2,
+      queued: 1,
+    });
+    const settled = settlePromptBatchRun(run, jobs, new Map());
+    expect(settled).toMatchObject({ completed: 2, activeJobIds: ["b"] });
+    expect(summarizeBatchRun(settled, jobs, new Map())).toMatchObject({ completed: 2, running: 1, done: 2 });
+  });
+});

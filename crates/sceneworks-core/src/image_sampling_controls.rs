@@ -273,6 +273,69 @@ pub fn image_sampling_control_error(
     None
 }
 
+/// Top-level payload key of a NATIVE prompt batch (sc-25681): the prompts one engine call renders
+/// together (upstream Iris-3B `generate(prompts=[…])`). `prompt` then carries `prompts[0]`, so every
+/// single-prompt consumer (titles, recipes, the prompt-length gate) keeps working, and the worker
+/// hands the engine the list alone.
+pub const PROMPTS_KEY: &str = "prompts";
+
+/// `image.maxPromptBatchImages`: the model renders a list of prompts as ONE batched pass, at most
+/// this many images (`prompts × count`) per request — the engine's own `max_count` bound on the
+/// batch. ABSENT MEANS NONE: a multi-prompt run stays one job per prompt for every other model.
+pub fn max_prompt_batch_images(model_manifest_entry: &JsonObject) -> Option<u32> {
+    image_block(model_manifest_entry)
+        .and_then(|image| image.get("maxPromptBatchImages"))
+        .and_then(Value::as_u64)
+        .and_then(|max| u32::try_from(max).ok())
+        .filter(|max| *max > 0)
+}
+
+/// The enqueue-time refusal of a native prompt batch, or `None` when `prompts` is empty (an
+/// ordinary request) or honourable. `prompt` is the request's single prompt AFTER every server-side
+/// fold (preset / style); it must equal `prompts[0]`, so a fold that rewrote it — and would not
+/// have rewritten the rest — is refused rather than half-applied. `count` repeats the whole batch:
+/// image `k` of the `prompts.len() × count` renders `prompts[k % prompts.len()]` on seed `seed + k`.
+pub fn prompt_batch_error(
+    model: &str,
+    prompt: &str,
+    prompts: &[String],
+    count: u32,
+    model_manifest_entry: &JsonObject,
+) -> Option<String> {
+    if prompts.is_empty() {
+        return None;
+    }
+    let Some(max) = max_prompt_batch_images(model_manifest_entry) else {
+        return Some(format!(
+            "{model} does not render a prompt batch in one pass ({PROMPTS_KEY}); send one job \
+             per prompt"
+        ));
+    };
+    if prompts.len() < 2 {
+        return Some(format!(
+            "{model}: a prompt batch needs at least two {PROMPTS_KEY}; send a single prompt as \
+             `prompt`"
+        ));
+    }
+    if let Some(index) = prompts.iter().position(|entry| entry.trim().is_empty()) {
+        return Some(format!("{model}: {PROMPTS_KEY}[{index}] is empty"));
+    }
+    if prompt != prompts[0] {
+        return Some(format!(
+            "{model}: `prompt` must equal {PROMPTS_KEY}[0] for a prompt batch (a server-side \
+             preset or style fold rewrites only `prompt`; compose every batch prompt client-side)"
+        ));
+    }
+    let images = prompts.len() as u64 * u64::from(count.max(1));
+    (images > u64::from(max)).then(|| {
+        format!(
+            "{model}: {} prompts × count {count} = {images} images exceeds the {max} images it \
+             renders in one batch",
+            prompts.len()
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,5 +532,52 @@ mod tests {
             ),
             None
         );
+    }
+
+    fn batching() -> JsonObject {
+        object(json!({ "id": "iris_like", "image": { "maxPromptBatchImages": 8 } }))
+    }
+
+    fn prompts(list: &[&str]) -> Vec<String> {
+        list.iter().map(|prompt| (*prompt).to_owned()).collect()
+    }
+
+    /// sc-25681: the native prompt batch — declared cap, at least two prompts, `prompt` is
+    /// `prompts[0]`, and `prompts × count` within the cap.
+    ///
+    /// *Mutation that reds this:* compare `prompts.len()` (not `× count`) against the cap.
+    #[test]
+    fn a_prompt_batch_is_bounded_by_the_declared_image_cap() {
+        let entry = batching();
+        let two = prompts(&["a cat", "a dog"]);
+        assert_eq!(prompt_batch_error("iris_like", "", &[], 8, &entry), None);
+        assert_eq!(
+            prompt_batch_error("iris_like", "a cat", &two, 4, &entry),
+            None
+        );
+        let over = prompt_batch_error("iris_like", "a cat", &two, 5, &entry).expect("2 × 5 > 8");
+        assert!(over.contains("10 images") && over.contains('8'), "{over}");
+        let nine = prompts(&["a", "b", "c", "d", "e", "f", "g", "h", "i"]);
+        assert!(prompt_batch_error("iris_like", "a", &nine, 1, &entry).is_some());
+        assert!(
+            prompt_batch_error("iris_like", "a cat", &prompts(&["a cat"]), 1, &entry)
+                .expect("one prompt is not a batch")
+                .contains("at least two")
+        );
+        assert!(
+            prompt_batch_error("iris_like", "a cat", &prompts(&["a cat", " "]), 1, &entry)
+                .expect("blank prompt")
+                .contains("prompts[1]")
+        );
+        assert!(
+            prompt_batch_error("iris_like", "Subject: a cat", &two, 1, &entry)
+                .expect("folded prompt")
+                .contains("prompts[0]")
+        );
+        let undeclared = prompt_batch_error("plain", "a cat", &two, 1, &plain())
+            .expect("an undeclared batch is refused by name");
+        assert!(undeclared.contains("one job per prompt"), "{undeclared}");
+        assert_eq!(max_prompt_batch_images(&plain()), None);
+        assert_eq!(max_prompt_batch_images(&entry), Some(8));
     }
 }

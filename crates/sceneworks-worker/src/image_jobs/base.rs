@@ -641,8 +641,9 @@ impl ImageRoute {
             | ImageRoute::MageFinetuned
             | ImageRoute::FluxIpAdapterPoseReject
             | ImageRoute::PoseControlBaseMissing
-            | ImageRoute::PoseReject
-            | ImageRoute::Mlx => request.count,
+            | ImageRoute::PoseReject => request.count,
+            // The generic lane also serves a native prompt batch (sc-25681): `prompts × count`.
+            ImageRoute::Mlx => request.image_count(),
         }
     }
 
@@ -1046,6 +1047,8 @@ impl CandleImageRoute {
             {
                 sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER.len() as u32
             }
+            // The generic lane also serves a native prompt batch (sc-25681): `prompts × count`.
+            CandleImageRoute::CandleTxt2Img => request.image_count(),
             // Every other lane (plain txt2img, the edit/reference/identity/comfyui/bernini lanes, and the
             // pose-reject arms — which error before generation) produces the requested count.
             _ => request.count,
@@ -7536,6 +7539,9 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// `caption_truncated`) are collected for the image's provenance. `None` discards them, as
     /// the lane always has for providers that report none.
     pub(crate) warnings: Option<&'a std::cell::RefCell<Vec<gen_core::GenerationWarning>>>,
+    /// A native prompt batch (sc-25681): the request carries `prompt_batch` + `count` instead of
+    /// one prompt, and the engine returns every image of the batch. `None` everywhere else.
+    pub(crate) prompt_batch: Option<&'a lane_controls::NativePromptBatch>,
 }
 
 /// [`generate_one`] with an explicit [`LaneRgbaSurface`].
@@ -7568,18 +7574,87 @@ fn generate_one_on_surface(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    render_on_surface(
+        generator,
+        prompt,
+        width,
+        height,
+        seed,
+        steps,
+        guidance,
+        negative_prompt,
+        reference,
+        multi_references,
+        edit_mask,
+        true_cfg,
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance_method,
+        use_pid,
+        text_style_gain,
+        memory,
+        memory_strategy_context,
+        enhance,
+        prompt_enhancement,
+        preview,
+        surface,
+        cancel,
+        on_progress,
+    )?
+    .pop()
+    .ok_or_else(|| WorkerError::Engine("generator produced no image".to_owned()))
+}
+
+/// The one generic-lane engine call: builds the request (one `prompt`, or the surface's native
+/// `prompt_batch` + `count`) and returns EVERY image the engine produced, in engine order.
+#[allow(clippy::too_many_arguments)]
+fn render_on_surface(
+    generator: &dyn Generator,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    negative_prompt: Option<String>,
+    reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
+    edit_mask: Option<&Image>,
+    true_cfg: Option<f32>,
+    sampler: Option<&str>,
+    scheduler: Option<&str>,
+    scheduler_shift: Option<f32>,
+    guidance_method: Option<&str>,
+    use_pid: bool,
+    text_style_gain: Option<f32>,
+    memory: Option<gen_core::GenerationMemory>,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+    enhance: &PromptEnhance,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
+    preview: gen_core::PreviewSink,
+    surface: &LaneRgbaSurface<'_>,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<Vec<(u32, u32, Vec<u8>)>> {
     let conditioning = build_lane_conditioning_with_alpha(
         reference,
         multi_references,
         surface.multi_reference_alpha,
         edit_mask,
     );
+    // A native prompt batch is the prompt list ALONE (the engine refuses `prompt` beside it).
+    let (prompt, prompt_batch, count) = match surface.prompt_batch {
+        Some(batch) => (String::new(), batch.prompts.clone(), batch.count),
+        None => (prompt.to_owned(), Vec::new(), 1),
+    };
     let mut request = GenerationRequest {
-        prompt: prompt.to_owned(),
+        prompt,
+        prompt_batch,
         negative_prompt,
         width,
         height,
-        count: 1,
+        count,
         seed: Some(seed as u64),
         steps: Some(steps),
         guidance,
@@ -7617,21 +7692,17 @@ fn generate_one_on_surface(
         .output
         .ok_or_else(|| WorkerError::Engine("generator produced no output".to_owned()))?;
     match output {
-        GenerationOutput::Images(mut images) => {
-            let image = images
-                .pop()
-                .ok_or_else(|| WorkerError::Engine("generator produced no image".to_owned()))?;
-            Ok((image.width, image.height, image.pixels))
-        }
+        GenerationOutput::Images(images) => Ok(images
+            .into_iter()
+            .map(|image| (image.width, image.height, image.pixels))
+            .collect()),
         // Only ever produced for an `OutputChannels::Rgba` request (the shared request floor refuses
         // one against a provider without `supports_alpha_output`). The flat interleaved RGBA buffer
         // flows on unchanged: `GeneratedPixels::from_engine_buffer` types it by its channel count.
-        GenerationOutput::ImagesRgba(mut images) => {
-            let image = images
-                .pop()
-                .ok_or_else(|| WorkerError::Engine("generator produced no image".to_owned()))?;
-            Ok((image.width, image.height, image.pixels))
-        }
+        GenerationOutput::ImagesRgba(images) => Ok(images
+            .into_iter()
+            .map(|image| (image.width, image.height, image.pixels))
+            .collect()),
         _ => Err(WorkerError::Engine(
             "generator returned non-image output".to_owned(),
         )),
@@ -7959,6 +8030,8 @@ fn generate_one_with_hires_on_surface(
         output_channels: gen_core::OutputChannels::Rgb,
         controls: surface.controls,
         warnings: surface.warnings,
+    // A hires-fix render is per image; the arms refuse a prompt batch with it.
+        prompt_batch: None,
     };
     let (base_width, base_height, base_pixels) = generate_one_on_surface(
         generator,
@@ -8015,6 +8088,8 @@ fn generate_one_with_hires_on_surface(
         output_channels: surface.output_channels,
         controls: surface.controls,
         warnings: surface.warnings,
+    // A hires-fix render is per image; the arms refuse a prompt batch with it.
+        prompt_batch: None,
     };
     generate_one_on_surface(
         generator,
@@ -9843,7 +9918,8 @@ async fn generate_stream_using(
     let adapters = resolve_adapters(request, settings)?;
     // Each adapter's identity (request id, path, sha256, scale, kind) for the image provenance,
     // joined after the render with the engine's own apply report (sc-25681).
-    let adapter_identities = lane_controls::adapter_identities(request, &adapters);
+    let adapter_identities =
+        lane_controls::adapter_identities(api, settings, job, request, &adapters).await;
     // sc-3723: surface the descriptor-derived backend ("mlx" for every linked family today; a
     // future candle row would self-describe) over the gpu-id-derived label. Falls back to the
     // passed-in label only if a descriptor ever advertised an empty backend (never today).
@@ -9978,6 +10054,27 @@ async fn generate_stream_using(
     // the native VAE. `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch).
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
     let use_pid = pid_weights.is_some();
+    // A native prompt batch (sc-25681): ONE engine call over `prompts × count` images, refused
+    // before load when the linked engine cannot render it or a per-image lane feature is in use.
+    let native_batch = lane_controls::resolve_native_prompt_batch(
+        request,
+        &model.descriptor.capabilities,
+        &[
+            ("hires fix", hires_fix.is_some()),
+            (
+                "a reference image",
+                identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some(),
+            ),
+            ("prompt enhancement", enhance.enabled),
+        ],
+    )?;
+    let native_batch_images = native_batch.as_ref().map_or(1, |batch| batch.images());
+    // The images this job streams: `count` per-seed renders, or every image of the one batch call.
+    let stream_total = if native_batch.is_some() {
+        native_batch_images as usize
+    } else {
+        count
+    };
     // PiD output tier (sc-10054): PiD super-resolves the base latent by a fixed 4×, so the effective
     // base picks whether the output lands on ~2K or ~4K. `4k`/native leave the requested dims untouched;
     // `2k` caps the base (also lowering the F-013 decode peak). Rebind before `generate_one`.
@@ -10172,6 +10269,7 @@ async fn generate_stream_using(
             (!memory_overlays.is_empty()).then(|| memory_overlays.join("+")),
         );
         let mlx_request_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+            native_batch: native_batch_images,
             width: memory_width,
             height: memory_height,
             count: request.count,
@@ -10423,6 +10521,70 @@ async fn generate_stream_using(
             // item. Hand the real proposal to the first evaluation and an inert one to the rest, so a
             // multi-image job settles exactly one decision and emits exactly one event.
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
+            // A native prompt batch (sc-25681) is ONE engine call over every image of the job,
+            // admitted against its `prompts × count` batch (`native_batch` above).
+            if let Some(batch) = native_batch.as_ref() {
+                return drive_native_prompt_batch(
+                    tx,
+                    seeds[0],
+                    batch.images() as usize,
+                    |preview, on_progress| {
+                        let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                            generator,
+                            &mlx_request_plan,
+                            &mlx_request_inputs,
+                            cache_state,
+                            loaded_policy.offload_policy,
+                            warm_policy.take(),
+                            request_external_committed_bytes,
+                        )?;
+                        let _request_memory_limit = memory_evaluation
+                            .process_limit_bytes
+                            .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                        let warnings = std::cell::RefCell::new(Vec::new());
+                        let images = render_on_surface(
+                            generator,
+                            "",
+                            width,
+                            height,
+                            seeds[0],
+                            steps,
+                            guidance,
+                            negative_prompt.clone(),
+                            None,
+                            &[],
+                            None,
+                            true_cfg,
+                            sampler.as_deref(),
+                            scheduler.as_deref(),
+                            scheduler_shift,
+                            guidance_method.as_deref(),
+                            use_pid,
+                            text_style_gain,
+                            Some(memory_evaluation.memory),
+                            Some(&memory_evaluation.context),
+                            &enhance,
+                            gen_core::PromptEnhancementSink::default(),
+                            preview,
+                            &LaneRgbaSurface {
+                                multi_reference_alpha: &[],
+                                output_channels: rgba_output_channels,
+                                controls: lane_controls,
+                                warnings: Some(&warnings),
+                                prompt_batch: Some(batch),
+                            },
+                            &cancel,
+                            on_progress,
+                        )?;
+                        let facts = lane_controls::image_facts(
+                            &warnings.take(),
+                            &adapter_identities,
+                            &generator.adapter_apply_reports(),
+                        );
+                        Ok((images, facts))
+                    },
+                );
+            }
             drive_gen_items_scored_reported(
                 tx,
                 seeds,
@@ -10477,6 +10639,7 @@ async fn generate_stream_using(
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
+                                prompt_batch: None,
                             },
                             &cancel,
                             on_progress,
@@ -10534,7 +10697,7 @@ async fn generate_stream_using(
         backend,
         adapter_label,
         &raw_settings,
-        count,
+        stream_total,
         rx,
         cancel,
         blocking,
@@ -12499,7 +12662,8 @@ async fn generate_candle_stream_using(
     let adapter_count = adapters.len();
     // Each adapter's identity for the image provenance, joined after the render with the engine's
     // own apply report (sc-25681) — the MLX arm's twin.
-    let adapter_identities = lane_controls::adapter_identities(request, &adapters);
+    let adapter_identities =
+        lane_controls::adapter_identities(api, settings, job, request, &adapters).await;
 
     // Ideogram 4 (epic 4725, sc-6501) is JSON-caption-only: a raw plain-text prompt is out-of-
     // distribution and stochastically renders the "Image blocked by safety filter" placeholder. Wrap a
@@ -12622,6 +12786,27 @@ async fn generate_candle_stream_using(
         resolve_pid_weights(request, &settings.data_dir, &request.model)?
     };
     let use_pid = pid_weights.is_some();
+    // A native prompt batch (sc-25681): ONE engine call over `prompts × count` images, refused
+    // before load when the linked engine cannot render it or a per-image lane feature is in use.
+    let native_batch = lane_controls::resolve_native_prompt_batch(
+        request,
+        &model.descriptor.capabilities,
+        &[
+            ("hires fix", hires_fix.is_some()),
+            (
+                "a reference image",
+                edit_reference.is_some()
+                    || img2img_reference.is_some()
+                    || !edit_refs.is_empty()
+                    || edit_mask.is_some(),
+            ),
+            ("prompt enhancement", enhance.enabled),
+        ],
+    )?;
+    // The batch renders every image in one call: the stream reports all of them.
+    let total = native_batch
+        .as_ref()
+        .map_or(total, |batch| batch.images() as usize);
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
@@ -12931,8 +13116,18 @@ async fn generate_candle_stream_using(
     );
     let mut raw_settings =
         mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
+    // A native prompt batch's extra images ride every resident/sequential prediction below exactly
+    // like resident adapter bytes do (sc-25681): `(images − 1) × candle.promptBatchImageGb ×
+    // max(1, MP)`, declared, so a batch is never admitted on a one-image floor. Zero otherwise.
+    let batch_overlay_bytes = lane_controls::native_batch_overlay_bytes(
+        request,
+        native_batch.as_ref(),
+        memory_width,
+        memory_height,
+    )?;
     let adapter_resident_bytes =
-        candle_adapter_resident_bytes(engine_id, tier, adapter_source_bytes);
+        candle_adapter_resident_bytes(engine_id, tier, adapter_source_bytes)
+            .saturating_add(batch_overlay_bytes);
     let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
@@ -13991,6 +14186,59 @@ async fn generate_candle_stream_using(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
+            // A native prompt batch (sc-25681) is ONE engine call over every image of the job,
+            // admitted against its `prompts × count` batch (`batch_overlay_bytes` above).
+            if let Some(batch) = native_batch.as_ref() {
+                let seed = work[0].0;
+                return drive_native_prompt_batch(
+                    tx,
+                    seed,
+                    batch.images() as usize,
+                    |preview, on_progress| {
+                        let warnings = std::cell::RefCell::new(Vec::new());
+                        let images = render_on_surface(
+                            generator,
+                            "",
+                            width,
+                            height,
+                            seed,
+                            steps,
+                            guidance,
+                            negative_prompt.clone(),
+                            None,
+                            &[],
+                            None,
+                            true_cfg,
+                            sampler.as_deref(),
+                            scheduler.as_deref(),
+                            scheduler_shift,
+                            guidance_method.as_deref(),
+                            use_pid,
+                            text_style_gain,
+                            generation_memory,
+                            memory_strategy_context.as_ref(),
+                            &enhance,
+                            gen_core::PromptEnhancementSink::default(),
+                            preview,
+                            &LaneRgbaSurface {
+                                multi_reference_alpha: &[],
+                                output_channels: rgba_output_channels,
+                                controls: lane_controls,
+                                warnings: Some(&warnings),
+                                prompt_batch: Some(batch),
+                            },
+                            &cancel,
+                            on_progress,
+                        )?;
+                        let facts = lane_controls::image_facts(
+                            &warnings.take(),
+                            &adapter_identities,
+                            &generator.adapter_apply_reports(),
+                        );
+                        Ok((images, facts))
+                    },
+                );
+            }
             drive_gen_items_scored_reported(
                 tx,
                 work,
@@ -14044,6 +14292,7 @@ async fn generate_candle_stream_using(
                             output_channels: rgba_output_channels,
                             controls: lane_controls,
                             warnings: Some(&warnings),
+                            prompt_batch: None,
                         },
                         &cancel,
                         on_progress,
@@ -14464,6 +14713,21 @@ async fn consume_gen_events_with_disclosure(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let total_u32 = total as u32;
+    // A native prompt batch (sc-25681) is ONE engine call over all `total` images: its steps
+    // (the engine's `steps × count`) span the whole bar, not image 0's slice of it.
+    let one_pass = !plan.request.prompts.is_empty();
+    let (step_slices, step_label) = if one_pass {
+        (1, format!("Batch of {total}"))
+    } else {
+        (total_u32, String::new())
+    };
+    let step_text = |index: usize, detail: String| {
+        if one_pass {
+            format!("{step_label} — {detail}.")
+        } else {
+            format!("Image {}/{total} — {detail}.", index + 1)
+        }
+    };
     let mut canceled = false;
     let mut last_cancel_check = Instant::now();
     // Per-image inference lifecycle events (sc-3450), parity with the Python worker's
@@ -14565,9 +14829,9 @@ async fn consume_gen_events_with_disclosure(
                     image_progress(
                         JobStatus::Running,
                         ProgressStage::Generating,
-                        step_fraction(index, current, step_total, total_u32),
+                        step_fraction(index, current, step_total, step_slices),
                         &progress_with_auto_tier_streaming(
-                            &format!("Image {}/{total} — step {current}/{step_total}.", index + 1),
+                            &step_text(index, format!("step {current}/{step_total}")),
                             auto_tier_streaming,
                         ),
                         Some(streaming_result_with_preview(
@@ -14589,8 +14853,8 @@ async fn consume_gen_events_with_disclosure(
                     image_progress(
                         JobStatus::Running,
                         ProgressStage::Generating,
-                        step_fraction(index, 1, 1, total_u32),
-                        &format!("Image {}/{total} — decoding.", index + 1),
+                        step_fraction(index, 1, 1, step_slices),
+                        &step_text(index, "decoding".to_owned()),
                         Some(streaming_result_with_preview(
                             plan,
                             asset_writes,

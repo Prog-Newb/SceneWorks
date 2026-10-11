@@ -1499,6 +1499,7 @@ fn krea_imported_memory_inputs(
         overlays.push(format!("adapters:{adapter_count}"));
     }
     crate::mlx_fit_gate::MlxRequestInputs {
+        native_batch: 1,
         width,
         height,
         count: request.count,

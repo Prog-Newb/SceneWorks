@@ -96,6 +96,108 @@ pub(crate) fn resolve_lane_request_controls(
     })
 }
 
+/// A native prompt batch resolved for one job (sc-25681): the prompts ONE engine call renders
+/// together (`GenerationRequest::prompt_batch`) and the `count` repetitions of the whole list. The
+/// engine returns `prompts × count` images in prompt-minor order, image `k` on seed `seed + k`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NativePromptBatch {
+    pub(crate) prompts: Vec<String>,
+    pub(crate) count: u32,
+}
+
+impl NativePromptBatch {
+    /// The images the one engine call returns.
+    pub(crate) fn images(&self) -> u32 {
+        u32::try_from(self.prompts.len())
+            .unwrap_or(u32::MAX)
+            .saturating_mul(self.count)
+    }
+}
+
+/// Resolve the request's native prompt batch against the LINKED engine (`caps`), refusing (typed
+/// `InvalidPayload`, before any load) a batch the engine cannot render — no `supports_prompt_batch`,
+/// more images than its `max_count`, or a shape the API would refuse (the same core check) — and a
+/// batch combined with a lane feature that renders per image (`per_image`: name → in use), which the
+/// one-call batch would otherwise silently skip. `None` for an ordinary request.
+pub(crate) fn resolve_native_prompt_batch(
+    request: &ImageRequest,
+    caps: &Capabilities,
+    per_image: &[(&str, bool)],
+) -> WorkerResult<Option<NativePromptBatch>> {
+    if request.prompts.is_empty() {
+        return Ok(None);
+    }
+    let refuse =
+        |message: String| WorkerError::InvalidPayload(format!("{}: {message}", request.model));
+    if !caps.supports_prompt_batch {
+        return Err(refuse(
+            "the engine does not render a prompt batch in one pass; send one job per prompt"
+                .to_owned(),
+        ));
+    }
+    if let Some(message) = controls::prompt_batch_error(
+        &request.model,
+        &request.prompt,
+        &request.prompts,
+        request.count,
+        &request.model_manifest_entry,
+    ) {
+        return Err(WorkerError::InvalidPayload(message));
+    }
+    let batch = NativePromptBatch {
+        prompts: request.prompts.clone(),
+        count: request.count,
+    };
+    if batch.images() > caps.max_count {
+        return Err(refuse(format!(
+            "a prompt batch of {} images exceeds the {} the engine renders per request",
+            batch.images(),
+            caps.max_count
+        )));
+    }
+    if let Some((feature, _)) = per_image.iter().find(|(_, in_use)| *in_use) {
+        return Err(refuse(format!(
+            "{feature} renders per image and cannot ride a prompt batch; send one job per prompt"
+        )));
+    }
+    Ok(Some(batch))
+}
+
+/// The DECLARED extra working set of a native prompt batch on the Candle lane, in bytes (sc-25681):
+/// every image beyond the first adds its pixel-space activations,
+/// `(images − 1) × candle.promptBatchImageGb × max(1, width·height / 1024²)`. The single-image
+/// floors (`candle.minMemoryGb` / `sequentialPeakGb`) already carry one image; the area term never
+/// shrinks below 1024² (the floors were declared there). `0` for an ordinary request. A batch on an
+/// entry that declares no per-image term is refused before load rather than admitted on a floor
+/// sized for one image. S6 (sc-25684) owns the measured value.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn native_batch_overlay_bytes(
+    request: &ImageRequest,
+    batch: Option<&NativePromptBatch>,
+    width: u32,
+    height: u32,
+) -> WorkerResult<u64> {
+    let Some(batch) = batch else {
+        return Ok(0);
+    };
+    let per_image_gb = request
+        .model_manifest_entry
+        .get("candle")
+        .and_then(|candle| candle.get("promptBatchImageGb"))
+        .and_then(Value::as_f64)
+        .filter(|gb| gb.is_finite() && *gb > 0.0)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "{}: no declared per-image memory for a prompt batch (candle.promptBatchImageGb); \
+                 send one job per prompt",
+                request.model
+            ))
+        })?;
+    let megapixels = (f64::from(width) * f64::from(height) / (1024.0 * 1024.0)).max(1.0);
+    let extra_images = f64::from(batch.images().saturating_sub(1));
+    Ok((extra_images * per_image_gb * megapixels * crate::fit_gate::BYTES_PER_GIB).round() as u64)
+}
+
 /// One adapter's identity, resolved once per job before load: what was requested, from where,
 /// at what strength, and the SHA-256 of the exact file the engine loads.
 #[derive(Clone, Debug, PartialEq)]
@@ -107,45 +209,38 @@ pub(crate) struct AdapterIdentity {
     pub(crate) kind: AdapterKind,
 }
 
-fn file_sha256(path: &std::path::Path) -> Option<String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Some(format!("{:x}", hasher.finalize()))
-}
-
 /// The identities of `adapters` (the resolved load-order stack), labelled with the request LoRA
-/// ids they came from (`request.loras` is the same order). A hashing failure leaves `sha256`
+/// ids they came from (`request.loras` is the same order), resolved ONCE per job before load.
+///
+/// The digest comes from [`super::trusted_lora_hash`] — the same path workflow attribution uses:
+/// the install marker's cached `loraFileSha256` when it still describes this exact file (no
+/// re-hash), otherwise a SHA-256 on a blocking task with the worker heartbeat kept alive (never on
+/// the async executor thread), cached back into the marker. A hashing failure leaves `sha256`
 /// `None` — attribution, not generation, fails.
-pub(crate) fn adapter_identities(
+pub(crate) async fn adapter_identities(
+    api: &crate::api_client::ApiClient,
+    settings: &crate::settings::Settings,
+    job: &sceneworks_core::contracts::JobSnapshot,
     request: &ImageRequest,
     adapters: &[AdapterSpec],
 ) -> Vec<AdapterIdentity> {
-    adapters
-        .iter()
-        .enumerate()
-        .map(|(index, adapter)| AdapterIdentity {
-            id: request.loras.get(index).and_then(|lora| {
-                lora.as_str()
-                    .or_else(|| lora.get("id").and_then(Value::as_str))
-                    .or_else(|| lora.get("loraId").and_then(Value::as_str))
-                    .map(str::to_owned)
-            }),
+    let mut identities = Vec::with_capacity(adapters.len());
+    for (index, adapter) in adapters.iter().enumerate() {
+        let lora = request.loras.get(index).cloned().unwrap_or(Value::Null);
+        let sha256 = super::trusted_lora_hash(api, settings, job, &lora, &adapter.path).await;
+        identities.push(AdapterIdentity {
+            id: lora
+                .as_str()
+                .or_else(|| lora.get("id").and_then(Value::as_str))
+                .or_else(|| lora.get("loraId").and_then(Value::as_str))
+                .map(str::to_owned),
             path: adapter.path.clone(),
-            sha256: file_sha256(&adapter.path),
+            sha256,
             scale: adapter.scale,
             kind: adapter.kind,
-        })
-        .collect()
+        });
+    }
+    identities
 }
 
 /// The per-image facts block a render reports into its asset's `rawAdapterSettings`: the engine's
@@ -406,18 +501,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn adapter_identities_hash_the_loaded_file_and_keep_the_request_id() {
+    async fn identities_for(loras: Vec<Value>, adapters: &[AdapterSpec]) -> Vec<AdapterIdentity> {
+        let settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
+        let api = crate::api_client::ApiClient::new(&settings);
+        let job: sceneworks_core::contracts::JobSnapshot =
+            serde_json::from_value(crate::tests::job_snapshot_json("job-hash", false)).unwrap();
+        let mut request = request(json!({}), "", json!({}));
+        request.loras = loras;
+        adapter_identities(&api, &settings, &job, &request, adapters).await
+    }
+
+    /// No install marker: the loaded file is hashed (off the executor) and labelled with its
+    /// request id.
+    #[tokio::test]
+    async fn adapter_identities_hash_the_loaded_file_and_keep_the_request_id() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("a.safetensors");
         std::fs::write(&file, b"abc").unwrap();
-        let request = request(json!({}), "", json!({}));
-        let mut request = request;
-        request.loras = vec![json!({ "id": "style-a", "weight": 0.7 })];
-        let identities = adapter_identities(
-            &request,
+        let identities = identities_for(
+            vec![json!({ "id": "style-a", "weight": 0.7 })],
             &[AdapterSpec::new(file.clone(), 0.7, AdapterKind::Lora)],
-        );
+        )
+        .await;
         assert_eq!(identities.len(), 1);
         assert_eq!(identities[0].id.as_deref(), Some("style-a"));
         assert_eq!(
@@ -425,5 +530,35 @@ mod tests {
             Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
         );
         assert_eq!(identities[0].path, file);
+    }
+
+    /// An install marker that still describes the exact file supplies its cached digest — the file
+    /// is NOT re-hashed (the marker's value is deliberately not the bytes' real digest).
+    ///
+    /// *Mutation that reds this:* hash the file unconditionally (bypass `trusted_lora_hash`).
+    #[tokio::test]
+    async fn adapter_identities_reuse_the_install_markers_cached_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("cached.safetensors");
+        std::fs::write(&file, b"abc").unwrap();
+        let identity = crate::imports::model_file_identity(&file).unwrap();
+        let cached = "f".repeat(64);
+        std::fs::write(
+            dir.path().join(crate::INSTALL_MARKER),
+            json!({
+                "loraFileName": identity.name,
+                "loraFileBytes": identity.bytes,
+                "loraFileModifiedNanos": identity.modified_nanos,
+                "loraFileSha256": cached,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let identities = identities_for(
+            vec![json!({ "id": "cached" })],
+            &[AdapterSpec::new(file, 1.0, AdapterKind::Lora)],
+        )
+        .await;
+        assert_eq!(identities[0].sha256.as_deref(), Some(cached.as_str()));
     }
 }

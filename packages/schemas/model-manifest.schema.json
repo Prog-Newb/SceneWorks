@@ -1786,6 +1786,11 @@
                 "description": "Candle/CUDA SEQUENTIAL-residency peak or conservative high-water VRAM (GB) at the vramMeasuredPixels geometry, keyed by quant tier — the largest single working set when the provider loads→uses→drops each component in phase order (text encoders dropped before the DiT). The sibling measured flag says whether it is calibrated evidence. Always ≤ the resident vramGbByTier. Present only for sequential-capable providers (the candle FLUX lane, epic 10765 sc-10769). The fit-gate consults it as the SECOND-stage check (sc-10856): when the resident peak forces sequential offload but this peak still exceeds free VRAM, reject before load instead of running into a reactive OOM. Absent this number the gate keeps its best-effort behavior (run sequentially, reactive-OOM backstop).",
                 "additionalProperties": { "type": "number" }
               },
+              "promptBatchImageGb": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "DECLARED (never measured) activation working set, in GB at <= 1024² output, of ONE extra image of a native prompt batch (image.maxPromptBatchImages, sc-25681). The Candle fit gate charges (images − 1) × this × max(1, megapixels) on top of the single-image resident and sequential predictions, so a batch is never admitted on a floor sized for one image. Required by any Candle-routed entry declaring image.maxPromptBatchImages: without it the gate refuses a batch before load."
+              },
               "supportsSequentialOffload": {
                 "type": "boolean",
                 "description": "Static provider capability: the registered Candle generator honors LoadSpec sequential residency. Separate from sequentialPeakGb, which records measurement evidence."
@@ -1945,6 +1950,11 @@
                 "type": "integer",
                 "minimum": 1,
                 "description": "Below this output side (pixels) the released checkpoint renders a visible patch grid (Iris-3B at 1024: its 16-px patches show below 1024², which upstream fp32 reproduces, sc-25681). Purely informational: Image Studio shows a hint whenever width or height is under it and never restricts the size."
+              },
+              "maxPromptBatchImages": {
+                "type": "integer",
+                "minimum": 2,
+                "description": "The engine renders a LIST of prompts as one batched pass (upstream Iris-3B `generate(prompts=[…])`, sc-25681): a job's top-level `prompts` (with `prompt` = `prompts[0]`) renders `prompts × count` images in prompt-minor order on seeds seed, seed+1, …, at most this many per job (the engine's max_count). ABSENT MEANS NONE: the API refuses `prompts`, and Image Studio's prompt batch stays one job per prompt. When present, Image Studio packs its prompt batch into native jobs of up to floor(this / count) prompts."
               }
             }
           },

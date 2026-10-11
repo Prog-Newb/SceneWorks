@@ -37,6 +37,7 @@ const IRIS = {
     supportsCfgInterval: true,
     captionOverflowPolicies: ["warn", "error", "silent"],
     patchGridVisibleBelow: 1024,
+    maxPromptBatchImages: 8,
   },
   defaults: {
     resolution: "1024x1024",
@@ -140,7 +141,7 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
     expect(field(container, "Scheduler")).toBeUndefined();
     expect(field(container, "Schedule shift").value).toBe("4");
     expect(field(container, "Guidance method")).toBeUndefined();
-    expect(container.querySelector('input[aria-label="Guidance interval start"]')).toBeTruthy();
+    expect(field(container, "Guidance interval")).toBeTruthy();
     const overflow = container.querySelector('select[aria-label="Caption overflow"]');
     expect([...overflow.options].map((option) => option.value)).toEqual(["default", "warn", "error", "silent"]);
     const steps = field(container, "Steps");
@@ -168,7 +169,7 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
     expect(createImageJob.mock.calls[1][0].negativePrompt).toBe("blurry");
   });
 
-  const intervalInput = (edge) => container.querySelector(`input[aria-label="Guidance interval ${edge}"]`);
+  const intervalInput = () => field(container, "Guidance interval");
 
   it("sends every control to the job request", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-iris" }));
@@ -177,8 +178,7 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
     await act(async () => setInput(field(container, "Schedule shift"), "2.5"));
     await act(async () => setInput(field(container, "Steps"), "30"));
     await act(async () => setInput(field(container, "Guidance"), "4.5"));
-    await act(async () => setInput(intervalInput("start"), "0.1"));
-    await act(async () => setInput(intervalInput("end"), "0.9"));
+    await act(async () => setInput(intervalInput(), "0.1, 0.9"));
     await act(async () =>
       setSelect(container.querySelector('select[aria-label="Caption overflow"]'), "error"),
     );
@@ -207,9 +207,9 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
     // The shift axis rides on its own (there is no scheduler picker to gate it on).
     expect(defaults.schedulerShift).toBe(4);
 
-    await act(async () => setInput(intervalInput("start"), "0.2"));
+    await act(async () => setInput(intervalInput(), "0.2, 0.8"));
     await act(async () => setInput(field(container, "Guidance"), "1"));
-    expect(container.querySelector("fieldset.cfg-interval").disabled).toBe(true);
+    expect(intervalInput().disabled).toBe(true);
     await click(generateButton());
     expect(createImageJob.mock.calls[1][0].advanced.cfgInterval).toBeUndefined();
   });
@@ -217,23 +217,23 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
   it("refuses an impossible interval before submitting", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-iris" }));
     await render(baseContext({ createImageJob }));
-    await act(async () => setInput(intervalInput("start"), "0.9"));
-    await act(async () => setInput(intervalInput("end"), "0.1"));
-    expect(container.textContent).toContain("Guidance interval must satisfy 0 ≤ start < end ≤ 1.");
+    await act(async () => setInput(intervalInput(), "0.9, 0.1"));
+    expect(container.textContent).toContain("Need 0 ≤ start < end ≤ 1.");
     await click(generateButton());
     expect(createImageJob).not.toHaveBeenCalled();
   });
 
   it("hints at the patch grid below 1024 and never restricts the size", async () => {
     await render(baseContext());
-    const hint = () => container.querySelector(".patch-grid-hint");
-    expect(hint()).toBeNull();
+    const hint = () =>
+      [...container.querySelectorAll('[role="note"]')].find((node) => node.textContent.includes("patch grid"));
+    expect(hint()).toBeUndefined();
     await act(async () => setSelect(field(container, "Aspect"), "512x512"));
-    expect(hint()?.textContent).toMatch(/Below 1024×1024 .*16-px patch grid/);
+    expect(hint()?.textContent).toBe("Below 1024px a side, Iris 3B shows a visible patch grid.");
     await act(async () => setSelect(field(container, "Aspect"), "1152x896"));
     expect(hint()?.textContent).toMatch(/patch grid/);
     await act(async () => setSelect(field(container, "Aspect"), "1024x1024"));
-    expect(hint()).toBeNull();
+    expect(hint()).toBeUndefined();
     // The free size override still admits a sub-1024 size on the 16-px grid.
     expect(field(container, "Width override").getAttribute("min")).toBe("16");
   });
@@ -276,14 +276,13 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
       JSON.stringify({
         model: "iris_3b",
         schedulerShift: 5,
-        cfgIntervalStart: "0.2",
-        cfgIntervalEnd: "0.8",
+        cfgInterval: "0.2, 0.8",
         captionOverflow: "silent",
       }),
     );
     const createImageJob = vi.fn(async () => ({ id: "job-iris" }));
     await render(baseContext({ createImageJob }));
-    expect(intervalInput("start").value).toBe("0.2");
+    expect(intervalInput().value).toBe("0.2, 0.8");
     expect(field(container, "Schedule shift").value).toBe("5");
     await click(generateButton());
     expect(createImageJob.mock.calls.at(-1)[0].advanced).toMatchObject({
@@ -293,6 +292,51 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
     });
     // …and the writer keeps them in the snapshot.
     const snapshot = JSON.parse(window.localStorage.getItem("sceneworks-studio-image-project_1") || "{}");
-    expect(snapshot).toMatchObject({ cfgIntervalStart: "0.2", cfgIntervalEnd: "0.8", captionOverflow: "silent" });
+    expect(snapshot).toMatchObject({ cfgInterval: "0.2, 0.8", captionOverflow: "silent" });
+  });
+
+  async function runBatch(text) {
+    await click(container.querySelector(".batch-toggle"));
+    await act(async () => {});
+    await act(async () => setTextarea(container.querySelector('textarea[aria-label="Batch prompts"]'), text));
+    const run = [...document.body.querySelectorAll("button")].find((b) => b.textContent.includes("Run batch"));
+    await click(run);
+    await act(async () => {});
+  }
+
+  // sc-25681: Iris renders a prompt list in ONE pass, so the prompt batch packs into native jobs of
+  // up to floor(8 / count) same-size prompts; `prompt` is the first, `prompts` the whole chunk.
+  // Mutation that reds this: `promptBatchSize` returning 1 (one job per prompt).
+  it("packs the prompt batch into native batch jobs of up to 8 / count prompts", async () => {
+    const createImageJob = vi.fn(async () => ({ id: `job-${createImageJob.mock.calls.length}` }));
+    await render(baseContext({ createImageJob }));
+    await act(async () => setInput(field(container, "Variations"), "4"));
+    await runBatch("a red fox\na blue whale\na green frog\n[512x512] a gold bird");
+    const requests = createImageJob.mock.calls.map(([request]) => request);
+    expect(requests.map((request) => [request.prompt, request.prompts, request.count])).toEqual([
+      ["a red fox", ["a red fox", "a blue whale"], 4],
+      ["a green frog", undefined, 4],
+      ["a gold bird", undefined, 4],
+    ]);
+    expect(requests[2]).toMatchObject({ width: 512, height: 512 });
+  });
+
+  // Mutation that reds this: drop the `promptBatch` branch of the recipe effect.
+  it("reopens a native batch image as the whole prompt batch", async () => {
+    await render(
+      baseContext({
+        studioLaunch: {
+          id: "launch-batch",
+          view: "Image",
+          recipe: {
+            model: "iris_3b",
+            prompt: "a blue whale",
+            normalizedSettings: { width: 1024, height: 1024 },
+            rawAdapterSettings: { promptBatch: ["a red fox", "a blue whale"] },
+          },
+        },
+      }),
+    );
+    expect(container.querySelector('textarea[aria-label="Batch prompts"]')?.value).toBe("a red fox\na blue whale");
   });
 });

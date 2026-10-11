@@ -149,11 +149,13 @@ export function settlePromptBatchRun(run, jobs, observedJobs) {
   const activeJobIds = [];
   for (const jobId of run.activeJobIds) {
     const status = batchItemStatus(jobId, jobs, observedJobs);
+    // A native prompt-batch job (sc-25681) settles every prompt it carries.
+    const n = run.sizes?.[jobId] ?? 1;
     if (status === "completed") {
-      completed += 1;
+      completed += n;
       observedJobs?.delete(jobId);
     } else if (status === "failed") {
-      failed += 1;
+      failed += n;
       observedJobs?.delete(jobId);
     } else {
       activeJobIds.push(jobId);
@@ -178,7 +180,7 @@ export function summarizeBatchRun(run, jobs, observedJobs) {
     failed: run?.failed ?? 0,
   };
   for (const jobId of run?.activeJobIds ?? []) {
-    summary[batchItemStatus(jobId, jobs, observedJobs)] += 1;
+    summary[batchItemStatus(jobId, jobs, observedJobs)] += run.sizes?.[jobId] ?? 1;
   }
   summary.done = summary.completed + summary.failed;
   summary.active = summary.queued + summary.running;

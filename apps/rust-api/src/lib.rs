@@ -5089,6 +5089,18 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
             "prompt must be between 1 and 4000 characters",
         ));
     }
+    // A native prompt batch (sc-25681): every prompt obeys the single prompt's length bound. Its
+    // shape against the model (declared cap, `prompt == prompts[0]`, `prompts × count`) is judged
+    // in `create_image_job` against the canonical catalog entry.
+    if payload
+        .prompts
+        .iter()
+        .any(|prompt| prompt.is_empty() || prompt.chars().count() > MAX_PROMPT_CHARS)
+    {
+        return Err(ApiError::bad_request(
+            "each of prompts must be between 1 and 4000 characters",
+        ));
+    }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
     validate_prompt_enhancement_fields(&payload.advanced)?;
     validate_image_pose_count(&payload.advanced)?;

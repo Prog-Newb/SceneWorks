@@ -205,67 +205,11 @@ export function guidanceIsOff(model, guidanceOverride) {
   return effective === 1;
 }
 
-// sc-25681: the image sampling-control declarations (manifest `image` block). Each ABSENT MEANS
-// FALSE / NONE, so every model that declares nothing keeps its historical controls.
-//
-// A schedule-shift axis WITHOUT a scheduler menu (Iris-3B: one shifted time grid). The studio shows
-// its Schedule shift control regardless of the scheduler picker and sends the value.
-export function supportsSchedulerShiftAxis(model) {
-  return model?.image?.supportsSchedulerShift === true;
-}
-
-export function supportsCfgIntervalAxis(model) {
-  return model?.image?.supportsCfgInterval === true;
-}
-
-export const CAPTION_OVERFLOW_LABELS = {
-  default: "Checkpoint default",
-  warn: "Truncate and warn",
-  error: "Refuse (error)",
-  silent: "Truncate silently",
-};
-
-// The caption-overflow policies the model offers, in the declared order; `[]` hides the control.
-export function captionOverflowOptions(model) {
-  const declared = model?.image?.captionOverflowPolicies;
-  if (!Array.isArray(declared)) return [];
-  return declared.filter((policy) => ["warn", "error", "silent"].includes(policy));
-}
-
-// Resolve the studio's CFG-interval inputs (sc-25681). `start` / `end` are the raw input strings
-// ("" = the model's own bound: 0 / 1). Returns `{ interval, error }`:
-//   * `interval` — the `[start, end]` pair to send, or `null` to send nothing: the model offers no
-//     interval, the full default interval is selected, or CFG is off (the engine refuses an
-//     interval there, so the control is disabled and nothing is sent);
-//   * `error` — a user-facing message when the inputs cannot form an interval (0 <= start < end <= 1).
-export function resolveCfgInterval({ model, start, end, guidanceOverride }) {
-  if (!supportsCfgIntervalAxis(model)) return { interval: null, error: null };
-  if ((start === "" || start == null) && (end === "" || end == null)) {
-    return { interval: null, error: null };
-  }
-  const lo = start === "" || start == null ? 0 : Number(start);
-  const hi = end === "" || end == null ? 1 : Number(end);
-  if (!(Number.isFinite(lo) && Number.isFinite(hi) && lo >= 0 && lo < hi && hi <= 1)) {
-    return {
-      interval: null,
-      error: "Guidance interval must satisfy 0 ≤ start < end ≤ 1.",
-    };
-  }
-  if (guidanceIsOff(model, guidanceOverride)) return { interval: null, error: null };
-  if (lo === 0 && hi === 1) return { interval: null, error: null };
-  return { interval: [lo, hi], error: null };
-}
-
-// The patch-grid hint (sc-25681): a model declaring `image.patchGridVisibleBelow` (Iris-3B at 1024)
-// shows its patch grid below that side. Informational only — the size is never restricted.
+// The patch-grid hint (sc-25681): `image.patchGridVisibleBelow` (Iris-3B, 1024) — informational,
+// the size is never restricted.
 export function patchGridHint(model, width, height) {
-  const threshold = Number(model?.image?.patchGridVisibleBelow);
-  if (!Number.isFinite(threshold) || threshold <= 0) return null;
-  if (!(Number(width) < threshold || Number(height) < threshold)) return null;
-  const patch = Number(model?.limits?.requiresDimensionsMultipleOf);
-  const grid = Number.isFinite(patch) && patch > 0 ? `${patch}-px ` : "";
-  return (
-    `Below ${threshold}×${threshold} the released ${model?.name ?? "checkpoint"} shows a visible ` +
-    `${grid}patch grid (upstream renders it too). Use ${threshold}px or larger per side for clean output.`
-  );
+  const side = model?.image?.patchGridVisibleBelow;
+  return side > 0 && (width < side || height < side)
+    ? `Below ${side}px a side, ${model.name} shows a visible patch grid.`
+    : null;
 }

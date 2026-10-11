@@ -134,6 +134,11 @@ pub struct ImageRequest {
     pub project_id: String,
     pub mode: String,
     pub prompt: String,
+    /// A NATIVE prompt batch (sc-25681, `image.maxPromptBatchImages`): the prompts one engine call
+    /// renders together, verbatim. Empty for an ordinary request. When set, `prompt` is `prompts[0]`
+    /// (the API enforces it) and image `k` renders `prompts[k % prompts.len()]` — see
+    /// [`Self::image_prompt`].
+    pub prompts: Vec<String>,
     pub negative_prompt: String,
     pub model: String,
     /// Number of images, clamped to 1..=8.
@@ -178,6 +183,23 @@ pub struct ImageRequest {
 }
 
 impl ImageRequest {
+    /// The prompt image `index` of this job rendered: `prompt` for an ordinary request, and
+    /// `prompts[index % prompts.len()]` for a native prompt batch (prompt-minor order — the engine
+    /// renders the whole prompt list once per `count` repetition).
+    pub fn image_prompt(&self, index: usize) -> &str {
+        if self.prompts.is_empty() {
+            &self.prompt
+        } else {
+            &self.prompts[index % self.prompts.len()]
+        }
+    }
+
+    /// The images this request produces: `count`, or `prompts × count` for a native prompt batch.
+    pub fn image_count(&self) -> u32 {
+        self.count
+            .saturating_mul(u32::try_from(self.prompts.len().max(1)).unwrap_or(u32::MAX))
+    }
+
     /// Parse a job payload (the `payload` object of a `JobSnapshot`). Infallible:
     /// missing fields fall back to the Python defaults and `project_id` may be empty
     /// — the caller validates it is present (the worker rejects an empty project id).
@@ -201,6 +223,17 @@ impl ImageRequest {
             project_id: string_or(payload, "projectId", ""),
             mode: nonempty_string_or(payload, "mode", DEFAULT_MODE),
             prompt: string_or(payload, "prompt", ""),
+            prompts: payload
+                .get(crate::image_sampling_controls::PROMPTS_KEY)
+                .and_then(Value::as_array)
+                .map(|prompts| {
+                    prompts
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
             negative_prompt: string_or(payload, "negativePrompt", ""),
             model: nonempty_string_or(payload, "model", DEFAULT_MODEL),
             count: clamped_u32(payload.get("count"), default_count, MIN_COUNT, MAX_COUNT),
@@ -485,6 +518,26 @@ mod tests {
             "the sanity floor never rises"
         );
         assert_eq!(request(json!({}), 64).width, 256);
+    }
+
+    /// sc-25681: a native prompt batch maps image `k` to `prompts[k % len]` (prompt-minor) and
+    /// produces `prompts × count` images; an ordinary request is unchanged.
+    ///
+    /// *Mutation that reds this:* index `prompts[k / count]` (prompt-major).
+    #[test]
+    fn a_prompt_batch_is_prompt_minor() {
+        let batch = ImageRequest::from_payload(&payload(json!({
+            "projectId": "p", "prompt": "a", "prompts": ["a", "b", "c"], "count": 2
+        })));
+        assert_eq!(batch.image_count(), 6);
+        let order: Vec<&str> = (0..6).map(|k| batch.image_prompt(k)).collect();
+        assert_eq!(order, vec!["a", "b", "c", "a", "b", "c"]);
+        let plain = ImageRequest::from_payload(&payload(json!({
+            "projectId": "p", "prompt": "solo", "count": 3
+        })));
+        assert!(plain.prompts.is_empty());
+        assert_eq!(plain.image_count(), 3);
+        assert_eq!(plain.image_prompt(2), "solo");
     }
 
     #[test]

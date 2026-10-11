@@ -274,6 +274,36 @@ pub(crate) async fn create_image_job(
                 return Err(ApiError::bad_request(message));
             }
         }
+        // A native prompt batch (sc-25681): only for a model that renders one in a single pass,
+        // `prompts × count` within its declared cap, and `prompt` (after every server-side fold
+        // above) still `prompts[0]`. Refused here, before a job exists.
+        {
+            let prompts: Vec<String> = job_payload
+                .get(sceneworks_core::image_sampling_controls::PROMPTS_KEY)
+                .and_then(Value::as_array)
+                .map(|prompts| {
+                    prompts
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let prompt = job_payload
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let count = job_payload
+                .get("count")
+                .and_then(Value::as_u64)
+                .and_then(|count| u32::try_from(count).ok())
+                .unwrap_or(1);
+            if let Some(message) = sceneworks_core::image_sampling_controls::prompt_batch_error(
+                &model_id, prompt, &prompts, count, entry,
+            ) {
+                return Err(ApiError::bad_request(message));
+            }
+        }
         // The model's declared ORDERED reference ceiling, `limits.maxReferenceAssets`
         // (sc-24113 introduced the key and this call; sc-24110 corrected what is counted).
         //
