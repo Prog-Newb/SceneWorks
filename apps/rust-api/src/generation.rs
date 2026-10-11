@@ -248,6 +248,32 @@ pub(crate) async fn create_image_job(
                 return Err(ApiError::bad_request(message));
             }
         }
+        // The remaining sampling controls (sc-25681): schedule shift without a scheduler menu,
+        // guidance interval, caption-overflow policy, and the CFG-bound negative prompt. An
+        // undeclared control, a malformed value, or one that would be accepted and ignored at the
+        // resolved guidance (interval / bound negative prompt at CFG 1.0) is refused here, before
+        // a job exists — the same core function the worker re-applies before load.
+        {
+            let empty = JsonObject::new();
+            let advanced = job_payload
+                .get("advanced")
+                .and_then(Value::as_object)
+                .unwrap_or(&empty);
+            let negative_prompt = job_payload
+                .get("negativePrompt")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Some(message) =
+                sceneworks_core::image_sampling_controls::image_sampling_control_error(
+                    &model_id,
+                    advanced,
+                    negative_prompt,
+                    entry,
+                )
+            {
+                return Err(ApiError::bad_request(message));
+            }
+        }
         // The model's declared ORDERED reference ceiling, `limits.maxReferenceAssets`
         // (sc-24113 introduced the key and this call; sc-24110 corrected what is counted).
         //

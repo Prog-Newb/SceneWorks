@@ -15,6 +15,12 @@ import {
   schedulerShiftDefaultFromModel,
   stepsDefaultFromModel,
   stepsMenuFromModel,
+  captionOverflowOptions,
+  guidanceIsOff,
+  patchGridHint,
+  resolveCfgInterval,
+  supportsCfgIntervalAxis,
+  supportsSchedulerShiftAxis,
 } from "./samplerOptions.js";
 import { fallbackModels } from "./constants.js";
 
@@ -238,5 +244,70 @@ describe("samplerOptions", () => {
     ).toBe(true);
     const undeclared = { defaults: { guidanceScale: 1.0 } };
     expect(negativePromptInertAtGuidance(undeclared, "")).toBe(false);
+  });
+});
+
+describe("sc-25681 image sampling-control declarations", () => {
+  const iris = {
+    id: "iris_3b",
+    name: "Iris 3B",
+    defaults: { guidanceScale: 3.0, schedulerShift: 4.0, sampler: "dpmpp_2m" },
+    limits: { samplers: ["dpmpp_2m", "euler"], requiresDimensionsMultipleOf: 16 },
+    image: {
+      negativePromptRequiresGuidance: true,
+      supportsSchedulerShift: true,
+      supportsCfgInterval: true,
+      captionOverflowPolicies: ["warn", "error", "silent"],
+      patchGridVisibleBelow: 1024,
+    },
+  };
+  const plain = { id: "plain", defaults: { guidanceScale: 3.0 } };
+
+  it("reads the declarations, absent meaning none", () => {
+    expect(supportsSchedulerShiftAxis(iris)).toBe(true);
+    expect(supportsCfgIntervalAxis(iris)).toBe(true);
+    expect(captionOverflowOptions(iris)).toEqual(["warn", "error", "silent"]);
+    expect(supportsSchedulerShiftAxis(plain)).toBe(false);
+    expect(supportsCfgIntervalAxis(plain)).toBe(false);
+    expect(captionOverflowOptions(plain)).toEqual([]);
+    expect(captionOverflowOptions({ image: { captionOverflowPolicies: ["warn", "loud"] } })).toEqual(["warn"]);
+    expect(samplerOptionsFromModel(iris)).toEqual(["euler", "dpmpp_2m"]);
+    expect(samplerDefaultFromModel(iris)).toBe("dpmpp_2m");
+    expect(schedulerShiftDefaultFromModel(iris)).toBe(4.0);
+  });
+
+  it("guidance is off exactly at 1.0, override or default", () => {
+    expect(guidanceIsOff(iris, "1")).toBe(true);
+    expect(guidanceIsOff(iris, "")).toBe(false);
+    expect(guidanceIsOff({ defaults: { guidanceScale: 1 } }, "")).toBe(true);
+  });
+
+  it.each([
+    // [start, end, guidance, interval, error]
+    ["", "", "", null, null],
+    ["0", "1", "", null, null],
+    ["0.1", "0.9", "", [0.1, 0.9], null],
+    ["", "0.6", "", [0, 0.6], null],
+    ["0.3", "", "4", [0.3, 1], null],
+    ["0.1", "0.9", "1", null, null],
+    ["0.9", "0.1", "", null, "Guidance interval must satisfy 0 ≤ start < end ≤ 1."],
+    ["-0.1", "0.5", "", null, "Guidance interval must satisfy 0 ≤ start < end ≤ 1."],
+    ["0.2", "1.5", "", null, "Guidance interval must satisfy 0 ≤ start < end ≤ 1."],
+  ])("cfg interval %s..%s at guidance %s", (start, end, guidanceOverride, interval, error) => {
+    expect(resolveCfgInterval({ model: iris, start, end, guidanceOverride })).toEqual({ interval, error });
+  });
+
+  it("never resolves an interval for a model that does not offer one", () => {
+    expect(resolveCfgInterval({ model: plain, start: "0.1", end: "0.9", guidanceOverride: "" })).toEqual({
+      interval: null,
+      error: null,
+    });
+  });
+
+  it("hints at the patch grid below the declared side and never otherwise", () => {
+    expect(patchGridHint(iris, 1024, 1024)).toBeNull();
+    expect(patchGridHint(iris, 1216, 832)).toMatch(/Below 1024×1024 .*16-px patch grid/);
+    expect(patchGridHint(iris, 512, 512)).toMatch(/Iris 3B/);
+    expect(patchGridHint(plain, 512, 512)).toBeNull();
   });
 });

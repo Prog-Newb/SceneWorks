@@ -189,6 +189,14 @@ impl ImageRequest {
         let (default_width, default_height) = default_resolution(&model_manifest_entry)
             .unwrap_or((DEFAULT_DIMENSION, DEFAULT_DIMENSION));
         let default_count = default_count(&model_manifest_entry).unwrap_or(DEFAULT_COUNT);
+        // The sanity floor yields to a model's DECLARED `limits.minDimension` below it (sc-25681):
+        // the API admits a declared envelope down to its own floor (Iris-3B renders from 16 px,
+        // Qwen-Image 2.1 from 32), and the blanket 256 here silently re-sized those requests on the
+        // worker — an accepted size that never reached the engine. Every model that declares no
+        // floor (or one at/above 256) keeps the historical clamp.
+        let min_dimension = crate::video_request::image_dimension_envelope(&model_manifest_entry)
+            .min
+            .map_or(MIN_DIMENSION, |declared| declared.min(MIN_DIMENSION));
         Self {
             project_id: string_or(payload, "projectId", ""),
             mode: nonempty_string_or(payload, "mode", DEFAULT_MODE),
@@ -201,13 +209,13 @@ impl ImageRequest {
             width: clamped_u32(
                 payload.get("width"),
                 default_width,
-                MIN_DIMENSION,
+                min_dimension,
                 MAX_DIMENSION,
             ),
             height: clamped_u32(
                 payload.get("height"),
                 default_height,
-                MIN_DIMENSION,
+                min_dimension,
                 MAX_DIMENSION,
             ),
             style_preset: nonempty_string_or(payload, "stylePreset", DEFAULT_STYLE_PRESET),
@@ -449,6 +457,34 @@ mod tests {
 
         let low = ImageRequest::from_payload(&payload(json!({ "projectId": "p", "count": 0 })));
         assert_eq!(low.count, 1);
+    }
+
+    /// sc-25681: a model's declared `limits.minDimension` below the 256 sanity floor is honoured
+    /// (the API admits it, so the worker must not re-size it); a declared floor above 256, or none,
+    /// keeps the historical clamp.
+    ///
+    /// *Mutation that reds this:* clamp to the constant `MIN_DIMENSION` again.
+    #[test]
+    fn a_declared_floor_below_the_sanity_floor_reaches_the_request() {
+        let request = |entry: Value, side: u32| {
+            ImageRequest::from_payload(&payload(json!({
+                "projectId": "p", "width": side, "height": side, "modelManifestEntry": entry
+            })))
+        };
+        let iris = json!({ "limits": { "minDimension": 16, "maxDimension": 2048 } });
+        assert_eq!(request(iris.clone(), 64).width, 64);
+        assert_eq!(
+            request(iris, 8).height,
+            16,
+            "still clamped to the declared floor"
+        );
+        let high = json!({ "limits": { "minDimension": 512 } });
+        assert_eq!(
+            request(high, 300).width,
+            300,
+            "the sanity floor never rises"
+        );
+        assert_eq!(request(json!({}), 64).width, 256);
     }
 
     #[test]

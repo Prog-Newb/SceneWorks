@@ -256,6 +256,17 @@ export function loraMatchesModel(lora, model) {
   // Absent `modelIds` means family gating alone, so no existing LoRA is affected. Gated on the
   // model actually having an id: with no model selected there is nothing to compare against, and
   // the permissive branch above already covers that case.
+  // The Iris TASK gate (sc-25681), mirroring the API's `iris_adapter_refusal`: Iris's generation,
+  // depth and restoration backbones share one architecture, so family cannot tell their adapters
+  // apart. A model declaring `loraCompatibility.irisTask` is offered only adapters whose recorded
+  // `irisTask` stamp matches (an unstamped adapter is never offered — the API would refuse it), and
+  // whose recorded base model, if any, is this model.
+  const irisTask = model?.loraCompatibility?.irisTask;
+  if (irisTask) {
+    if (lora?.irisTask !== irisTask) return false;
+    const base = lora?.baseModel ?? lora?.base_model;
+    if (base && model?.id && base !== model.id) return false;
+  }
   const declaredModelIds = loraModelIds(lora);
   if (declaredModelIds.length && model?.id && !declaredModelIds.includes(model.id)) {
     return false;

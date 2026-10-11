@@ -1136,7 +1136,12 @@
             "additionalProperties": false,
             "properties": {
               "families": { "type": "array", "items": { "type": "string" } },
-              "types": { "type": "array", "items": { "type": "string" } }
+              "types": { "type": "array", "items": { "type": "string" } },
+              "irisTask": {
+                "type": "string",
+                "enum": ["generation", "depth", "restoration"],
+                "description": "Iris-3B adapters only (sc-25681): the Iris TASK an adapter must have been trained for. The three Iris task backbones share one architecture, so family alone cannot tell a depth adapter from a generation one; the API, Image Studio's picker and the engine all require the adapter's `irisTask` metadata stamp (recorded on the LoRA entry at import) to equal this, and refuse an unstamped file."
+              }
             }
           },
           "quantization": { "type": "object" },
@@ -1921,7 +1926,25 @@
               },
               "negativePromptRequiresGuidance": {
                 "type": "boolean",
-                "description": "Is the negative prompt the classifier-free-guidance unconditional, so it only exists while CFG is on (guidance != 1.0)? True for an engine that REFUSES a non-empty negative prompt at guidance 1.0 (Iris-3B, sc-25679) rather than silently ignoring it. ABSENT MEANS FALSE. When true, Image Studio disables its Negative prompt field and sends an empty one whenever the effective guidance is 1.0, and the worker's image lane drops the negative prompt at guidance 1.0 instead of forwarding a request the engine refuses."
+                "description": "Is the negative prompt the classifier-free-guidance unconditional, so it only exists while CFG is on (guidance != 1.0)? True for an engine that REFUSES a non-empty negative prompt at guidance 1.0 (Iris-3B, sc-25679) rather than silently ignoring it. ABSENT MEANS FALSE. When true, Image Studio disables its Negative prompt field and sends an empty one whenever the effective guidance is 1.0, and the API (and the worker, before load) refuse a non-empty negative prompt at guidance 1.0 instead of dropping it (sc-25681)."
+              },
+              "supportsSchedulerShift": {
+                "type": "boolean",
+                "description": "Does the engine have a schedule-shift axis WITHOUT a scheduler menu (Iris-3B: one shifted linear time grid, sc-25681)? ABSENT MEANS FALSE. When true, Image Studio shows its Schedule shift control (seeded from `defaults.schedulerShift`) regardless of the scheduler picker, sends `advanced.schedulerShift`, and the API refuses a non-finite or non-positive shift."
+              },
+              "supportsCfgInterval": {
+                "type": "boolean",
+                "description": "Does the engine gate classifier-free guidance to a model-time interval `advanced.cfgInterval: [start, end]` (0 <= start < end <= 1; model time runs from 1 = noise to 0 = clean) (Iris-3B, sc-25681)? ABSENT MEANS FALSE: the API refuses an interval for a model that does not declare it, and refuses any interval at guidance 1.0, where it would have no effect."
+              },
+              "captionOverflowPolicies": {
+                "type": "array",
+                "items": { "type": "string", "enum": ["warn", "error", "silent"] },
+                "description": "The caption-overflow policies (`advanced.captionOverflow`) the engine honours for a prompt that tokenizes past its text-encoder budget: `warn` truncates and reports a `caption_truncated` warning, `error` refuses the render, `silent` truncates quietly (Iris-3B, sc-25681). ABSENT MEANS NONE: the API refuses a policy the model does not list. Omitting the field runs the checkpoint's own configured policy."
+              },
+              "patchGridVisibleBelow": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Below this output side (pixels) the released checkpoint renders a visible patch grid (Iris-3B at 1024: its 16-px patches show below 1024², which upstream fp32 reproduces, sc-25681). Purely informational: Image Studio shows a hint whenever width or height is under it and never restricts the size."
               }
             }
           },

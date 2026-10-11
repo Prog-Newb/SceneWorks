@@ -220,6 +220,32 @@ pub struct GenerateImageArgs {
         description = "Include SceneWorks workflow metadata in returned images. Default false: MCP outputs often travel to model-provider infrastructure, so workflow metadata is stripped unless explicitly requested."
     )]
     pub include_workflow: Option<bool>,
+    // sc-25681: the per-model sampling controls, carried in `advanced` — the only keys the API
+    // and worker read them from. Each is validated at enqueue against the model's catalog row (a
+    // control the model does not declare is refused by name, never dropped), so the descriptions
+    // say where to find what a model offers rather than restating a menu.
+    #[schemars(description = "Denoise steps. Omit for the model's own default.")]
+    pub steps: Option<u32>,
+    #[schemars(
+        description = "Classifier-free guidance scale. Omit for the model's default. 1.0 turns guidance off, so a model that binds its negative prompt / guidance interval to guidance refuses those at 1.0."
+    )]
+    pub guidance_scale: Option<f64>,
+    #[schemars(
+        description = "Sampler / solver name from the model's samplers menu (list_models). Iris-3B: \"dpmpp_2m\" (DPM-Solver++ order 2, default) or \"euler\" (order 1). Omit for the model default."
+    )]
+    pub sampler: Option<String>,
+    #[schemars(
+        description = "Schedule (timestep) shift, > 0, for a model with a shift axis (Iris-3B's default is its checkpoint's 4.0). Omit for the model default."
+    )]
+    pub scheduler_shift: Option<f64>,
+    #[schemars(
+        description = "Guidance interval [start, end] with 0 <= start < end <= 1 (model time: 1 = noise, 0 = clean): classifier-free guidance runs only inside it. Only for a model that offers one (Iris-3B); refused at guidance 1.0."
+    )]
+    pub cfg_interval: Option<[f64; 2]>,
+    #[schemars(
+        description = "What to do with a prompt longer than the text encoder's caption budget: \"warn\" (truncate and report a caption_truncated warning on the job and image), \"error\" (refuse the render) or \"silent\" (truncate quietly). Only for a model that offers it (Iris-3B); omit for the checkpoint's own policy."
+    )]
+    pub caption_overflow: Option<String>,
 }
 
 /// Arguments for `submit_video_job`, mapped onto the API's `VideoJobRequest`
@@ -366,7 +392,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "List the generation model catalog. Returns compact entries: id (use as the model for a job), name, family, type (image/video), capabilities, installState, defaults (resolution/steps/guidanceScale/count), the supported resolutions/durations/fps menus, minSteps, the reference-media caps (maxReferenceAssets / maxSourceClipAssets / maxReferenceAudioAssets / maxCombinedReferenceAssets), promptGuide, and any licence-required attribution string. An fps menu is EXHAUSTIVE — an off-menu fps is refused, never rounded. A durations menu lists the model's exactly renderable clip lengths: a duration outside the model's hard min/max bounds is refused, but an in-range off-menu value is silently snapped onto the model's frame lattice (MiniMax-H3 rounds UP to the next 17n+5 rung) — send a menu value to get exactly the length you asked for."
+        description = "List the generation model catalog. Returns compact entries: id (use as the model for a job), name, family, type (image/video), capabilities, installState, defaults (resolution/steps/guidanceScale/count), the supported resolutions/durations/fps menus, the sampler menu (samplers) and image sampling-control declarations (imageControls: supportsSchedulerShift / supportsCfgInterval / captionOverflowPolicies / negativePromptRequiresGuidance), minSteps, the reference-media caps (maxReferenceAssets / maxSourceClipAssets / maxReferenceAudioAssets / maxCombinedReferenceAssets), promptGuide, and any licence-required attribution string. An fps menu is EXHAUSTIVE — an off-menu fps is refused, never rounded. A durations menu lists the model's exactly renderable clip lengths: a duration outside the model's hard min/max bounds is refused, but an in-range off-menu value is silently snapped onto the model's frame lattice (MiniMax-H3 rounds UP to the next 17n+5 rung) — send a menu value to get exactly the length you asked for."
     )]
     async fn list_models(&self) -> Result<CallToolResult, ErrorData> {
         let models = self
@@ -1108,6 +1134,23 @@ pub(crate) fn image_job_body(args: &GenerateImageArgs) -> Result<Value, String> 
             body.insert(key.to_owned(), value);
         }
     }
+    let advanced: Map<String, Value> = [
+        ("steps", args.steps.map(|v| json!(v))),
+        ("guidanceScale", args.guidance_scale.map(|v| json!(v))),
+        ("sampler", args.sampler.as_ref().map(|v| json!(v))),
+        ("schedulerShift", args.scheduler_shift.map(|v| json!(v))),
+        ("cfgInterval", args.cfg_interval.map(|v| json!(v))),
+        (
+            "captionOverflow",
+            args.caption_overflow.as_ref().map(|v| json!(v)),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value)))
+    .collect();
+    if !advanced.is_empty() {
+        body.insert("advanced".to_owned(), Value::Object(advanced));
+    }
     Ok(Value::Object(body))
 }
 
@@ -1733,10 +1776,15 @@ pub(crate) fn compact_models(models: &Value) -> Value {
         // every video model took a continuous duration range. MiniMax-H3 is not that shape: its
         // fourteen `17n + 5` rungs are the only renderable lengths, its fps is a one-entry menu,
         // and its step floor is 2 — so an agent that could not see them would guess "6 seconds,
-        // 25 fps" and get a 400 for every call. Sampler/scheduler menus and the download/footprint
-        // blocks stay on the full API response; these are the request-shaping keys.
+        // 25 fps" and get a 400 for every call. The download/footprint blocks stay on the full API
+        // response; these are the request-shaping keys. The sampler menu and the image control
+        // declarations joined them with sc-25681, when `generate_image` gained `sampler` /
+        // `schedulerShift` / `cfgInterval` / `captionOverflow`: an off-menu value is a 400, so the
+        // menu is request-shaping too.
         for (key, pointer) in [
             ("resolutions", "/limits/resolutions"),
+            ("samplers", "/limits/samplers"),
+            ("imageControls", "/image"),
             ("durations", "/limits/durations"),
             ("fps", "/limits/fps"),
             ("minSteps", "/limits/hardMinSteps"),
@@ -1857,6 +1905,7 @@ mod tests {
                 "gated": false,
                 "defaults": { "resolution": "1024x1024", "steps": 8, "guidanceScale": 0, "count": 4 },
                 "resolutions": ["768x768", "1024x1024"],
+                "samplers": ["default", "euler"],
                 "loraFamilies": ["z-image"]
             }])
         );
@@ -2026,6 +2075,52 @@ mod tests {
                 "maskAssetId": "asset_mask"
             })
         );
+    }
+
+    /// sc-25681: the sampling controls ride `advanced` (the only keys the API reads them from),
+    /// verbatim, and a call that names none sends no `advanced` block at all.
+    #[test]
+    fn image_job_body_maps_the_sampling_controls_into_advanced() {
+        let args = args_from(json!({
+            "projectId": "p1",
+            "prompt": "a lighthouse",
+            "model": "iris_3b",
+            "steps": 30,
+            "guidanceScale": 4.5,
+            "sampler": "euler",
+            "schedulerShift": 2.5,
+            "cfgInterval": [0.1, 0.9],
+            "captionOverflow": "error"
+        }));
+        let body = image_job_body(&args).expect("body builds");
+        assert_eq!(
+            body["advanced"],
+            json!({
+                "steps": 30,
+                "guidanceScale": 4.5,
+                "sampler": "euler",
+                "schedulerShift": 2.5,
+                "cfgInterval": [0.1, 0.9],
+                "captionOverflow": "error"
+            })
+        );
+        let bare = image_job_body(&args_from(json!({ "projectId": "p1", "prompt": "x" })))
+            .expect("body builds");
+        assert!(bare.get("advanced").is_none(), "{bare}");
+    }
+
+    /// The Iris row's request-shaping surface reaches `list_models`.
+    #[test]
+    fn compact_models_carries_the_sampler_menu_and_image_controls() {
+        let models = json!([{
+            "id": "iris_3b",
+            "type": "image",
+            "limits": { "samplers": ["dpmpp_2m", "euler"] },
+            "image": { "supportsCfgInterval": true, "captionOverflowPolicies": ["warn", "error", "silent"] }
+        }]);
+        let entry = &compact_models(&models)[0];
+        assert_eq!(entry["samplers"], json!(["dpmpp_2m", "euler"]));
+        assert_eq!(entry["imageControls"]["supportsCfgInterval"], true);
     }
 
     #[test]
@@ -2446,14 +2541,22 @@ mod tests {
         // Still compact: the verbose blocks stay on the full API response.
         assert!(entry.get("downloads").is_none(), "{entry}");
         assert!(entry.get("limits").is_none(), "{entry}");
-        assert!(entry.get("samplers").is_none(), "{entry}");
+        assert_eq!(entry["samplers"], json!(["default"]), "{entry}");
 
         // A model that declares none of it gains no keys — this is per-model, not a shape change.
         let bare =
             json!([{ "id": "svd", "type": "video", "limits": { "resolutions": ["1024x576"] } }]);
         let entry = &compact_models(&bare)[0];
         assert_eq!(entry["resolutions"], json!(["1024x576"]));
-        for key in ["durations", "fps", "minSteps", "attribution", "promptGuide"] {
+        for key in [
+            "durations",
+            "fps",
+            "minSteps",
+            "attribution",
+            "promptGuide",
+            "samplers",
+            "imageControls",
+        ] {
             assert!(
                 entry.get(key).is_none(),
                 "{key} must not be invented: {entry}"

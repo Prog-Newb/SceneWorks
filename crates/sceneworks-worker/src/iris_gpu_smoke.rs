@@ -4,7 +4,12 @@
 //! `iris_3b` catalog entry, cache-only resolution of the backbone AND its `text_encoder`
 //! co-requisite through the generic component seam, the cached `candle-gen-iris` load, the per-item
 //! drive and `consume_gen_events` — and asserts the job completes with one non-degenerate image
-//! asset at the requested geometry. Nothing is downloaded: `HF_HUB_CACHE` must already hold both
+//! asset at the requested geometry. sc-25681 runs it with NON-default controls (Euler / order-1
+//! solver, a schedule shift, a CFG interval, the `warn` caption-overflow policy on a prompt longer
+//! than the caption budget) and a tiny random-init generation-task LoRA stamped `family=iris`,
+//! `irisTask=generation`, `baseModel=iris_3b` (written here, PEFT layout on three real backbone
+//! projections), and asserts the live preview, the `caption_truncated` warning and the adapter's
+//! applied report reach the job and the asset. Nothing is downloaded: `HF_HUB_CACHE` must already hold both
 //! pinned snapshots (the inference `candle-iris` real-weight profile materializes them into the same
 //! `E:\huggingface\hub` on the real-weights host). An absent snapshot is a failure, never a skip.
 //!
@@ -28,6 +33,62 @@ const BACKBONE_REPO: &str = "speridlabs/iris-3b";
 const TEXT_ENCODER_REPO: &str = "Qwen/Qwen3-VL-4B-Instruct";
 const SIZE: u32 = 512;
 const STEPS: u32 = 30;
+const LORA_RANK: usize = 4;
+
+/// Write a tiny random-init Iris generation-task LoRA (PEFT `lora_A`/`lora_B`, bare keys) on three
+/// real backbone projections, with the identity stamps the engine requires. Small magnitudes: it
+/// probes the adapter path on real weights, it is not a style.
+fn write_stamped_smoke_lora(path: &std::path::Path) {
+    let targets: [(&str, usize, usize); 3] = [
+        ("blocks.23.attn_proj", 2560, 2560),
+        ("blocks.23.q_proj", 2560, 2560),
+        ("blocks.22.mlp.w2", 2560, 6826),
+    ];
+    let mut state: u64 = 25_681;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.02
+    };
+    let mut tensors: Vec<(String, Vec<usize>, Vec<u8>)> = Vec::new();
+    for (stem, out, inp) in targets {
+        for (suffix, shape) in [("lora_A", [LORA_RANK, inp]), ("lora_B", [out, LORA_RANK])] {
+            let data: Vec<u8> = (0..shape[0] * shape[1])
+                .flat_map(|_| next().to_le_bytes())
+                .collect();
+            tensors.push((format!("{stem}.{suffix}.weight"), shape.to_vec(), data));
+        }
+    }
+    tensors.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut header = serde_json::Map::new();
+    header.insert(
+        "__metadata__".to_owned(),
+        json!({
+            "family": "iris", "irisTask": "generation", "baseModel": "iris_3b",
+            "networkType": "lora", "rank": LORA_RANK.to_string(), "alpha": LORA_RANK.to_string(),
+        }),
+    );
+    let mut offset = 0usize;
+    for (name, shape, data) in &tensors {
+        header.insert(
+            name.clone(),
+            json!({ "dtype": "F32", "shape": shape, "data_offsets": [offset, offset + data.len()] }),
+        );
+        offset += data.len();
+    }
+    let mut raw = serde_json::to_vec(&Value::Object(header)).expect("header serializes");
+    while !raw.len().is_multiple_of(8) {
+        raw.push(b' ');
+    }
+    let mut bytes = (raw.len() as u64).to_le_bytes().to_vec();
+    bytes.extend_from_slice(&raw);
+    for (_, _, data) in &tensors {
+        bytes.extend_from_slice(data);
+    }
+    std::fs::create_dir_all(path.parent().expect("lora dir")).expect("lora dir creates");
+    std::fs::write(path, bytes).expect("smoke LoRA writes");
+}
 
 type ProgressPosts = Arc<Mutex<Vec<(String, Value)>>>;
 
@@ -158,18 +219,39 @@ async fn iris_worker_gpu_smoke() {
     let project = ProjectStore::new(settings.data_dir.clone(), "iris-smoke")
         .create_project("Iris-3B CUDA worker smoke")
         .expect("smoke project creates");
+    let lora_path = settings
+        .data_dir
+        .join("loras")
+        .join("iris-smoke-style")
+        .join("adapter.safetensors");
+    write_stamped_smoke_lora(&lora_path);
+    // A prompt well past the 300-token caption budget, so the `warn` policy truncates and reports.
+    let prompt = std::iter::repeat_n(
+        "a lighthouse on a rocky coast at dusk, warm window light, crashing waves, gulls, weathered stone, glowing lantern, dramatic clouds, detailed",
+        24,
+    )
+    .collect::<Vec<_>>()
+    .join(", ");
     let mut snapshot = stub_job_snapshot(JOB_ID);
     snapshot["payload"] = json!({
         "projectId": project.id,
         "model": "iris_3b",
         "mode": "text_to_image",
-        "prompt": "a lighthouse on a rocky coast at dusk, warm window light, detailed",
+        "prompt": prompt,
         "negativePrompt": "blurry",
         "width": SIZE,
         "height": SIZE,
         "count": 1,
         "seed": 7,
-        "advanced": { "steps": STEPS, "guidanceScale": 3.0 },
+        "loras": [{ "id": "iris-smoke-style", "path": lora_path, "weight": 0.8 }],
+        "advanced": {
+            "steps": STEPS,
+            "guidanceScale": 4.0,
+            "sampler": "euler",
+            "schedulerShift": 3.0,
+            "cfgInterval": [0.05, 0.95],
+            "captionOverflow": "warn",
+        },
         "modelManifestEntry": shipped_iris_entry(),
     });
     let job: JobSnapshot = serde_json::from_value(snapshot).expect("smoke job deserializes");
@@ -194,6 +276,14 @@ async fn iris_worker_gpu_smoke() {
         step_posts > 0,
         "the engine's step progress must reach the job API: {posts:#?}"
     );
+    assert!(
+        posts
+            .iter()
+            .any(|(_, body)| body["result"]["previewFrame"]["dataUrl"]
+                .as_str()
+                .is_some_and(|url| url.starts_with("data:image/"))),
+        "the engine's per-step x0 preview must reach the job API"
+    );
     let result = posts
         .iter()
         .rev()
@@ -204,6 +294,28 @@ async fn iris_worker_gpu_smoke() {
         .as_array()
         .and_then(|assets| assets.first())
         .expect("the completed result carries one image asset");
+    let settings_block = &asset["rawAdapterSettings"];
+    assert!(
+        settings_block["generationWarnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings
+                .iter()
+                .any(|warning| warning["code"] == "caption_truncated")),
+        "the over-long prompt's caption_truncated warning is on the asset: {settings_block}"
+    );
+    let applied = &settings_block["adapterApply"][0];
+    assert!(
+        applied["applied"].as_u64().is_some_and(|count| count > 0)
+            && applied["sha256"].as_str().map(str::len) == Some(64),
+        "the stamped LoRA's apply report + identity are on the asset: {settings_block}"
+    );
+    for (key, value) in [
+        ("sampler", json!("euler")),
+        ("cfgInterval", json!([0.05, 0.95])),
+        ("captionOverflow", json!("warn")),
+    ] {
+        assert_eq!(settings_block[key], value, "{key} recorded with the image");
+    }
     let media_path = asset["mediaPath"]
         .as_str()
         .expect("the asset carries its media path");
@@ -224,9 +336,11 @@ async fn iris_worker_gpu_smoke() {
     );
     eprintln!(
         "RESULT status=pass model=iris_3b backend=candle geometry={}x{} steps={STEPS} \
+         sampler=euler shift=3.0 cfg_interval=0.05..0.95 lora_applied={} \
          elapsed_s={:.1} rgb_std={std:.3} output={}",
         rendered.width,
         rendered.height,
+        applied["applied"],
         elapsed.as_secs_f64(),
         rendered_path.display(),
     );

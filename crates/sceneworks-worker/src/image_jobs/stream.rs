@@ -42,6 +42,18 @@ enum GenEvent {
         allow(dead_code)
     )]
     CheckpointWeightFacts { facts: Value },
+    /// Per-image provenance facts of image `index` (sc-25681): the engine's non-fatal warnings and
+    /// the applied adapter stack (`lane_controls::image_facts`). Sent before that image's
+    /// [`GenEvent::Image`] on the same channel; the consumer merges the block into that image's
+    /// `rawAdapterSettings`. Lanes with nothing to report never produce it.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        )),
+        allow(dead_code)
+    )]
+    ImageFacts { index: usize, facts: JsonObject },
     Image {
         index: usize,
         seed: i64,
@@ -103,6 +115,19 @@ impl PromptEnhancementEventSink {
                 report,
             });
         })
+    }
+}
+
+impl PromptEnhancementEventSink {
+    /// Report image `index`'s provenance facts (sc-25681) on the same per-item channel the
+    /// prompt-enhancement report rides. Load-bearing like that report, so it blocks rather than
+    /// dropping under channel pressure; it is sent before the image itself, so the consumer holds
+    /// it when the image is written.
+    fn send_image_facts(&self, facts: JsonObject) {
+        let _ = self.tx.blocking_send(GenEvent::ImageFacts {
+            index: self.index,
+            facts,
+        });
     }
 }
 

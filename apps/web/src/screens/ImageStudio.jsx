@@ -213,6 +213,13 @@ import {
   guidanceMethodOptionsFromModel,
   maxStepsForModel,
   negativePromptInertAtGuidance,
+  CAPTION_OVERFLOW_LABELS,
+  captionOverflowOptions,
+  guidanceIsOff,
+  patchGridHint,
+  resolveCfgInterval,
+  supportsCfgIntervalAxis,
+  supportsSchedulerShiftAxis,
   samplerDefaultFromModel,
   samplerOptionsFromModel,
   schedulerDefaultFromModel,
@@ -580,7 +587,12 @@ export function ImageStudio() {
   // model changes.
   const [sampler, setSampler] = useState(saved.sampler ?? "default");
   const [scheduler, setScheduler] = useState(saved.scheduler ?? "default");
-  const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? 3.0);
+  const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? null);
+  // sc-25681: the CFG interval (two raw inputs, "" = the model's own bound) and the caption-
+  // overflow policy ("default" = the checkpoint's own), for a model that declares them (Iris-3B).
+  const [cfgIntervalStart, setCfgIntervalStart] = useState(saved.cfgIntervalStart ?? "");
+  const [cfgIntervalEnd, setCfgIntervalEnd] = useState(saved.cfgIntervalEnd ?? "");
+  const [captionOverflow, setCaptionOverflow] = useState(saved.captionOverflow ?? "default");
   // Guidance method (epic 7434). "cfg" is the engine-standard no-op default; the
   // picker only surfaces alternatives a model advertises on the active backend
   // (CFG++ on the SDXL family / MLX). Rides `advanced.guidanceMethod`.
@@ -1443,6 +1455,28 @@ export function ImageStudio() {
   // visible (the axis exists — raise Guidance and it applies) but is DISABLED and not sent while
   // the effective guidance is 1.0: a transient inertness, the Wan-Lightning precedent above.
   const negativePromptCfgOff = negativePromptInertAtGuidance(selectedModel, guidanceOverride);
+  // sc-25681: the remaining declared sampling controls. A schedule-shift axis without a scheduler
+  // menu shows the Schedule shift control on its own; the CFG interval is disabled (and not sent)
+  // while CFG is off, exactly like the CFG-bound negative prompt; the caption-overflow menu only
+  // appears for a model that offers policies.
+  const supportsSchedulerShift = supportsSchedulerShiftAxis(selectedModel);
+  // `null` = no explicit value yet (a fresh workspace, or a recipe that recorded none): the model's
+  // own default, which for a shift-axis model (Iris-3B) is its checkpoint's flow shift — not the
+  // historical blanket 3.0, which would be SENT for it and silently change the schedule.
+  const effectiveSchedulerShift = schedulerShift ?? schedulerShiftDefaultFromModel(selectedModel);
+  const showSchedulerShift = supportsSchedulerShift || (showSchedulerPicker && scheduler !== "default");
+  const supportsCfgInterval = supportsGuidance && supportsCfgIntervalAxis(selectedModel);
+  const cfgIntervalDisabled = guidanceIsOff(selectedModel, guidanceOverride);
+  const { interval: resolvedCfgInterval, error: cfgIntervalError } = resolveCfgInterval({
+    model: supportsGuidance ? selectedModel : null,
+    start: cfgIntervalStart,
+    end: cfgIntervalEnd,
+    guidanceOverride,
+  });
+  const captionOverflowChoices = captionOverflowOptions(selectedModel);
+  const outgoingCaptionOverflow = captionOverflowChoices.includes(captionOverflow)
+    ? captionOverflow
+    : "default";
   const hiresFixModelCapable = Boolean(
     supportsImg2img || selectedModel?.family === "sdxl",
   );
@@ -1500,6 +1534,9 @@ export function ImageStudio() {
     setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions));
     setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions));
     setSchedulerShift(schedulerShiftDefaultFromModel(selectedModel));
+    setCfgIntervalStart("");
+    setCfgIntervalEnd("");
+    setCaptionOverflow("default");
     setGuidanceMethod(
       preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions),
     );
@@ -1841,7 +1878,15 @@ export function ImageStudio() {
     setGuidanceOverride(rawSettings.guidanceScale ?? "");
     setSampler(rawSettings.sampler ?? "default");
     setScheduler(rawSettings.scheduler ?? "default");
-    setSchedulerShift(rawSettings.schedulerShift ?? rawSettings.timestepShift ?? 3.0);
+    setSchedulerShift(rawSettings.schedulerShift ?? rawSettings.timestepShift ?? null);
+    // sc-25681: the recorded CFG interval / caption-overflow policy (absent = the model's own).
+    setCfgIntervalStart(
+      Array.isArray(rawSettings.cfgInterval) ? String(rawSettings.cfgInterval[0]) : "",
+    );
+    setCfgIntervalEnd(
+      Array.isArray(rawSettings.cfgInterval) ? String(rawSettings.cfgInterval[1]) : "",
+    );
+    setCaptionOverflow(rawSettings.captionOverflow ?? "default");
     setGuidanceMethod(rawSettings.guidanceMethod ?? "cfg");
     setCharacterId(settings.characterId ?? "");
     setCharacterLookId(settings.characterLookId ?? "");
@@ -1954,6 +1999,9 @@ export function ImageStudio() {
   const { width, height, invalid: dimensionsInvalid } = dimensionEval;
   // A precise, user-facing ERROR (never a raw requirement): names this model's actual range/stride.
   const dimensionError = dimensionConstraintMessage(dimensionEval);
+  // sc-25681: a model that shows its patch grid below a declared side (Iris-3B, 1024) says so
+  // whenever the effective width or height is under it.
+  const patchGridNotice = patchGridHint(selectedModel, width, height);
   const hiresFixTargetWidth = Math.round(width * hiresFixUpscaleBy);
   const hiresFixTargetHeight = Math.round(height * hiresFixUpscaleBy);
   const hiresFixTargetInvalid =
@@ -2100,6 +2148,14 @@ export function ImageStudio() {
       ["sampler", setSampler],
       ["scheduler", setScheduler],
       ["schedulerShift", setSchedulerShift],
+      [
+        "cfgInterval",
+        (value) => {
+          setCfgIntervalStart(Array.isArray(value) ? String(value[0]) : "");
+          setCfgIntervalEnd(Array.isArray(value) ? String(value[1]) : "");
+        },
+      ],
+      ["captionOverflow", setCaptionOverflow],
       ["guidanceMethod", setGuidanceMethod],
       ["textEncoderModel", setTextEncoderModel],
       ["ipAdapterScale", setIpAdapterScale],
@@ -2152,7 +2208,9 @@ export function ImageStudio() {
       steps: finiteNumberOrUndefined(stepsOverride),
       sampler,
       scheduler,
-      schedulerShift,
+      schedulerShift: effectiveSchedulerShift,
+      ...(resolvedCfgInterval ? { cfgInterval: resolvedCfgInterval } : {}),
+      ...(outgoingCaptionOverflow !== "default" ? { captionOverflow: outgoingCaptionOverflow } : {}),
       guidanceMethod,
       ...(supportsTextEncoderSelection &&
       selectedTextEncoderModel !== defaultTextEncoderId
@@ -2225,6 +2283,9 @@ export function ImageStudio() {
     sampler,
     scheduler,
     schedulerShift,
+    cfgIntervalStart,
+    cfgIntervalEnd,
+    captionOverflow,
     guidanceMethod,
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
@@ -2288,6 +2349,10 @@ export function ImageStudio() {
           dimensionError ||
           "Width and height must each be between 256 and 4096.",
       );
+      return;
+    }
+    if (cfgIntervalError) {
+      setSubmitError(cfgIntervalError);
       return;
     }
     setSubmitting(true);
@@ -2468,7 +2533,10 @@ export function ImageStudio() {
       hiresFixCfgScale: supportsGuidance ? hiresFixCfgScale : "",
       sampler,
       scheduler,
-      schedulerShift,
+      schedulerShift: effectiveSchedulerShift,
+      supportsSchedulerShift,
+      cfgInterval: resolvedCfgInterval,
+      captionOverflow: outgoingCaptionOverflow,
       stepsOverride,
       // Same rule for the guidance axis (sc-15299): a CFG-free engine never receives a scale, so
       // the override is blanked before it reaches the builder and `advanced.guidanceScale` is
@@ -2593,6 +2661,10 @@ export function ImageStudio() {
           dimensionError ||
           "Width and height must each be between 256 and 4096.",
       );
+      return;
+    }
+    if (cfgIntervalError) {
+      setBatchError(cfgIntervalError);
       return;
     }
     const styledBatchPrompts = () => (function* composedBatchPrompts() {
@@ -3694,6 +3766,12 @@ export function ImageStudio() {
                     <option key={option} value={option}>{formatResolutionLabel(option)}</option>
                   ))}
                 </select>
+                {/* sc-25681: informational only — the size is never restricted. */}
+                {patchGridNotice ? (
+                  <span className="field-hint patch-grid-hint" role="note">
+                    {patchGridNotice}
+                  </span>
+                ) : null}
               </label>
               <label className="settings-field settings-field-count">
                 Variations
@@ -3930,7 +4008,7 @@ export function ImageStudio() {
                   </select>
                 </label>
               ) : null}
-              {showSchedulerPicker && scheduler !== "default" ? (
+              {showSchedulerShift ? (
                 <label>
                   Schedule shift
                   <input
@@ -3939,7 +4017,7 @@ export function ImageStudio() {
                     onChange={(event) => setSchedulerShift(Number(event.target.value))}
                     step="0.1"
                     type="number"
-                    value={schedulerShift}
+                    value={effectiveSchedulerShift}
                   />
                 </label>
               ) : null}
@@ -3975,6 +4053,62 @@ export function ImageStudio() {
                     type="number"
                     value={guidanceOverride}
                   />
+                </label>
+              ) : null}
+              {/* sc-25681: the CFG interval — guidance runs only at model times inside
+                  [start, end] (1 = noise, 0 = clean). Disabled, and not sent, while guidance is
+                  1.0: the engine refuses an interval there because it would do nothing. */}
+              {supportsCfgInterval ? (
+                <fieldset className="cfg-interval" disabled={cfgIntervalDisabled}>
+                  <legend>Guidance interval</legend>
+                  <label>
+                    Start
+                    <input
+                      aria-label="Guidance interval start"
+                      max="1"
+                      min="0"
+                      onChange={(event) => setCfgIntervalStart(event.target.value)}
+                      placeholder="0"
+                      step="0.05"
+                      type="number"
+                      value={cfgIntervalStart}
+                    />
+                  </label>
+                  <label>
+                    End
+                    <input
+                      aria-label="Guidance interval end"
+                      max="1"
+                      min="0"
+                      onChange={(event) => setCfgIntervalEnd(event.target.value)}
+                      placeholder="1"
+                      step="0.05"
+                      type="number"
+                      value={cfgIntervalEnd}
+                    />
+                  </label>
+                  <span className="field-hint" role={cfgIntervalError ? "alert" : undefined}>
+                    {cfgIntervalDisabled
+                      ? "The guidance interval only applies with guidance above 1.0 for this model."
+                      : cfgIntervalError ||
+                        "Guidance runs only at model times inside [start, end] (1 = noise, 0 = clean)."}
+                  </span>
+                </fieldset>
+              ) : null}
+              {captionOverflowChoices.length ? (
+                <label>
+                  Long prompts
+                  <select
+                    aria-label="Caption overflow"
+                    onChange={(event) => setCaptionOverflow(event.target.value)}
+                    value={outgoingCaptionOverflow}
+                  >
+                    {["default", ...captionOverflowChoices].map((policy) => (
+                      <option key={policy} value={policy}>
+                        {CAPTION_OVERFLOW_LABELS[policy] ?? policy}
+                      </option>
+                    ))}
+                  </select>
                 </label>
               ) : null}
               {supportsTextStyle ? (

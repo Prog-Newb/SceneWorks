@@ -7528,6 +7528,14 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// `GenerationRequest::output_channels`. `Rgba` makes the provider answer with
     /// `GenerationOutput::ImagesRgba`, whose four channels the egress types as an RGBA PNG.
     pub(crate) output_channels: gen_core::OutputChannels,
+    /// The request controls beyond the positional knobs (sc-25681): CFG interval and
+    /// caption-overflow policy, resolved and refused by [`lane_controls`]. `Default` = the
+    /// engine's own for every model that declares none.
+    pub(crate) controls: lane_controls::LaneRequestControls,
+    /// Where the render's non-fatal engine warnings (`GenerationReport::warnings`, e.g. Iris's
+    /// `caption_truncated`) are collected for the image's provenance. `None` discards them, as
+    /// the lane always has for providers that report none.
+    pub(crate) warnings: Option<&'a std::cell::RefCell<Vec<gen_core::GenerationWarning>>>,
 }
 
 /// [`generate_one`] with an explicit [`LaneRgbaSurface`].
@@ -7585,18 +7593,29 @@ fn generate_one_on_surface(
         memory,
         conditioning,
         output_channels: surface.output_channels,
+        cfg_interval: surface.controls.cfg_interval,
+        caption_overflow: surface.controls.caption_overflow,
         preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
     enhance.apply(&mut request, prompt_enhancement);
-    let output = crate::memory_strategy::generate_with_scope(
+    // `generate_with_report` (sc-25681): the default implementation is exactly `generate`, so every
+    // provider that reports nothing is unaffected; one that reports (Iris's `caption_truncated`)
+    // has its warnings collected for the image's provenance.
+    let report = crate::memory_strategy::generate_with_scope_report(
         generator,
         &mut request,
         memory_strategy_context,
         on_progress,
     )
-        .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
+    .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
+    if let Some(sink) = surface.warnings {
+        sink.borrow_mut().extend(report.warnings);
+    }
+    let output = report
+        .output
+        .ok_or_else(|| WorkerError::Engine("generator produced no output".to_owned()))?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images
@@ -7938,6 +7957,8 @@ fn generate_one_with_hires_on_surface(
     let base_surface = LaneRgbaSurface {
         multi_reference_alpha: surface.multi_reference_alpha,
         output_channels: gen_core::OutputChannels::Rgb,
+        controls: surface.controls,
+        warnings: surface.warnings,
     };
     let (base_width, base_height, base_pixels) = generate_one_on_surface(
         generator,
@@ -7992,6 +8013,8 @@ fn generate_one_with_hires_on_surface(
     let refine_surface = LaneRgbaSurface {
         multi_reference_alpha: &[],
         output_channels: surface.output_channels,
+        controls: surface.controls,
+        warnings: surface.warnings,
     };
     generate_one_on_surface(
         generator,
@@ -9818,6 +9841,9 @@ async fn generate_stream_using(
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;
     let adapters = resolve_adapters(request, settings)?;
+    // Each adapter's identity (request id, path, sha256, scale, kind) for the image provenance,
+    // joined after the render with the engine's own apply report (sc-25681).
+    let adapter_identities = lane_controls::adapter_identities(request, &adapters);
     // sc-3723: surface the descriptor-derived backend ("mlx" for every linked family today; a
     // future candle row would self-describe) over the gpu-id-derived label. Falls back to the
     // passed-in label only if a descriptor ever advertised an empty backend (never today).
@@ -9876,22 +9902,17 @@ async fn generate_stream_using(
     // True-CFG families (Chroma) carry the CFG scale in `true_cfg`, not `guidance` (which their
     // engine rejects); `None` for every other family. The recipe records the effective CFG knob.
     let model_true_cfg = resolve_true_cfg(request, &model);
-    // A model whose negative prompt IS the CFG unconditional (`image.negativePromptRequiresGuidance`,
-    // Iris-3B) refuses one at guidance 1.0, where it has no effect anyway — drop it there.
-    // Either drop emits `sampling_knob_unsupported`, like the sampler/scheduler drops above.
-    let knob_drop = iris::KnobDropContext {
-        model_id: &request.model,
-        job_id: &job.id,
-        engine: backend,
-    };
-    let negative_prompt = iris::gate_negative_prompt_on_guidance(
-        &request.model_manifest_entry,
+    let negative_prompt = resolve_negative_prompt(request, &model);
+    // The request controls beyond the positional knobs (sc-25681): CFG interval and caption-overflow
+    // policy against the linked descriptor, plus the CFG-bound negative prompt
+    // (`image.negativePromptRequiresGuidance`, Iris-3B) — each refused before load when the engine
+    // does not honour it or CFG-off would make it inert, never dropped.
+    let lane_controls = lane_controls::resolve_lane_request_controls(
+        request,
+        &model.descriptor.capabilities,
         guidance,
-        resolve_negative_prompt(request, &model),
-        &knob_drop,
-    );
-    // Iris has no scheduler axis and refuses `scheduler_shift` by name (sc-25679).
-    let scheduler_shift = iris::honored_scheduler_shift(engine_id, scheduler_shift, &knob_drop);
+        negative_prompt.as_deref(),
+    )?;
     let repo = model_repo(request, &model);
     let adapter_label = model.adapter_label();
     let count = request.count as usize;
@@ -10421,6 +10442,8 @@ async fn generate_stream_using(
                     let _request_memory_limit = memory_evaluation
                         .process_limit_bytes
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                    // This image's non-fatal engine warnings (sc-25681), reported with its asset.
+                    let warnings = std::cell::RefCell::new(Vec::new());
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                         generate_one_with_hires_on_surface(
                             generator,
@@ -10452,6 +10475,8 @@ async fn generate_stream_using(
                             &LaneRgbaSurface {
                                 multi_reference_alpha: &edit_ref_alpha,
                                 output_channels: rgba_output_channels,
+                                controls: lane_controls,
+                                warnings: Some(&warnings),
                             },
                             &cancel,
                             on_progress,
@@ -10485,6 +10510,15 @@ async fn generate_stream_using(
                             likeness_source_ref.as_deref(),
                         )
                     });
+                    // The image's provenance facts (sc-25681): engine warnings, and each adapter's
+                    // identity joined with the engine's own applied/skipped report.
+                    if let Some(facts) = lane_controls::image_facts(
+                        &warnings.take(),
+                        &adapter_identities,
+                        &generator.adapter_apply_reports(),
+                    ) {
+                        prompt_enhancement.send_image_facts(facts);
+                    }
                     Ok(Some((final_seed, out_w, out_h, pixels, face_likeness)))
                 },
             )
@@ -12419,20 +12453,16 @@ async fn generate_candle_stream_using(
     let guidance = resolve_guidance(request, &model);
     let mut true_cfg = resolve_true_cfg(request, &model);
     let hires_fix = resolve_hires_fix_plan(request, steps, guidance, true_cfg);
-    // The same Iris-3B request shaping the MLX arm applies (sc-25680): a CFG-bound negative prompt is
-    // dropped at guidance 1.0 and the withheld schedule shift never reaches the engine, each drop
-    // reported as `sampling_knob_unsupported`. Inert for every other model.
-    let knob_drop = iris::KnobDropContext {
-        model_id: &request.model,
-        job_id: &job.id,
-        engine: backend,
-    };
-    let negative_prompt = iris::gate_negative_prompt_on_guidance(
-        &request.model_manifest_entry,
+    // The same request controls the MLX arm resolves (sc-25681): CFG interval, caption-overflow
+    // policy and the CFG-bound negative prompt, each refused before load when the linked engine
+    // does not honour it or CFG-off would make it inert. Inert for every model that sends none.
+    let negative_prompt = resolve_negative_prompt(request, &model);
+    let lane_controls = lane_controls::resolve_lane_request_controls(
+        request,
+        &model.descriptor.capabilities,
         guidance,
-        resolve_negative_prompt(request, &model),
-        &knob_drop,
-    );
+        negative_prompt.as_deref(),
+    )?;
 
     // Per-payload flash/accel-attention (sc-3674): the UI Advanced toggle sends `advanced.flashAttn`
     // (default on). Process-global toggle, set before the generator loads (the candle pipeline reads
@@ -12467,6 +12497,9 @@ async fn generate_candle_stream_using(
         Vec::new()
     };
     let adapter_count = adapters.len();
+    // Each adapter's identity for the image provenance, joined after the render with the engine's
+    // own apply report (sc-25681) — the MLX arm's twin.
+    let adapter_identities = lane_controls::adapter_identities(request, &adapters);
 
     // Ideogram 4 (epic 4725, sc-6501) is JSON-caption-only: a raw plain-text prompt is out-of-
     // distribution and stochastically renders the "Image blocked by safety filter" placeholder. Wrap a
@@ -12533,7 +12566,6 @@ async fn generate_candle_stream_using(
     // + a `sampling_knob_unsupported` event, never a hard-fail. The curated knobs light up per-family with
     // zero worker change as the candle engines are adopted.
     let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
-    let scheduler_shift = iris::honored_scheduler_shift(engine_id, scheduler_shift, &knob_drop);
     let sampler = if request.model == "realvisxl_lightning" {
         Some("lightning".to_owned())
     } else {
@@ -13963,6 +13995,8 @@ async fn generate_candle_stream_using(
                 tx,
                 work,
                 move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
+                // This image's non-fatal engine warnings (sc-25681), reported with its asset.
+                let warnings = std::cell::RefCell::new(Vec::new());
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                     generate_one_with_hires_on_surface(
                         generator,
@@ -14008,6 +14042,8 @@ async fn generate_candle_stream_using(
                         &LaneRgbaSurface {
                             multi_reference_alpha: &edit_ref_alpha,
                             output_channels: rgba_output_channels,
+                            controls: lane_controls,
+                            warnings: Some(&warnings),
                         },
                         &cancel,
                         on_progress,
@@ -14039,6 +14075,15 @@ async fn generate_candle_stream_using(
                         likeness_source_ref.as_deref(),
                     )
                 });
+                // The image's provenance facts (sc-25681): engine warnings, and each adapter's
+                // identity joined with the engine's own applied/skipped report.
+                if let Some(facts) = lane_controls::image_facts(
+                    &warnings.take(),
+                    &adapter_identities,
+                    &generator.adapter_apply_reports(),
+                ) {
+                    prompt_enhancement.send_image_facts(facts);
+                }
                 Ok(Some((final_seed, out_w, out_h, pixels, face_likeness)))
                 },
             )
@@ -14475,6 +14520,9 @@ async fn consume_gen_events_with_disclosure(
     // (sc-11045). `None` for every lane that holds no runtime handle — those assets keep whatever
     // the route stamped pre-load (including the honest `no-runtime-receipt` materialization).
     let mut measured_checkpoint_facts: Option<Value> = None;
+    // Per-image provenance facts (sc-25681), keyed by image index until that image is written.
+    let mut pending_image_facts: std::collections::HashMap<usize, JsonObject> =
+        std::collections::HashMap::new();
     // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
     let loop_result: WorkerResult<()> = async {
@@ -14602,6 +14650,9 @@ async fn consume_gen_events_with_disclosure(
                 // newest event always describes the most recent read.
                 measured_checkpoint_facts = Some(facts);
             }
+            GenEvent::ImageFacts { index, facts } => {
+                pending_image_facts.entry(index).or_default().extend(facts);
+            }
             GenEvent::PromptEnhancement {
                 index,
                 expected_prompt,
@@ -14655,6 +14706,13 @@ async fn consume_gen_events_with_disclosure(
                         crate::face_likeness::FACE_LIKENESS_FACT_KEY.to_owned(),
                         Value::Object(block),
                     );
+                }
+                // Worker-owned like the keys above: a replayed `advanced` block can never forge
+                // them, and only this image's own reported facts add them back (sc-25681).
+                image_raw_settings.remove(lane_controls::GENERATION_WARNINGS_KEY);
+                image_raw_settings.remove(lane_controls::ADAPTER_APPLY_KEY);
+                if let Some(facts) = pending_image_facts.remove(&index) {
+                    image_raw_settings.extend(facts);
                 }
                 // A measured fact set from the loaded handle supersedes the route's pre-load stamp
                 // (whose materialization is honestly `no-runtime-receipt`): same three facts, now

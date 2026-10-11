@@ -9,94 +9,11 @@
 //! generation time, and a missing or torn encoder is a typed failure before load (pinned by the
 //! tests below against the shipped catalog entry).
 //!
-//! This module carries only the Iris-specific request shaping the generic lane does not: the
-//! CFG-bound negative prompt and the withheld schedule shift.
-
-use gen_core::iris::GENERATION_MODEL_ID;
-use sceneworks_core::contracts::JsonObject;
-use serde_json::Value;
-
-/// Is this registered engine id the Iris-3B generation route?
-pub(crate) fn is_iris_generation_engine(engine_id: &str) -> bool {
-    engine_id == GENERATION_MODEL_ID
-}
-
-/// The manifest's `image.negativePromptRequiresGuidance` declaration: the negative prompt is the CFG
-/// unconditional, so it only exists while guidance is on. ABSENT MEANS FALSE.
-pub(crate) fn negative_prompt_requires_guidance(manifest_entry: &JsonObject) -> bool {
-    manifest_entry
-        .get("image")
-        .and_then(|image| image.get("negativePromptRequiresGuidance"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
-/// Who a dropped knob belongs to, for the `sampling_knob_unsupported` event a drop emits (the same
-/// fields [`super::normalize_sampling_knob`] reports).
-pub(crate) struct KnobDropContext<'a> {
-    pub(crate) model_id: &'a str,
-    pub(crate) job_id: &'a str,
-    pub(crate) engine: &'a str,
-}
-
-impl KnobDropContext<'_> {
-    fn report(&self, knob: &str, requested: Value) {
-        tracing::warn!(
-            "{}: requested {knob} {requested} is not honored by {}; dropping it",
-            self.engine,
-            self.model_id
-        );
-        super::emit_sampling_knob_unsupported(
-            knob,
-            requested,
-            &[],
-            self.model_id,
-            self.job_id,
-            self.engine,
-        );
-    }
-}
-
-/// Drop the negative prompt when the model declares it CFG-bound and the resolved guidance turns CFG
-/// off (exactly 1.0, the engine's `uses_cfg` test). The engine refuses a non-empty negative prompt
-/// there rather than ignoring it, and with CFG off it has no effect on the image either way. A drop
-/// of a prompt that was actually set emits `sampling_knob_unsupported` (knob `negativePrompt`).
-pub(crate) fn gate_negative_prompt_on_guidance(
-    manifest_entry: &JsonObject,
-    guidance: Option<f32>,
-    negative_prompt: Option<String>,
-    drop: &KnobDropContext<'_>,
-) -> Option<String> {
-    if negative_prompt_requires_guidance(manifest_entry) && guidance == Some(1.0) {
-        if let Some(dropped) = negative_prompt.filter(|value| !value.trim().is_empty()) {
-            drop.report("negativePrompt", Value::String(dropped));
-        }
-        None
-    } else {
-        negative_prompt
-    }
-}
-
-/// This story's Iris surface does not expose the schedule shift: the Image Studio hides the
-/// scheduler controls for Iris, so a normal submit never carries one, and a stale or API-supplied
-/// `schedulerShift` is withheld here rather than forwarded. The engine at the pinned revision does
-/// honour `scheduler_shift` (the S3 controls work); the S3 SceneWorks half widens the surface by
-/// deleting this seam (and its call in `generate_stream`). A drop emits
-/// `sampling_knob_unsupported` (knob `schedulerShift`).
-pub(crate) fn honored_scheduler_shift(
-    engine_id: &str,
-    scheduler_shift: Option<f32>,
-    drop: &KnobDropContext<'_>,
-) -> Option<f32> {
-    if is_iris_generation_engine(engine_id) {
-        if let Some(shift) = scheduler_shift {
-            drop.report("schedulerShift", serde_json::json!(shift));
-        }
-        None
-    } else {
-        scheduler_shift
-    }
-}
+//! The Iris request controls (sampler = solver order, schedule shift, CFG interval, caption-overflow
+//! policy, CFG-bound negative prompt, adapters, previews; sc-25681) ride the GENERIC image lane:
+//! [`super::lane_controls`] resolves and refuses them for every engine against its linked
+//! descriptor, so nothing here is Iris-only production code. This module pins the Iris job arm end
+//! to end on both lanes with a recording stub engine.
 
 /// The Iris text-encoder directory a resolved spec carries, for diagnostics/tests.
 #[cfg(test)]
@@ -114,7 +31,9 @@ mod tests {
     use crate::settings::Settings;
     use gen_core::iris::{IrisTask, TEXT_ENCODER_COMPONENT};
     use gen_core::{LoadSpec, WeightsSource};
+    use sceneworks_core::contracts::JsonObject;
     use serde_json::json;
+    use serde_json::Value;
     use std::path::Path;
 
     const TE_REPO: &str = "Qwen/Qwen3-VL-4B-Instruct";
@@ -256,12 +175,6 @@ mod tests {
         assert!(error.to_string().contains("missing"), "{error}");
     }
 
-    const DROP: KnobDropContext<'static> = KnobDropContext {
-        model_id: "iris_3b",
-        job_id: "job-knob",
-        engine: "mlx",
-    };
-
     /// Run `body` under an INFO subscriber whose output is captured, so a test can read the worker
     /// events it emitted. Local (not `ladder_e2e_sc18101`'s macOS-only twin) because these tests run
     /// on both lanes.
@@ -292,132 +205,68 @@ mod tests {
         (value, text)
     }
 
-    /// The `sampling_knob_unsupported` events `body` emitted, as `(knob, requested)` pairs.
-    fn dropped_knobs<T>(body: impl FnOnce() -> T) -> (T, Vec<(String, Value)>) {
-        let (value, logged) = with_captured_tracing(body);
-        let events = logged
-            .lines()
-            .filter(|line| line.contains("sampling_knob_unsupported"))
-            .filter_map(|line| {
-                let payload = &line[line.find("sw_payload=")? + "sw_payload=".len()..];
-                serde_json::from_str::<Value>(payload.trim()).ok()
-            })
-            .filter(|event| event["jobId"] == "job-knob")
-            .map(|event| {
-                assert_eq!(
-                    (event["engine"].as_str(), event["model"].as_str()),
-                    (Some("mlx"), Some("iris_3b")),
-                    "{event}"
-                );
-                (
-                    event["knob"].as_str().unwrap_or_default().to_owned(),
-                    event["requested"].clone(),
-                )
-            })
-            .collect();
-        (value, events)
-    }
-
+    /// The catalog row's honored-controls surface is EXACTLY the linked engine's (sc-25681): the
+    /// sampler menu is the descriptor's solver menu, there is no scheduler menu but a declared shift
+    /// axis, the CFG interval / caption-overflow declarations mirror the descriptor's capability
+    /// flags, adapters are offered iff the engine applies them (generation-task stamps only), and
+    /// there is no quant tier because the engine refuses quantization.
+    ///
+    /// *Mutation that reds this:* drop `euler` from `limits.samplers`, or `supportsCfgInterval`.
     #[test]
-    fn negative_prompt_is_dropped_only_when_cfg_is_off_for_a_declaring_model() {
-        let iris = shipped_iris_entry();
-        assert!(negative_prompt_requires_guidance(&iris));
-        let negative = || Some("blurry".to_owned());
-        assert_eq!(
-            gate_negative_prompt_on_guidance(&iris, Some(1.0), negative(), &DROP),
-            None
-        );
-        assert_eq!(
-            gate_negative_prompt_on_guidance(&iris, Some(3.0), negative(), &DROP),
-            negative()
-        );
-        let undeclared = json!({ "id": "other" }).as_object().unwrap().clone();
-        assert_eq!(
-            gate_negative_prompt_on_guidance(&undeclared, Some(1.0), negative(), &DROP),
-            negative()
-        );
-    }
-
-    #[test]
-    fn dropping_a_set_negative_prompt_at_guidance_one_is_reported() {
-        let iris = shipped_iris_entry();
-        let (kept, events) = dropped_knobs(|| {
-            gate_negative_prompt_on_guidance(&iris, Some(1.0), Some("blurry".to_owned()), &DROP)
-        });
-        assert_eq!(kept, None);
-        assert_eq!(
-            events,
-            vec![("negativePrompt".to_owned(), json!("blurry"))],
-            "a dropped negative prompt must emit sampling_knob_unsupported"
-        );
-    }
-
-    #[test]
-    fn an_empty_or_absent_or_honored_negative_prompt_is_not_reported() {
-        let iris = shipped_iris_entry();
-        let (_, events) = dropped_knobs(|| {
-            gate_negative_prompt_on_guidance(&iris, Some(1.0), None, &DROP);
-            gate_negative_prompt_on_guidance(&iris, Some(1.0), Some("  ".to_owned()), &DROP);
-            gate_negative_prompt_on_guidance(&iris, Some(3.0), Some("blurry".to_owned()), &DROP);
-        });
-        assert_eq!(events, Vec::<(String, Value)>::new());
-    }
-
-    #[test]
-    fn schedule_shift_never_reaches_iris() {
-        assert_eq!(honored_scheduler_shift("iris_3b", Some(3.0), &DROP), None);
-        assert_eq!(
-            honored_scheduler_shift("sensenova_u1_8b", Some(3.0), &DROP),
-            Some(3.0)
-        );
-    }
-
-    #[test]
-    fn a_dropped_schedule_shift_is_reported_and_an_absent_one_is_not() {
-        let (kept, events) = dropped_knobs(|| honored_scheduler_shift("iris_3b", Some(3.0), &DROP));
-        assert_eq!(kept, None);
-        assert_eq!(
-            events,
-            vec![("schedulerShift".to_owned(), json!(3.0))],
-            "a dropped schedule shift must emit sampling_knob_unsupported"
-        );
-        let (_, events) = dropped_knobs(|| {
-            honored_scheduler_shift("iris_3b", None, &DROP);
-            honored_scheduler_shift("sensenova_u1_8b", Some(3.0), &DROP);
-        });
-        assert_eq!(events, Vec::<(String, Value)>::new());
-    }
-
-    /// This story's honored-controls surface is the CATALOG row: the engine at the pinned revision
-    /// advertises more (samplers, LoRA/LoKr, cfg_interval, prompt batches — the S3 controls work,
-    /// whose SceneWorks half widens the row), but the row offers none of those controls and no quant
-    /// tier, so a normal submit carries exactly the guidance / negative-prompt / steps surface.
-    #[test]
-    fn the_linked_descriptor_and_catalog_expose_only_honored_controls() {
-        let model = crate::engines::mlx_model("iris_3b").expect("iris_3b is linked on macOS");
+    fn the_catalog_row_offers_exactly_the_linked_engines_controls() {
+        let model = crate::engines::mlx_model("iris_3b").expect("iris_3b is linked");
         assert_eq!(model.engine_id(), "iris_3b");
         assert!(!model.supports_quant());
         assert!(model.supports_guidance() && model.supports_negative_prompt());
         let caps = &model.descriptor.capabilities;
-        assert!(caps.schedulers.is_empty() && !caps.supports_true_cfg);
         assert_eq!(model.default_steps(), gen_core::iris::DEFAULT_STEPS);
         assert_eq!(model.default_guidance(), gen_core::iris::DEFAULT_CFG_SCALE);
 
         let entry = shipped_iris_entry();
         let limits = entry.get("limits").and_then(Value::as_object).unwrap();
-        for absent in ["samplers", "schedulers", "guidanceMethods"] {
+        let samplers: Vec<&str> = limits["samplers"]
+            .as_array()
+            .expect("iris declares its solver menu")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(samplers, caps.samplers, "the menu IS the engine's");
+        assert_eq!(samplers, gen_core::iris::SAMPLERS);
+        assert_eq!(
+            entry["defaults"]["sampler"].as_str(),
+            Some(gen_core::iris::SOLVER_ORDER_2_SAMPLER)
+        );
+        assert!(caps.schedulers.is_empty());
+        for absent in ["schedulers", "guidanceMethods"] {
             assert!(!limits.contains_key(absent), "iris must not offer {absent}");
         }
+        assert!(
+            sceneworks_core::image_sampling_controls::supports_scheduler_shift(&entry),
+            "the shift axis is declared without a scheduler menu"
+        );
+        assert!(entry["defaults"]["schedulerShift"].as_f64().unwrap() > 0.0);
+        assert_eq!(
+            sceneworks_core::image_sampling_controls::supports_cfg_interval(&entry),
+            caps.supports_cfg_interval
+        );
+        assert_eq!(
+            !sceneworks_core::image_sampling_controls::caption_overflow_policies(&entry).is_empty(),
+            caps.supports_caption_overflow_policy
+        );
+        assert!(
+            sceneworks_core::image_sampling_controls::negative_prompt_requires_guidance(&entry)
+        );
+        assert!(caps.supports_preview, "previews are wired generically");
+        assert!(caps.supports_lora && caps.supports_lokr);
+        assert_eq!(entry["loraCompatibility"]["families"], json!(["iris"]));
+        assert_eq!(
+            entry["loraCompatibility"]["irisTask"].as_str(),
+            Some(IrisTask::Generation.name())
+        );
         assert!(entry
             .get("mlx")
             .and_then(|mlx| mlx.get("quantize"))
             .is_none());
-        assert_eq!(
-            entry["loraCompatibility"]["families"]
-                .as_array()
-                .map(Vec::len),
-            Some(0)
-        );
         assert_eq!(
             limits["requiresDimensionsMultipleOf"].as_u64(),
             Some(u64::from(gen_core::iris::SIZE_MULTIPLE))
@@ -433,6 +282,15 @@ mod tests {
         assert_eq!(
             entry["defaults"]["steps"].as_u64(),
             Some(u64::from(gen_core::iris::DEFAULT_STEPS))
+        );
+        assert_eq!(
+            entry["defaults"]["resolution"].as_str(),
+            Some(format!("{0}x{0}", gen_core::iris::DEFAULT_SIZE).as_str()),
+            "the default stays 1024-class"
+        );
+        assert_eq!(
+            entry["image"]["patchGridVisibleBelow"].as_u64(),
+            Some(u64::from(gen_core::iris::DEFAULT_SIZE))
         );
     }
 
@@ -478,23 +336,78 @@ mod tests {
         CancelAware,
         /// Report a step, then fail the way an engine refusal does.
         Fails,
+        /// Report a step, emit one (W/16)×(H/16) x0 preview frame the way the Iris engine does every
+        /// step, report a second step (the post the preview rides), then complete with an image and
+        /// a `caption_truncated` warning through `generate_with_report`.
+        Completes,
     }
+
+    /// What the engine was handed: every request field the Iris controls map onto.
+    #[derive(Clone, Debug, PartialEq)]
+    struct Seen {
+        prompt: String,
+        negative_prompt: Option<String>,
+        width: u32,
+        height: u32,
+        seed: Option<u64>,
+        steps: Option<u32>,
+        guidance: Option<f32>,
+        sampler: Option<String>,
+        scheduler: Option<String>,
+        scheduler_shift: Option<f32>,
+        cfg_interval: Option<(f32, f32)>,
+        caption_overflow: Option<gen_core::CaptionOverflowPolicy>,
+    }
+
+    impl Seen {
+        fn of(req: &GenerationRequest) -> Self {
+            Self {
+                prompt: req.prompt.clone(),
+                negative_prompt: req.negative_prompt.clone(),
+                width: req.width,
+                height: req.height,
+                seed: req.seed,
+                steps: req.steps,
+                guidance: req.guidance,
+                sampler: req.sampler.clone(),
+                scheduler: req.scheduler.clone(),
+                scheduler_shift: req.scheduler_shift,
+                cfg_interval: req.cfg_interval,
+                caption_overflow: req.caption_overflow,
+            }
+        }
+    }
+
+    const FIXTURE_WARNING: &str = "iris: caption overflow — 7 caption tokens dropped (fixture)";
 
     struct IrisArmProbe {
         descriptor: gen_core::ModelDescriptor,
         behavior: ArmBehavior,
         generate_calls: Arc<Mutex<u32>>,
-        /// The (guidance, negative prompt, schedule shift) the engine was handed.
-        seen: Arc<Mutex<Option<SeenKnobs>>>,
+        /// Every request the engine was handed, in order.
+        seen: Arc<Mutex<Vec<Seen>>>,
         /// Set when the engine stopped because its OWN request cancel flag tripped.
         stopped_on_cancel: Arc<Mutex<bool>>,
+        /// The adapters the loader handed this engine (`LoadSpec::adapters`).
+        adapters: Vec<gen_core::AdapterSpec>,
     }
-
-    type SeenKnobs = (Option<f32>, Option<String>, Option<f32>);
 
     impl Generator for IrisArmProbe {
         fn descriptor(&self) -> &gen_core::ModelDescriptor {
             &self.descriptor
+        }
+
+        /// One report per loaded adapter, the way the Iris engine publishes its install outcome:
+        /// everything applied, one stem skipped.
+        fn adapter_apply_reports(&self) -> Vec<gen_core::AdapterApplyReport> {
+            self.adapters
+                .iter()
+                .map(|adapter| gen_core::AdapterApplyReport {
+                    adapter_path: adapter.path.clone(),
+                    applied: 24,
+                    skipped: vec!["pixel.blocks.0.attn".to_owned()],
+                })
+                .collect()
         }
 
         fn memory_strategy_safety_check(
@@ -521,19 +434,38 @@ mod tests {
             on_progress: &mut dyn FnMut(Progress),
         ) -> gen_core::Result<GenerationOutput> {
             *self.generate_calls.lock().unwrap() += 1;
-            *self.seen.lock().unwrap() = Some((
-                req.guidance,
-                req.negative_prompt.clone(),
-                req.scheduler_shift,
-            ));
+            self.seen.lock().unwrap().push(Seen::of(req));
             on_progress(Progress::Step {
                 current: 1,
                 total: 100,
             });
+            let image = || {
+                GenerationOutput::Images(vec![gen_core::Image {
+                    width: req.width,
+                    height: req.height,
+                    pixels: vec![0; (req.width * req.height * 3) as usize],
+                }])
+            };
             match self.behavior {
                 ArmBehavior::Fails => Err(gen_core::Error::Unsupported(
                     "iris fixture engine failure".to_owned(),
                 )),
+                ArmBehavior::Completes => {
+                    req.preview.emit(gen_core::PreviewFrame {
+                        current: 1,
+                        total: 100,
+                        image: gen_core::Image {
+                            width: req.width / 16,
+                            height: req.height / 16,
+                            pixels: vec![128; ((req.width / 16) * (req.height / 16) * 3) as usize],
+                        },
+                    });
+                    on_progress(Progress::Step {
+                        current: 2,
+                        total: 100,
+                    });
+                    Ok(image())
+                }
                 ArmBehavior::CancelAware => {
                     std::thread::sleep(Duration::from_millis(2_300));
                     on_progress(Progress::Step {
@@ -548,13 +480,26 @@ mod tests {
                         *self.stopped_on_cancel.lock().unwrap() = true;
                         return Err(gen_core::Error::Canceled);
                     }
-                    Ok(GenerationOutput::Images(vec![gen_core::Image {
-                        width: req.width,
-                        height: req.height,
-                        pixels: vec![0; (req.width * req.height * 3) as usize],
-                    }]))
+                    Ok(image())
                 }
             }
+        }
+
+        /// The Iris engine's primary path: the output plus its `caption_truncated` warnings.
+        fn generate_with_report(
+            &self,
+            req: &GenerationRequest,
+            on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<gen_core::GenerationReport> {
+            let mut report =
+                gen_core::GenerationReport::from_output(self.generate(req, on_progress)?);
+            if self.behavior == ArmBehavior::Completes {
+                report.warnings.push(gen_core::GenerationWarning {
+                    code: "caption_truncated".to_owned(),
+                    message: FIXTURE_WARNING.to_owned(),
+                });
+            }
+            Ok(report)
         }
     }
 
@@ -610,11 +555,11 @@ mod tests {
         posts: Vec<Value>,
         asset_writes: Vec<Value>,
         generate_calls: u32,
-        seen: Option<SeenKnobs>,
+        seen: Vec<Seen>,
+        /// The adapter stack the loader was handed (`LoadSpec::adapters`).
+        loaded_adapters: Vec<gen_core::AdapterSpec>,
         stopped_on_cancel: bool,
         project_files: Vec<std::path::PathBuf>,
-        /// Everything the arm logged (its worker events included).
-        logged: String,
     }
 
     fn files_under(root: &Path) -> Vec<std::path::PathBuf> {
@@ -647,6 +592,41 @@ mod tests {
         extra: Value,
         memory_cap_gb: &str,
     ) -> ArmRun {
+        run_iris_arm_with(behavior, cancel_requested, extra, memory_cap_gb, &[])
+    }
+
+    /// One adapter file the arm installs under the data dir's `loras/` before the job runs: its
+    /// catalog id, its safetensors `__metadata__`, and the job weight.
+    struct TestAdapter {
+        id: &'static str,
+        metadata: Value,
+        weight: f64,
+    }
+
+    /// Write a minimal, header-valid safetensors adapter (one f32 tensor) with `metadata`.
+    fn write_adapter(path: &Path, metadata: &Value) {
+        let header = json!({
+            "__metadata__": metadata,
+            "blocks.0.attn.qkv.lora_down.weight": {
+                "dtype": "F32", "shape": [1], "data_offsets": [0, 4]
+            },
+        })
+        .to_string();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// [`run_iris_arm_with_memory_cap`] with `adapters` installed and selected on the job.
+    fn run_iris_arm_with(
+        behavior: ArmBehavior,
+        cancel_requested: bool,
+        extra: Value,
+        memory_cap_gb: &str,
+        adapters: &[TestAdapter],
+    ) -> ArmRun {
         // The arm admits against the host's memory before loading; pin an emulated budget so the
         // outcome does not depend on the host (a 7 GiB hosted runner otherwise refuses the request
         // before the arm under test is reached, and a GPU-less runner yields no budget at all).
@@ -673,9 +653,22 @@ mod tests {
             std::fs::create_dir_all(&refs).unwrap();
             std::fs::write(refs.join("main"), revision).unwrap();
         }
+        let loras: Vec<Value> = adapters
+            .iter()
+            .map(|adapter| {
+                let path = data
+                    .path()
+                    .join("loras")
+                    .join(adapter.id)
+                    .join("adapter.safetensors");
+                write_adapter(&path, &adapter.metadata);
+                json!({ "id": adapter.id, "path": path, "weight": adapter.weight })
+            })
+            .collect();
         let calls = Arc::new(Mutex::new(0_u32));
         let loads = Arc::new(Mutex::new(0_u32));
-        let seen = Arc::new(Mutex::new(None));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let loaded_adapters = Arc::new(Mutex::new(Vec::new()));
         let stopped_on_cancel = Arc::new(Mutex::new(false));
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -683,7 +676,7 @@ mod tests {
             .build()
             .unwrap();
         // `block_on` polls the arm on THIS thread, so the thread-local capture sees its events.
-        let ((outcome, posts, asset_writes), logged) = with_captured_tracing(|| {
+        let ((outcome, posts, asset_writes), _logged) = with_captured_tracing(|| {
             runtime.block_on(async {
                 let (base_url, posts) = spawn_job_api(cancel_requested).await;
                 let mut settings = settings_at(data.path());
@@ -701,6 +694,7 @@ mod tests {
                     "width": 64,
                     "height": 64,
                     "count": 1,
+                    "loras": loras,
                     "modelManifestEntry": Value::Object(shipped_iris_entry()),
                 });
                 for (key, value) in extra.as_object().cloned().unwrap_or_default() {
@@ -709,7 +703,7 @@ mod tests {
                 let request = sceneworks_core::image_request::ImageRequest::from_payload(
                     payload.as_object().unwrap(),
                 );
-                let plan = super::super::ImagePlan::with_count(&request, 1, None);
+                let plan = super::super::ImagePlan::with_count(&request, request.count, None);
                 let descriptor = crate::engines::mlx_model("iris_3b")
                     .expect("iris_3b is linked")
                     .descriptor;
@@ -717,14 +711,17 @@ mod tests {
                 let loader_loads = Arc::clone(&loads);
                 let loader_seen = Arc::clone(&seen);
                 let loader_stopped = Arc::clone(&stopped_on_cancel);
-                let loader = move |_engine: &str, _spec: &LoadSpec| {
+                let loader_adapters = Arc::clone(&loaded_adapters);
+                let loader = move |_engine: &str, spec: &LoadSpec| {
                     *loader_loads.lock().unwrap() += 1;
+                    *loader_adapters.lock().unwrap() = spec.adapters.clone();
                     Ok(Box::new(IrisArmProbe {
                         descriptor,
                         behavior,
                         generate_calls: loader_calls,
                         seen: loader_seen,
                         stopped_on_cancel: loader_stopped,
+                        adapters: spec.adapters.clone(),
                     }) as Box<dyn Generator>)
                 };
                 let mut asset_writes = Vec::new();
@@ -762,6 +759,7 @@ mod tests {
         });
         let generate_calls = *calls.lock().unwrap();
         let seen = seen.lock().unwrap().clone();
+        let loaded_adapters = loaded_adapters.lock().unwrap().clone();
         let stopped_on_cancel = *stopped_on_cancel.lock().unwrap();
         let load_calls = *loads.lock().unwrap();
         ArmRun {
@@ -771,9 +769,9 @@ mod tests {
             asset_writes,
             generate_calls,
             seen,
+            loaded_adapters,
             stopped_on_cancel,
             project_files: files_under(project.path()),
-            logged,
         }
     }
 
@@ -850,65 +848,312 @@ mod tests {
         assert!(run.project_files.is_empty(), "{:?}", run.project_files);
     }
 
-    /// The `sampling_knob_unsupported` (knob, requested) pairs a job logged for `job_id`.
-    fn knob_events(logged: &str, job_id: &str) -> Vec<(String, Value)> {
-        logged
-            .lines()
-            .filter(|line| line.contains("sampling_knob_unsupported"))
-            .filter_map(|line| {
-                let payload = &line[line.find("sw_payload=")? + "sw_payload=".len()..];
-                serde_json::from_str::<Value>(payload.trim()).ok()
-            })
-            .filter(|event| event["jobId"] == job_id)
-            .map(|event| {
-                (
-                    event["knob"].as_str().unwrap_or_default().to_owned(),
-                    event["requested"].clone(),
-                )
-            })
-            .collect()
+    // ---------------------------------------------------------------------------------------
+    // sc-25681 — every Iris control through the REAL arm (MLX on macOS, Candle off-Mac).
+    // ---------------------------------------------------------------------------------------
+
+    /// What the engine sees with nothing but a prompt: the catalog defaults the arm resolves (steps
+    /// 100, guidance 3.0) and the engine's own for everything else.
+    fn default_seen(seed: Option<u64>) -> Seen {
+        Seen {
+            prompt: "a lighthouse at dusk".to_owned(),
+            negative_prompt: None,
+            width: 64,
+            height: 64,
+            seed,
+            steps: Some(gen_core::iris::DEFAULT_STEPS),
+            guidance: Some(gen_core::iris::DEFAULT_CFG_SCALE),
+            sampler: None,
+            scheduler: None,
+            scheduler_shift: None,
+            cfg_interval: None,
+            caption_overflow: None,
+        }
     }
 
-    /// The real arm drops a negative prompt at guidance 1.0 and any schedule shift BEFORE the
-    /// engine, and reports each drop — not just the gate functions in isolation.
+    /// Table: a job payload → the exact request the engine is handed. Every control the catalog
+    /// row offers reaches the engine verbatim (nothing accepted-then-ignored), and its absence
+    /// means the engine's own default.
+    ///
+    /// *Mutation that reds this:* drop `cfg_interval` / `caption_overflow` from the request
+    /// `generate_one_on_surface` builds, or re-introduce the shift withholding.
     #[test]
-    fn the_iris_arm_withholds_and_reports_refused_knobs() {
+    fn every_iris_control_reaches_the_engine_through_the_real_arm() {
+        use gen_core::CaptionOverflowPolicy as Policy;
+        let cases: Vec<(Value, Seen)> = vec![
+            (json!({ "seed": 11 }), default_seen(Some(11))),
+            (
+                json!({
+                    "seed": 7,
+                    "width": 512,
+                    "height": 768,
+                    "negativePrompt": "blurry, watermark",
+                    "advanced": {
+                        "steps": 30,
+                        "guidanceScale": 4.5,
+                        "sampler": "euler",
+                        "schedulerShift": 2.5,
+                        "cfgInterval": [0.1, 0.9],
+                        "captionOverflow": "error",
+                    },
+                }),
+                Seen {
+                    negative_prompt: Some("blurry, watermark".to_owned()),
+                    width: 512,
+                    height: 768,
+                    seed: Some(7),
+                    steps: Some(30),
+                    guidance: Some(4.5),
+                    sampler: Some("euler".to_owned()),
+                    scheduler_shift: Some(2.5),
+                    cfg_interval: Some((0.1, 0.9)),
+                    caption_overflow: Some(Policy::Error),
+                    ..default_seen(None)
+                },
+            ),
+            (
+                json!({
+                    "seed": 3,
+                    "advanced": {
+                        "sampler": "dpmpp_2m",
+                        "schedulerShift": "6",
+                        "captionOverflow": "silent",
+                        "cfgInterval": [0, 0.5],
+                    },
+                }),
+                Seen {
+                    seed: Some(3),
+                    sampler: Some("dpmpp_2m".to_owned()),
+                    scheduler_shift: Some(6.0),
+                    caption_overflow: Some(Policy::Silent),
+                    cfg_interval: Some((0.0, 0.5)),
+                    ..default_seen(None)
+                },
+            ),
+            (
+                // CFG off with nothing CFG-bound: honoured, guidance 1.0 reaches the engine.
+                json!({ "seed": 5, "advanced": { "guidanceScale": 1.0, "captionOverflow": "warn" } }),
+                Seen {
+                    seed: Some(5),
+                    guidance: Some(1.0),
+                    caption_overflow: Some(Policy::Warn),
+                    ..default_seen(None)
+                },
+            ),
+        ];
+        for (extra, want) in cases {
+            let run = run_iris_arm(ArmBehavior::Fails, false, extra.clone());
+            assert_eq!(run.seen, vec![want], "{extra}");
+        }
+    }
+
+    /// A count-N job renders N engine requests on per-image seeds (seed, seed+1, …), each
+    /// carrying the same controls.
+    #[test]
+    fn a_batch_renders_one_request_per_image_on_consecutive_seeds() {
         let run = run_iris_arm(
-            ArmBehavior::Fails,
+            ArmBehavior::Completes,
+            false,
+            json!({ "seed": 40, "count": 2, "advanced": { "sampler": "euler" } }),
+        );
+        assert!(run.outcome.is_ok(), "{:?}", run.outcome);
+        let seeds: Vec<_> = run.seen.iter().map(|seen| seen.seed).collect();
+        assert_eq!(seeds, vec![Some(40), Some(41)]);
+        assert!(run
+            .seen
+            .iter()
+            .all(|seen| seen.sampler.as_deref() == Some("euler")));
+        assert_eq!(run.asset_writes.len(), 2);
+    }
+
+    /// CFG off makes the bound negative prompt and the interval inert, and the engine refuses
+    /// both: the arm refuses them too, typed and BEFORE load (no load, no render, no asset) —
+    /// sc-25679 silently dropped the negative prompt; sc-25681 refuses it like the API does.
+    /// Malformed values are typed refusals before load as well.
+    #[test]
+    fn inert_or_malformed_controls_are_refused_before_load() {
+        let cases = [
+            (
+                json!({ "negativePrompt": "blurry", "advanced": { "guidanceScale": 1.0 } }),
+                "negative prompt",
+            ),
+            (
+                json!({ "advanced": { "guidanceScale": 1.0, "cfgInterval": [0.2, 0.8] } }),
+                "guidance interval",
+            ),
+            (
+                json!({ "advanced": { "cfgInterval": [0.9, 0.1] } }),
+                "0 <= start",
+            ),
+            (
+                json!({ "advanced": { "cfgInterval": "early" } }),
+                "pair of numbers",
+            ),
+            (
+                json!({ "advanced": { "captionOverflow": "loud" } }),
+                "caption-overflow",
+            ),
+            (json!({ "advanced": { "schedulerShift": 0 } }), "> 0"),
+        ];
+        for (extra, fragment) in cases {
+            let run = run_iris_arm(ArmBehavior::Completes, false, extra.clone());
+            match &run.outcome {
+                Err(crate::error::WorkerError::InvalidPayload(message)) => assert!(
+                    message.contains("iris_3b") && message.contains(fragment),
+                    "{extra}: {message}"
+                ),
+                other => panic!("{extra}: expected a typed refusal, got {other:?}"),
+            }
+            assert_eq!(run.load_calls, 0, "{extra}: refused before load");
+            assert!(
+                run.asset_writes.is_empty() && run.project_files.is_empty(),
+                "{extra}"
+            );
+        }
+    }
+
+    fn generation_adapter(
+        id: &'static str,
+        network_type: Option<&str>,
+        weight: f64,
+    ) -> TestAdapter {
+        let mut metadata = json!({
+            "family": "iris",
+            "irisTask": "generation",
+            "baseModel": "iris_3b",
+        });
+        if let Some(network_type) = network_type {
+            metadata["networkType"] = json!(network_type);
+        }
+        TestAdapter {
+            id,
+            metadata,
+            weight,
+        }
+    }
+
+    /// A completed render through the real arm: the engine's x0 step preview reaches the job API
+    /// on the preview path, its `caption_truncated` warning and the applied LoRA + LoKr stack
+    /// (identity joined with the engine's own apply report) land in the asset's provenance, and the
+    /// controls ride the recorded settings so the recipe reopens with them.
+    ///
+    /// *Mutation that reds this:* skip `send_image_facts`, or drop the `ImageFacts` merge in
+    /// `consume_gen_events`.
+    #[test]
+    fn a_completed_render_reports_previews_warnings_and_adapter_provenance() {
+        let run = run_iris_arm_with(
+            ArmBehavior::Completes,
             false,
             json!({
-                "negativePrompt": "blurry",
-                "advanced": { "guidanceScale": 1.0, "schedulerShift": 3.0 },
+                "seed": 9,
+                "width": 256,
+                "height": 256,
+                "advanced": {
+                    "sampler": "euler",
+                    "schedulerShift": 3.0,
+                    "cfgInterval": [0.1, 0.9],
+                    "captionOverflow": "warn",
+                },
+            }),
+            "64",
+            &[
+                generation_adapter("iris-style", None, 0.8),
+                generation_adapter("iris-lokr", Some("lokr"), 1.2),
+            ],
+        );
+        assert!(run.outcome.is_ok(), "{:?}", run.outcome);
+        // Both adapters reached the load spec, in order, with their kind and job weight.
+        let loaded: Vec<_> = run
+            .loaded_adapters
+            .iter()
+            .map(|adapter| (adapter.kind, adapter.scale))
+            .collect();
+        assert_eq!(
+            loaded,
+            vec![
+                (gen_core::AdapterKind::Lora, 0.8),
+                (gen_core::AdapterKind::Lokr, 1.2)
+            ]
+        );
+        // The preview rode a non-terminal progress post at the engine's (W/16)x(H/16) frame.
+        let preview = run
+            .posts
+            .iter()
+            .find_map(|post| post["result"]["previewFrame"].as_object())
+            .unwrap_or_else(|| panic!("a preview frame must reach the job API: {:#?}", run.posts));
+        assert_eq!(preview["current"], 1);
+        assert!(preview["dataUrl"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("data:image/")));
+        // Provenance on the written asset.
+        assert_eq!(run.asset_writes.len(), 1);
+        let settings = &run.asset_writes[0]["rawAdapterSettings"];
+        assert_eq!(
+            settings["generationWarnings"],
+            json!([{ "code": "caption_truncated", "message": FIXTURE_WARNING }])
+        );
+        let applied = settings["adapterApply"]
+            .as_array()
+            .expect("adapter provenance");
+        assert_eq!(applied.len(), 2);
+        for (entry, (id, kind, adapter)) in applied.iter().zip([
+            ("iris-style", "lora", &run.loaded_adapters[0]),
+            ("iris-lokr", "lokr", &run.loaded_adapters[1]),
+        ]) {
+            assert_eq!(entry["id"], id);
+            assert_eq!(entry["kind"], kind);
+            assert_eq!(entry["path"], json!(adapter.path.display().to_string()));
+            assert_eq!(
+                entry["scale"].as_f64().map(|v| v as f32),
+                Some(adapter.scale)
+            );
+            assert_eq!(
+                entry["sha256"].as_str().map(str::len),
+                Some(64),
+                "the loaded file's digest: {entry}"
+            );
+            assert_eq!(entry["applied"], 24);
+            assert_eq!(entry["skipped"], json!(["pixel.blocks.0.attn"]));
+        }
+        // The controls are recorded with the image, so reopening the recipe restores them.
+        for (key, value) in [
+            ("sampler", json!("euler")),
+            ("schedulerShift", json!(3.0)),
+            ("cfgInterval", json!([0.1, 0.9])),
+            ("captionOverflow", json!("warn")),
+        ] {
+            assert_eq!(settings[key], value, "{key}: {settings}");
+        }
+        assert_eq!(
+            run.asset_writes[0]["loras"].as_array().map(Vec::len),
+            Some(2)
+        );
+    }
+
+    /// A replayed `advanced` block cannot forge the worker-owned provenance keys: a render with
+    /// nothing to report records neither.
+    #[test]
+    fn replayed_provenance_keys_are_scrubbed() {
+        let run = run_iris_arm(
+            ArmBehavior::Completes,
+            false,
+            json!({
+                "width": 256,
+                "height": 256,
+                "advanced": {
+                    "adapterApply": [{ "id": "forged" }],
+                    "generationWarnings": [{ "code": "forged", "message": "forged" }],
+                },
             }),
         );
+        assert!(run.outcome.is_ok(), "{:?}", run.outcome);
+        let settings = &run.asset_writes[0]["rawAdapterSettings"];
+        // The stub always reports its fixture warning, so the key is present with ONLY that.
         assert_eq!(
-            run.seen,
-            Some((Some(1.0), None, None)),
-            "the engine must see CFG off with neither refused knob"
+            settings["generationWarnings"],
+            json!([{ "code": "caption_truncated", "message": FIXTURE_WARNING }])
         );
-        let mut events = knob_events(&run.logged, "job-iris");
-        events.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(
-            events,
-            vec![
-                ("negativePrompt".to_owned(), json!("blurry")),
-                ("schedulerShift".to_owned(), json!(3.0)),
-            ],
-            "{}",
-            run.logged
-        );
-
-        // The same knobs the engine honours pass through, unreported.
-        let honored = run_iris_arm(
-            ArmBehavior::Fails,
-            false,
-            json!({ "negativePrompt": "blurry", "advanced": { "guidanceScale": 3.0 } }),
-        );
-        assert_eq!(
-            honored.seen,
-            Some((Some(3.0), Some("blurry".to_owned()), None))
-        );
-        assert_eq!(knob_events(&honored.logged, "job-iris"), Vec::new());
+        assert!(settings.get("adapterApply").is_none(), "{settings}");
     }
 
     // ---------------------------------------------------------------------------------------

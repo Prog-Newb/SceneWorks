@@ -46,6 +46,28 @@ describe("normalizeLoraFamily", () => {
   });
 });
 
+describe("loraMatchesModel — Iris task gate (sc-25681)", () => {
+  const iris = {
+    id: "iris_3b",
+    family: "iris",
+    loraCompatibility: { families: ["iris"], irisTask: "generation" },
+  };
+  it.each([
+    ["a generation-stamped Iris LoRA", { id: "a", family: "iris", irisTask: "generation", baseModel: "iris_3b" }, true],
+    ["a generation-stamped LoKr without a base", { id: "b", family: "iris", irisTask: "generation", networkType: "lokr" }, true],
+    ["a depth-task Iris adapter", { id: "c", family: "iris", irisTask: "depth" }, false],
+    ["an unstamped Iris file", { id: "d", family: "iris" }, false],
+    ["another base model", { id: "e", family: "iris", irisTask: "generation", baseModel: "iris_custom" }, false],
+    ["another family", { id: "f", family: "flux", irisTask: "generation" }, false],
+  ])("%s", (_label, lora, offered) => {
+    expect(loraMatchesModel(lora, iris)).toBe(offered);
+  });
+  it("leaves models without an Iris task untouched", () => {
+    const sdxl = { id: "sdxl", family: "sdxl", loraCompatibility: { families: ["sdxl"] } };
+    expect(loraMatchesModel({ id: "x", family: "sdxl" }, sdxl)).toBe(true);
+  });
+});
+
 describe("presetMatchesModel", () => {
   it("matches when the preset pins no model", () => {
     expect(presetMatchesModel({ id: "p" }, ltxEros, catalog)).toBe(true);

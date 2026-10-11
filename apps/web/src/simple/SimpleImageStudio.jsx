@@ -32,7 +32,7 @@ import {
   modelDimensionConstraints,
 } from "../resolutionOverride.js";
 import { minStepsForModel } from "../videoModelLimits.js";
-import { maxStepsForModel, negativePromptInertAtGuidance } from "../samplerOptions.js";
+import { maxStepsForModel, negativePromptInertAtGuidance, patchGridHint } from "../samplerOptions.js";
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import {
   QWEN_IMAGE_2_1_MODEL_ID,
@@ -289,6 +289,7 @@ export function SimpleImageStudio() {
     heightOverride: nativeControls ? heightOverride : "",
   });
   const dimensionError = dimensionConstraintMessage(dimensionEval);
+  const patchGridNotice = patchGridHint(selectedModel, dimensionEval.width, dimensionEval.height);
 
   // The ORDERED list the render conditions on: the armed reference first (it is the one the tile
   // shows), then the extras in the order the user arranged them.
@@ -615,6 +616,12 @@ export function SimpleImageStudio() {
             title="Size & aspect"
             value={resolutionText}
           />
+          {/* sc-25681: the same informational patch-grid hint Image Studio shows — never a limit. */}
+          {patchGridNotice ? (
+            <span className="field-hint patch-grid-hint" role="note">
+              {patchGridNotice}
+            </span>
+          ) : null}
         </div>
         <Chips label="Variations" onChange={setVariations} options={variationOptions} value={variations} />
         {/* sc-24113 — native transparency. Simple exposes the model, so it exposes the toggle; it

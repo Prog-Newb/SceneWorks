@@ -22225,6 +22225,7 @@ mod preview_stream_tests {
             GenEvent::Preview { .. } => "Preview",
             GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
             GenEvent::CheckpointWeightFacts { .. } => "CheckpointWeightFacts",
+            GenEvent::ImageFacts { .. } => "ImageFacts",
             GenEvent::Image { .. } => "Image",
         }
     }
