@@ -46,33 +46,35 @@ export function captionDraftsFromDataset(dataset) {
   return map;
 }
 
+// The synthetic dataset-owned asset for one stored image (an item, or an edit-pair reference) under
+// its selection key `id` — null when the catalog has that asset, or the image has no stored path.
+function datasetOwnedAsset(dataset, projectId, catalogIds, source, id) {
+  const path = datasetItemProjectPath(dataset, source);
+  if (catalogIds.has(id) || !path) {
+    return null;
+  }
+  return {
+    id,
+    assetId: source.assetId ?? null,
+    datasetOwned: true,
+    projectId,
+    type: "image",
+    displayName: source.displayName ?? imageAssetName(source),
+    file: {
+      path,
+      mimeType: `image/${String(path).split(".").pop() || "png"}`,
+      width: source.width ?? null,
+      height: source.height ?? null,
+    },
+  };
+}
+
 export function datasetOwnedAssets(dataset, projectId, catalogAssets = []) {
   const catalogIds = new Set(catalogAssets.map((asset) => asset.id));
   return (dataset?.items ?? [])
-    .map((item, index) => {
-      if (item.assetId && catalogIds.has(item.assetId)) {
-        return null;
-      }
-      const path = datasetItemProjectPath(dataset, item);
-      if (!path) {
-        return null;
-      }
-      const id = datasetItemSelectionKey(dataset, item, index);
-      return {
-        id,
-        assetId: item.assetId ?? null,
-        datasetOwned: true,
-        projectId,
-        type: "image",
-        displayName: item.displayName ?? imageAssetName(item),
-        file: {
-          path,
-          mimeType: `image/${String(path).split(".").pop() || "png"}`,
-          width: item.width ?? null,
-          height: item.height ?? null,
-        },
-      };
-    })
+    .map((item, index) =>
+      datasetOwnedAsset(dataset, projectId, catalogIds, item, datasetItemSelectionKey(dataset, item, index)),
+    )
     .filter(Boolean);
 }
 
@@ -214,16 +216,19 @@ export function datasetPayload({
         const source = asset.datasetOwned || asset.datasetOnly ? { path: asset.file?.path } : { assetId: asset.id };
         // Instruction-edit pairs (sc-24161): the ORDERED references, each sent with the same source
         // contract as an item (library assetId, else the project-relative path of a dataset-owned or
-        // freshly uploaded image). Order is kept verbatim — the engine numbers the references.
-        const references = (referenceDraftById[selectionId] ?? [])
-          .map((referenceId) => assetsById.get(referenceId))
-          .filter(Boolean)
-          .map((reference) => ({
+        // freshly uploaded image). Order is kept verbatim — the engine numbers the references — so a
+        // key that does not resolve is still sent (by id) rather than dropped: the server refuses the
+        // save instead of deleting the stored file and renumbering the references after it.
+        const references = (referenceDraftById[selectionId] ?? []).map((referenceId) => {
+          const reference = assetsById.get(referenceId);
+          if (!reference) return { assetId: referenceId };
+          return {
             ...(reference.datasetOwned || reference.datasetOnly
               ? { path: reference.file?.path }
               : { assetId: reference.id }),
             displayName: reference.displayName ?? imageAssetName(reference),
-          }));
+          };
+        });
         return {
           ...datasetItemExtras(previous),
           ...(previous?.id ? { id: previous.id } : {}),
@@ -244,58 +249,38 @@ export function datasetPayload({
 // server item as `references: [{ assetId?, path, displayName? }]` in the order given.
 // ---------------------------------------------------------------------------------------------
 
-// The selection key the studio tracks a stored reference under: its library asset id while that
-// asset is still in the catalog, else a synthetic key backed by a dataset-owned asset (mirrors
-// `datasetItemSelectionKey` / `datasetOwnedAssets` for items).
-export function datasetReferenceKey(dataset, item, index, reference, catalogIds = new Set()) {
-  if (reference?.assetId && catalogIds.has(reference.assetId)) {
-    return reference.assetId;
-  }
-  return `dataset-ref:${dataset?.id ?? "draft"}:${item?.id ?? "item"}:${index}`;
+// The selection key the studio tracks a stored reference under: its library asset id when it has
+// one, else a synthetic key. Deliberately catalog-independent (like `datasetItemSelectionKey`): a
+// key seeded before the catalog loaded, or held across an asset's deletion, must keep resolving.
+export function datasetReferenceKey(dataset, item, index, reference) {
+  return reference?.assetId || `dataset-ref:${dataset?.id ?? "draft"}:${item?.id ?? "item"}:${index}`;
 }
 
 // Ordered reference drafts keyed by item selection id, seeded from the saved dataset.
-export function referenceDraftsFromDataset(dataset, catalogAssets = []) {
-  const catalogIds = new Set(catalogAssets.map((asset) => asset.id));
+export function referenceDraftsFromDataset(dataset) {
   const map = {};
   (dataset?.items ?? []).forEach((item, itemIndex) => {
     const references = Array.isArray(item?.references) ? item.references : [];
     if (!references.length) return;
     map[datasetItemSelectionKey(dataset, item, itemIndex)] = references.map((reference, index) =>
-      datasetReferenceKey(dataset, item, index, reference, catalogIds),
+      datasetReferenceKey(dataset, item, index, reference),
     );
   });
   return map;
 }
 
-// Synthetic dataset-owned assets for stored references that are not (or no longer) catalog assets,
-// so the editor can render and re-send them (their project-relative path re-materializes on save).
+// Synthetic dataset-owned assets, under the same key, for stored references that are not (or no
+// longer) catalog assets, so the editor can render and re-send them (their project-relative path
+// re-materializes on save).
 export function datasetReferenceAssets(dataset, projectId, catalogAssets = []) {
   const catalogIds = new Set(catalogAssets.map((asset) => asset.id));
-  const owned = [];
-  (dataset?.items ?? []).forEach((item) => {
-    (Array.isArray(item?.references) ? item.references : []).forEach((reference, index) => {
-      const id = datasetReferenceKey(dataset, item, index, reference, catalogIds);
-      if (id === reference?.assetId) return;
-      const path = datasetItemProjectPath(dataset, reference);
-      if (!path) return;
-      owned.push({
-        id,
-        assetId: reference.assetId ?? null,
-        datasetOwned: true,
-        projectId,
-        type: "image",
-        displayName: reference.displayName ?? imageAssetName(reference),
-        file: {
-          path,
-          mimeType: `image/${String(path).split(".").pop() || "png"}`,
-          width: reference.width ?? null,
-          height: reference.height ?? null,
-        },
-      });
-    });
-  });
-  return owned;
+  return (dataset?.items ?? [])
+    .flatMap((item) =>
+      (Array.isArray(item?.references) ? item.references : []).map((reference, index) =>
+        datasetOwnedAsset(dataset, projectId, catalogIds, reference, datasetReferenceKey(dataset, item, index, reference)),
+      ),
+    )
+    .filter(Boolean);
 }
 
 // Whether two ordered reference drafts differ for any of the given selection ids.

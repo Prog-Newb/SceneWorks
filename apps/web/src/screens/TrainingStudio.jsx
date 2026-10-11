@@ -570,8 +570,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
   );
   // Reference edits (add / remove / reorder, sc-24161) also make the dataset dirty.
   const savedReferenceDrafts = useMemo(
-    () => referenceDraftsFromDataset(activeDataset, assets),
-    [activeDataset, assets],
+    () => referenceDraftsFromDataset(activeDataset),
+    [activeDataset],
   );
   const referencesDirty =
     Boolean(activeDataset) && referenceDraftsDiffer(referenceDraftById, savedReferenceDrafts, selectedAssetIds);
@@ -948,13 +948,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
     // Seed caption drafts from the (re)loaded dataset; switching datasets or
     // saving (which swaps activeDataset) resets edits to the persisted state.
     setCaptionDraftById(captionDraftsFromDataset(activeDataset));
-    setReferenceDraftById(referenceDraftsFromDataset(activeDataset, assets));
+    setReferenceDraftById(referenceDraftsFromDataset(activeDataset));
     setRenamePrefix(safeSlug(activeDataset?.name, "item"));
     setCaptionTriggerWords(datasetTriggerPhrase);
     setCaptionSettings((current) => ({ ...current, nameInput: datasetTriggerPhrase }));
-    // Seeded per (re)loaded dataset only — a catalog refresh must not wipe in-progress reference
-    // edits, so `assets` is read at seed time rather than tracked.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDataset]);
 
   useEffect(() => {
@@ -1460,7 +1457,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setSelectedAssetIds(normalizeDatasetAssetIds(activeDataset, assets));
     setAssociatedCharacterId(activeDataset.characterId ?? "");
     setCaptionDraftById(captionDraftsFromDataset(activeDataset));
-    setReferenceDraftById(referenceDraftsFromDataset(activeDataset, assets));
+    setReferenceDraftById(referenceDraftsFromDataset(activeDataset));
   }
 
   // Replace one item's ordered reference list (reorder / remove from the reference rail, sc-24161).
@@ -1758,7 +1755,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
         ])
       : assetsById;
     const baseReferenceDraftById = baseOverride
-      ? referenceDraftsFromDataset(baseOverride, assets)
+      ? referenceDraftsFromDataset(baseOverride)
       : referenceDraftById;
     const payload = datasetPayload({
       activeDataset: base,

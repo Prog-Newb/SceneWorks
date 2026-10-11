@@ -236,6 +236,65 @@ describe("edit-pair dataset helpers (sc-24161)", () => {
     expect(plain.items[0]).not.toHaveProperty("references");
   });
 
+  it("keeps every stored reference, in order, whatever the catalog held when the drafts were seeded", () => {
+    const dataset = {
+      id: "ds1",
+      items: [
+        {
+          id: "item_0001",
+          assetId: "target",
+          path: "images/item_0001.png",
+          references: [
+            { assetId: "ref-c", path: "images/refs/item_0001_ref1.png" },
+            { path: "images/refs/item_0001_ref2.png", displayName: "upload.png" },
+            { assetId: "ref-a", path: "images/refs/item_0001_ref3.png" },
+          ],
+        },
+      ],
+    };
+    const library = ["target", "ref-a", "ref-c"].map((id) => ({ id, type: "image", displayName: `${id}.png` }));
+    // The studio's merge: catalog assets first, then the synthetic reference assets (first id wins).
+    const save = (drafts, catalog) => {
+      const assetsById = new Map(
+        [...catalog, ...datasetReferenceAssets(dataset, "p1", catalog)].reverse().map((asset) => [asset.id, asset]),
+      );
+      return datasetPayload({
+        activeDataset: dataset,
+        assetsById,
+        name: "Edits",
+        selectedAssetIds: ["target"],
+        referenceDraftById: drafts,
+      }).items[0].references;
+    };
+    const stored = [
+      { assetId: "ref-c", displayName: "ref-c.png" },
+      { path: "training/datasets/ds1/images/refs/item_0001_ref2.png", displayName: "upload.png" },
+      { assetId: "ref-a", displayName: "ref-a.png" },
+    ];
+
+    // Drafts are seeded once per dataset load — here before the catalog arrived. The keys must not
+    // depend on it, so the references still resolve once it does.
+    const drafts = referenceDraftsFromDataset(dataset);
+    expect(drafts).toEqual({ target: ["ref-c", "dataset-ref:ds1:item_0001:1", "ref-a"] });
+    expect(save(drafts, library)).toEqual(stored);
+
+    // A library asset that disappears while the studio is mounted falls back to its stored file
+    // under the same key: still three references, in the same order.
+    expect(save(drafts, library.filter((asset) => asset.id !== "ref-a"))).toEqual([
+      stored[0],
+      stored[1],
+      { path: "training/datasets/ds1/images/refs/item_0001_ref3.png", displayName: "item_0001_ref3.png" },
+    ]);
+
+    // A key nothing resolves is sent as-is — the server refuses it — never filtered away, which
+    // would delete the stored file and renumber the references after it.
+    expect(save({ target: ["ref-c", "gone", "ref-a"] }, library)).toEqual([
+      stored[0],
+      { assetId: "gone" },
+      stored[2],
+    ]);
+  });
+
   it("takes the reference cap from the model and never exceeds the target contract", () => {
     expect(trainingTargetReferenceCap(editTarget, [qwenModel])).toBe(10);
     expect(trainingTargetReferenceCap(editTarget, [{ ...qwenModel, limits: { maxReferenceAssets: 4 } }])).toBe(4);
