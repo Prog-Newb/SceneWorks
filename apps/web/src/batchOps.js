@@ -100,6 +100,7 @@ export function buildBatchJob({ op, asset, params = {}, project, requestedGpu, d
         sourceAssetId,
         resolution: params.resolution,
         displayName,
+        irisModel: params.irisModel,
       }),
     };
   }

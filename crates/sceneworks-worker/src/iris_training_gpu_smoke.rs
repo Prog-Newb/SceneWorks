@@ -428,3 +428,403 @@ async fn iris_training_gpu_smoke() {
         adapter.display()
     );
 }
+
+// =============================================================================================
+// Iris-3B DEPTH (S9 sc-25687) and RESTORATION (S10 sc-25688) training — the same production path:
+// a bounded run through `training_jobs::run_training_execution` from the REAL target, its export
+// written where the API registers it (`<data>/models/finetunes/<id>/<stem>/`), then the trained
+// model SELECTED by id (`irisModel`) in the depth / restoration job — no file surgery.
+// =============================================================================================
+
+fn smoke_settings(temp: &Path, posts_url: String, worker: &str) -> Settings {
+    let data_dir = temp.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let mut settings = Settings::for_test(data_dir.canonicalize().unwrap());
+    settings.api_url = posts_url;
+    settings.config_dir = temp.join("config");
+    settings.worker_id = worker.to_owned();
+    settings.heartbeat_seconds = 30;
+    if cfg!(target_os = "macos") {
+        settings.gpu_id = "mlx".to_owned();
+        settings.backend_mlx_enabled = true;
+    } else {
+        settings.gpu_id = std::env::var("CUDA_VISIBLE_DEVICES")
+            .ok()
+            .and_then(|devices| devices.split(',').next().map(|id| id.trim().to_owned()))
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| "0".to_owned());
+        settings.backend_candle_enabled = true;
+    }
+    settings
+}
+
+fn write_npy_f32(path: &Path, h: u32, w: u32, f: impl Fn(u32, u32) -> f32) {
+    let mut header =
+        format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({h}, {w}), }}").into_bytes();
+    while (10 + header.len() + 1) % 64 != 0 {
+        header.push(b' ');
+    }
+    header.push(b'\n');
+    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+    bytes.extend_from_slice(&(header.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(&header);
+    for y in 0..h {
+        for x in 0..w {
+            bytes.extend_from_slice(&f(y, x).to_le_bytes());
+        }
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn task_target(base_model: &str) -> sceneworks_core::training::TrainingTarget {
+    sceneworks_core::training::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.base_model == base_model)
+        .expect("the Iris task target is registered")
+}
+
+fn completed_result(posts: &ProgressPosts, job_id: &str) -> Value {
+    posts
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(id, body)| id == job_id && body["status"] == "completed")
+        .map(|(_, body)| body["result"].clone())
+        .unwrap_or_else(|| panic!("{job_id} posted a completed result"))
+}
+
+fn import_source(
+    store: &ProjectStore,
+    project_id: &str,
+    temp: &Path,
+    image: image::RgbImage,
+) -> String {
+    let source_file = temp.join("source.png");
+    image.save(&source_file).unwrap();
+    let asset = store
+        .import_asset(
+            project_id,
+            sceneworks_core::project_store::UploadAsset {
+                filename: "source.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: source_file,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .expect("source imports");
+    asset["id"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "real-weight Iris DEPTH training smoke; needs the pinned speridlabs/iris-3b depth/ export under HF_HUB_CACHE and a GPU (~65 GB)"]
+async fn iris_training_gpu_smoke_depth() {
+    const JOB: &str = "iris-depth-train-smoke";
+    const SIZE: u32 = 128;
+    const STEPS: u32 = 4;
+    let temp = tempfile::tempdir().unwrap();
+    let (api_url, posts) = spawn_worker_api_stub().await;
+    let settings = smoke_settings(temp.path(), api_url, "iris-depth-train-smoke");
+    let data_dir = settings.data_dir.clone();
+    let store = ProjectStore::new(data_dir.clone(), "iris-depth-train-smoke");
+    let project = store.create_project("Iris depth training smoke").unwrap();
+
+    // Two aligned examples: an RGB gradient + a depth ramp (near at the bottom), one with a mask.
+    let root = PathBuf::from(&project.path).join("training/datasets/ds_depth");
+    std::fs::create_dir_all(root.join("images")).unwrap();
+    std::fs::create_dir_all(root.join("sidecars")).unwrap();
+    let items: Vec<Value> = (0..2u32)
+        .map(|index| {
+            image::RgbImage::from_fn(SIZE, SIZE, |x, y| {
+                image::Rgb([(x * 2) as u8, (255 - y * 2) as u8, (60 * index + 40) as u8])
+            })
+            .save(root.join(format!("images/i{index}.png")))
+            .unwrap();
+            write_npy_f32(
+                &root.join(format!("sidecars/i{index}.depth.npy")),
+                SIZE,
+                SIZE,
+                |y, _| 1.0 + 9.0 * (1.0 - y as f32 / (SIZE - 1) as f32),
+            );
+            let mut depth =
+                json!({ "path": format!("sidecars/i{index}.depth.npy"), "maxDepth": 80.0 });
+            if index == 1 {
+                image::GrayImage::from_fn(SIZE, SIZE, |x, _| image::Luma([u8::from(x > 4) * 255]))
+                    .save(root.join("sidecars/i1.mask.png"))
+                    .unwrap();
+                depth["maskPath"] = json!("sidecars/i1.mask.png");
+            }
+            json!({
+                "id": format!("i{index}"), "path": format!("images/i{index}.png"),
+                "displayName": format!("i{index}.png"),
+                "caption": { "text": "", "source": "manual", "triggerWords": [] },
+                "addedAt": "2026-10-11T00:00:00Z", "irisDepth": depth
+            })
+        })
+        .collect();
+    let dataset: sceneworks_core::training::TrainingDataset = serde_json::from_value(json!({
+        "schemaVersion": 1, "id": "ds_depth", "version": 1, "projectId": project.id,
+        "name": "depth", "modality": "image", "status": "ready",
+        "createdAt": "2026-10-11T00:00:00Z", "updatedAt": "2026-10-11T00:00:00Z", "items": items
+    }))
+    .unwrap();
+
+    let target = task_target("iris_3b_depth");
+    let mut config = target.defaults.clone();
+    config.steps = STEPS;
+    config.save_every = STEPS / 2;
+    config.gradient_accumulation = 1;
+    config.resolution = SIZE;
+    config.learning_rate = sceneworks_core::contracts::ContractNumber::from_f64(1e-4).unwrap();
+    config.advanced.insert("sampleEvery".into(), json!(STEPS));
+    config.advanced["iris"]["depth_size"] = json!([SIZE, SIZE]);
+    config.advanced["iris"]["preview_items"] = json!(1);
+    config.advanced["iris"]["keep_last_checkpoints"] = json!(1);
+    let model_id = "finetune_depth_smoke";
+    let output_dir = data_dir.join("models/finetunes").join(model_id);
+    let plan = sceneworks_core::training::build_training_plan(
+        sceneworks_core::training::BuildTrainingPlan {
+            job_id: JOB,
+            target: &target,
+            dataset: &dataset,
+            config,
+            preset: None,
+            lora_id: model_id,
+            base_model_path: crate::model_jobs::huggingface_snapshot_dir(&data_dir, BACKBONE_REPO)
+                .expect("HF_HUB_CACHE holds the pinned speridlabs/iris-3b snapshot")
+                .display()
+                .to_string(),
+            dataset_root: &root,
+            output_dir: &output_dir,
+            file_name: "depth_smoke.safetensors".to_owned(),
+            created_at: "2026-10-11T00:00:00Z".to_owned(),
+        },
+    )
+    .expect("the depth plan builds from the real target");
+    let mut snapshot = stub_job_snapshot(JOB, "lora_train", &project.id);
+    snapshot["payload"] = json!({ "dryRun": false, "plan": plan });
+    let job: JobSnapshot = serde_json::from_value(snapshot).unwrap();
+    let api = ApiClient::new(&settings);
+    let started = std::time::Instant::now();
+    crate::training_jobs::run_training_execution(&api, &settings, &job, &plan)
+        .await
+        .expect("the Iris depth training job completes");
+    let train_seconds = started.elapsed().as_secs_f64();
+    let result = completed_result(&posts, JOB);
+    assert_eq!(result["stepsCompleted"], STEPS, "{result:#}");
+    assert!(
+        !result["trainingSamples"].as_array().unwrap().is_empty(),
+        "a depth preview rendered"
+    );
+    let export = output_dir.join("depth_smoke");
+    for file in [
+        "config.yaml",
+        "model.safetensors",
+        "empty_prompt.safetensors",
+    ] {
+        assert!(export.join(file).is_file(), "the depth export has {file}");
+    }
+    let metadata = safetensors_metadata(&export.join("model.safetensors"));
+    assert_eq!(
+        metadata.get("irisTask").and_then(Value::as_str),
+        Some("depth")
+    );
+
+    // The trained model, selected by id in a depth job.
+    let source = import_source(
+        &store,
+        &project.id,
+        temp.path(),
+        image::RgbImage::from_fn(256, 192, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+        }),
+    );
+    let depth_job_id = "iris-depth-trained-job";
+    let mut snapshot = stub_job_snapshot(depth_job_id, "image_depth", &project.id);
+    snapshot["payload"] = json!({
+        "projectId": project.id,
+        "sourceAssetId": source,
+        "resolution": { "mode": "capped", "maxSide": 256 },
+        "irisModel": model_id,
+        "modelManifestEntries": [crate::training_jobs::builtin_model_manifest_entry("iris_3b_depth").unwrap()],
+    });
+    let job: JobSnapshot = serde_json::from_value(snapshot).unwrap();
+    crate::depth_jobs::run_image_depth_job(&api, &settings, &job)
+        .await
+        .expect("the depth job runs on the trained model");
+    let fact = completed_result(&posts, depth_job_id)["assetWrites"][0].clone();
+    assert_eq!(fact["model"], model_id, "{fact:#}");
+    assert_eq!(fact["depth"]["model"]["trainedModelId"], model_id);
+    let npy = std::fs::read(PathBuf::from(&project.path).join(fact["mediaPath"].as_str().unwrap()))
+        .unwrap();
+    let map = sceneworks_core::depth_map::decode_npy_f32(&npy).unwrap();
+    assert_eq!((map.width, map.height), (256, 192));
+    assert!(map.values.iter().all(|v| v.is_finite()));
+    eprintln!(
+        "RESULT status=pass trainer=iris_3b_depth backend={} steps={STEPS} size={SIZE} \
+         final_loss={} train_s={train_seconds:.1} export={} depth_job_model={model_id}",
+        if cfg!(target_os = "macos") {
+            "mlx"
+        } else {
+            "candle"
+        },
+        result["finalLoss"],
+        export.display()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "real-weight Iris RESTORATION training smoke (LoRA arm); needs the pinned upscaler/ export and the three training resources under HF_HUB_CACHE and a GPU (~30 GB)"]
+async fn iris_training_gpu_smoke_restore() {
+    const JOB: &str = "iris-restore-train-smoke";
+    const SIZE: u32 = 256;
+    // Two steps = generator, critic, generator, critic.
+    const STEPS: u32 = 4;
+    let temp = tempfile::tempdir().unwrap();
+    let (api_url, posts) = spawn_worker_api_stub().await;
+    let settings = smoke_settings(temp.path(), api_url, "iris-restore-train-smoke");
+    let data_dir = settings.data_dir.clone();
+    let store = ProjectStore::new(data_dir.clone(), "iris-restore-train-smoke");
+    let project = store
+        .create_project("Iris restoration training smoke")
+        .unwrap();
+
+    // Clean images: synthetic (seeded) second-order degradation.
+    let root = PathBuf::from(&project.path).join("training/datasets/ds_restore");
+    std::fs::create_dir_all(root.join("images")).unwrap();
+    let items: Vec<Value> = (0..2u32)
+        .map(|index| {
+            image::RgbImage::from_fn(SIZE, SIZE, |x, y| {
+                image::Rgb([
+                    ((x / 8 + y / 8 + index) % 2 * 200) as u8,
+                    (x % 256) as u8,
+                    (y % 256) as u8,
+                ])
+            })
+            .save(root.join(format!("images/c{index}.png")))
+            .unwrap();
+            json!({
+                "id": format!("c{index}"), "path": format!("images/c{index}.png"),
+                "displayName": format!("c{index}.png"),
+                "caption": { "text": "", "source": "manual", "triggerWords": [] },
+                "addedAt": "2026-10-11T00:00:00Z"
+            })
+        })
+        .collect();
+    let dataset: sceneworks_core::training::TrainingDataset = serde_json::from_value(json!({
+        "schemaVersion": 1, "id": "ds_restore", "version": 1, "projectId": project.id,
+        "name": "restore", "modality": "image", "status": "ready",
+        "createdAt": "2026-10-11T00:00:00Z", "updatedAt": "2026-10-11T00:00:00Z", "items": items
+    }))
+    .unwrap();
+
+    let target = task_target("iris_3b_restore");
+    let mut config = target.defaults.clone();
+    config.rank = 8;
+    config.alpha = 8;
+    config.steps = STEPS;
+    config.save_every = STEPS;
+    config.resolution = SIZE;
+    config.advanced.insert("networkType".into(), json!("lora"));
+    config.advanced.insert("sampleEvery".into(), json!(STEPS));
+    config.advanced["iris_restore"]["crop"] = json!("center");
+    config.advanced["iris_restore"]["keep_last_checkpoints"] = json!(1);
+    let model_id = "finetune_restore_smoke";
+    let output_dir = data_dir.join("models/finetunes").join(model_id);
+    let plan = sceneworks_core::training::build_training_plan(
+        sceneworks_core::training::BuildTrainingPlan {
+            job_id: JOB,
+            target: &target,
+            dataset: &dataset,
+            config,
+            preset: None,
+            lora_id: model_id,
+            base_model_path: crate::model_jobs::huggingface_snapshot_dir(&data_dir, BACKBONE_REPO)
+                .expect("HF_HUB_CACHE holds the pinned speridlabs/iris-3b snapshot")
+                .display()
+                .to_string(),
+            dataset_root: &root,
+            output_dir: &output_dir,
+            file_name: "restore_smoke.safetensors".to_owned(),
+            created_at: "2026-10-11T00:00:00Z".to_owned(),
+        },
+    )
+    .expect("the restoration plan builds from the real target");
+    let mut snapshot = stub_job_snapshot(JOB, "lora_train", &project.id);
+    snapshot["payload"] = json!({ "dryRun": false, "plan": plan });
+    let job: JobSnapshot = serde_json::from_value(snapshot).unwrap();
+    let api = ApiClient::new(&settings);
+    let started = std::time::Instant::now();
+    crate::training_jobs::run_training_execution(&api, &settings, &job, &plan)
+        .await
+        .expect("the Iris restoration training job completes (training resources verified)");
+    let train_seconds = started.elapsed().as_secs_f64();
+    let result = completed_result(&posts, JOB);
+    assert_eq!(result["stepsCompleted"], STEPS, "{result:#}");
+    assert!(
+        !result["trainingSamples"].as_array().unwrap().is_empty(),
+        "a restoration preview"
+    );
+    let export = output_dir.join("restore_smoke");
+    for file in [
+        "config.yaml",
+        "model.safetensors",
+        "empty_prompt.safetensors",
+    ] {
+        assert!(
+            export.join(file).is_file(),
+            "the upscaler export has {file}"
+        );
+    }
+    let metadata = safetensors_metadata(&export.join("model.safetensors"));
+    assert_eq!(
+        metadata.get("irisTask").and_then(Value::as_str),
+        Some("restoration")
+    );
+
+    // The trained model, selected by id in an Iris restore job (a 1× restore).
+    let source = import_source(
+        &store,
+        &project.id,
+        temp.path(),
+        image::RgbImage::from_fn(128, 96, |x, y| {
+            image::Rgb([
+                (x * 2) as u8,
+                (y * 2) as u8,
+                ((x / 8 + y / 8) % 2 * 200) as u8,
+            ])
+        }),
+    );
+    let restore_job_id = "iris-restore-trained-job";
+    let mut snapshot = stub_job_snapshot(restore_job_id, "image_upscale", &project.id);
+    snapshot["payload"] = json!({
+        "projectId": project.id,
+        "sourceAssetId": source,
+        "engine": "iris",
+        "scale": 1.0,
+        "irisModel": model_id,
+    });
+    let job: JobSnapshot = serde_json::from_value(snapshot).unwrap();
+    crate::upscale_jobs::run_image_upscale_job(&api, &settings, &job)
+        .await
+        .expect("the restore job runs on the trained model");
+    let asset = completed_result(&posts, restore_job_id)["assetWrites"][0].clone();
+    let restored =
+        image::open(PathBuf::from(&project.path).join(asset["mediaPath"].as_str().unwrap()))
+            .unwrap()
+            .to_rgb8();
+    assert_eq!(restored.dimensions(), (128, 96));
+    eprintln!(
+        "RESULT status=pass trainer=iris_3b_restore arm=lora backend={} steps={STEPS} crop={SIZE} \
+         final_loss={} train_s={train_seconds:.1} export={} restore_job_model={model_id}",
+        if cfg!(target_os = "macos") {
+            "mlx"
+        } else {
+            "candle"
+        },
+        result["finalLoss"],
+        export.display()
+    );
+}

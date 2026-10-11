@@ -3144,6 +3144,10 @@ pub(crate) async fn apply_inline_iris_restore(
         .upscale
         .iris_params()
         .map_err(|error| WorkerError::InvalidPayload(format!("upscale: {error}")))?;
+    let trained_model = sceneworks_core::image_restoration::parse_iris_restore_model(
+        &plan.request.upscale.iris_controls(),
+    )
+    .map_err(|error| WorkerError::InvalidPayload(format!("upscale: {error}")))?;
     let base_facts: Vec<JsonObject> = asset_writes
         .iter()
         .filter_map(Value::as_object)
@@ -3196,6 +3200,7 @@ pub(crate) async fn apply_inline_iris_restore(
             loader,
             source,
             params,
+            trained_model.clone(),
             move |current, total| {
                 image_progress(
                     JobStatus::Running,

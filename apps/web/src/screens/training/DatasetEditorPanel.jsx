@@ -9,6 +9,7 @@ import { errorMessage } from "../../errorMessage.js";
 import { Icon } from "../../components/Icons.jsx";
 import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { ValidationSummary } from "../../validation/Validation.jsx";
+import { IrisSidecarPanel } from "./IrisSidecarPanel.jsx";
 import {
   DatasetDoctorDistributions,
   DatasetDoctorReadout,
@@ -105,7 +106,7 @@ export function DatasetEditorPanel({
   const { datasetDoctor, readinessByKey, onToggleItemAck } = doctorSession;
   const {
     imageAssets, characters, associatedCharacterId, setActiveView, importingAssets,
-    gpuOptions, onUploadPreparedBundle,
+    gpuOptions, onUploadPreparedBundle, onIrisSidecar,
   } = config;
   // Local aliases for the doctor readout's report/loading, still referenced directly by
   // the distributions block and the per-card readiness badges below.
@@ -433,6 +434,10 @@ export function DatasetEditorPanel({
             </div>
           ))}
         </div>
+      ) : null}
+
+      {activeDataset?.items?.length ? (
+        <IrisSidecarPanel items={activeDataset.items} onSidecar={onIrisSidecar} />
       ) : null}
 
       <section className="dataset-results">

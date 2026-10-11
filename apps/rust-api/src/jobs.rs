@@ -1099,6 +1099,43 @@ async fn validate_raw_job_payload(
     if matches!(job_type, JobType::ImageDepth) {
         crate::depth_jobs::validate_raw_image_depth_payload(payload)?;
     }
+    // A trained Iris depth / restoration model named by `irisModel` (sc-25687 / sc-25688) must be a
+    // registered model of that task.
+    let trained = match job_type {
+        JobType::ImageDepth => {
+            sceneworks_core::depth_map::ImageDepthJobPayload::from_job_payload(payload)
+                .ok()
+                .and_then(|request| request.trained_model().map(str::to_owned))
+                .map(|model| (model, sceneworks_core::training::iris::IrisObjective::Depth))
+        }
+        JobType::ImageUpscale => {
+            sceneworks_core::image_restoration::parse_iris_restore_model(payload)
+                .map_err(ApiError::bad_request)?
+                .map(|model| {
+                    (
+                        model,
+                        sceneworks_core::training::iris::IrisObjective::Restoration,
+                    )
+                })
+        }
+        JobType::ImageGenerate | JobType::ImageEdit => payload
+            .get("upscale")
+            .and_then(Value::as_object)
+            .map(sceneworks_core::image_restoration::parse_iris_restore_model)
+            .transpose()
+            .map_err(ApiError::bad_request)?
+            .flatten()
+            .map(|model| {
+                (
+                    model,
+                    sceneworks_core::training::iris::IrisObjective::Restoration,
+                )
+            }),
+        _ => None,
+    };
+    if let Some((model, objective)) = trained {
+        crate::iris_training::validate_trained_task_model(state, &model, objective).await?;
+    }
     // Licence-acknowledgment gate for the FETCHING job types (sc-17227), keyed on the payload's
     // `repo`/`sourceUrl` rather than on a model id.
     //

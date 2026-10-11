@@ -883,6 +883,43 @@ fn training_request_from_plan(
     plan: &TrainingPlan,
     prepared_inputs: &mut PreparedTrainingInputs,
 ) -> WorkerResult<TrainingRequest> {
+    // Iris depth / restoration (sc-25687 / sc-25688): an item is an image plus its task sidecar(s),
+    // resolved under the dataset root; the engine options bag is the only `model_options` key.
+    if let Some(objective) =
+        crate::iris_task_training::task_objective(&plan.target.kernel, &plan.target.base_model)
+    {
+        let root = PathBuf::from(&plan.dataset.root_path);
+        let items = plan
+            .dataset
+            .items
+            .iter()
+            .map(|item| {
+                let image = resolve_dataset_item_path(
+                    settings,
+                    &plan.dataset.root_path,
+                    &item.image_path,
+                    "Training dataset imagePath",
+                )?;
+                crate::iris_task_training::task_item(objective, &root, image, &item.extra)
+                    .map_err(WorkerError::InvalidPayload)
+            })
+            .collect::<WorkerResult<Vec<_>>>()?;
+        return Ok(TrainingRequest {
+            items,
+            config: crate::iris_task_training::shape_task_config(
+                finalize_training_config(map_training_config(&plan.config), plan),
+                objective,
+            ),
+            output_dir: resolve_training_output_dir(
+                settings,
+                &plan.output.output_dir,
+                "Training outputDir",
+            )?,
+            file_name: plan.output.file_name.clone(),
+            trigger_words: Vec::new(),
+            cancel: CancelFlag::new(),
+        });
+    }
     let items = plan
         .dataset
         .items
@@ -1334,7 +1371,14 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
         // under the generation install's id (`gen_core::iris::train::TRAINER_ID`), serving LoRA, LoKr
         // and the full (weights- or random-init) run; the network type travels in the config. The
         // depth/restoration exports are different task installs and are never a training base here.
-        "iris_train" => (base_model == "iris_3b").then_some(gen_core::iris::train::TRAINER_ID),
+        // The depth (S9 sc-25687) and restoration (S10 sc-25688) task trainers ride the same kernel,
+        // keyed on the task install they fine-tune.
+        "iris_train" => match base_model {
+            "iris_3b" => Some(gen_core::iris::train::TRAINER_ID),
+            "iris_3b_depth" => Some(gen_core::iris::train::depth::DEPTH_TRAINER_ID),
+            "iris_3b_restore" => Some(gen_core::iris::restoration_train::TRAINER_ID),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1851,15 +1895,41 @@ pub(crate) async fn run_training_execution_using(
         JsonObject::new()
     };
 
-    let weights_dir = match resolve_app_managed_model_dir(
-        settings,
-        &plan.target.base_model_path,
-        "Training baseModelPath",
-    ) {
-        Ok(weights_dir) => weights_dir,
-        Err(error) => return prepared_run.finish(Err(error)),
-    };
     let engine_id = prepared_run.engine_id;
+    // Iris depth / restoration (sc-25687 / sc-25688): the task export the run fine-tunes and its
+    // caller-staged components (empty-prompt source, the integrity-checked training resources),
+    // resolved cache-only — nothing downloads at training time.
+    let task_inputs = match crate::iris_task_training::task_objective(
+        &plan.target.kernel,
+        &plan.target.base_model,
+    ) {
+        Some(objective) => {
+            let task_settings = settings.clone();
+            let config = plan.config.clone();
+            let resolved = tokio::task::spawn_blocking(move || {
+                crate::iris_task_training::task_load_inputs(&task_settings, objective, &config)
+            })
+            .await
+            .map_err(|error| task_join_error("Iris training resource check", error))
+            .and_then(|resolved| resolved.map_err(WorkerError::InvalidPayload));
+            match resolved {
+                Ok(inputs) => Some(inputs),
+                Err(error) => return prepared_run.finish(Err(error)),
+            }
+        }
+        None => None,
+    };
+    let weights_dir = match &task_inputs {
+        Some(inputs) => inputs.weights.clone(),
+        None => match resolve_app_managed_model_dir(
+            settings,
+            &plan.target.base_model_path,
+            "Training baseModelPath",
+        ) {
+            Ok(weights_dir) => weights_dir,
+            Err(error) => return prepared_run.finish(Err(error)),
+        },
+    };
 
     // LTX-2.3's Gemma-3 text encoder lives OUTSIDE `weights_dir` — thread the bundled sibling onto the
     // trainer `LoadSpec` so a self-contained install trains without a separate gemma download (sc-9989).
@@ -1870,11 +1940,13 @@ pub(crate) async fn run_training_execution_using(
     // Resolved BEFORE the blocking thread (a missing one fails the job with an actionable error naming the
     // component id + repo), then moved into the closure and folded onto the trainer `LoadSpec`. Empty for
     // the self-contained macOS MLX SDXL trainer (its descriptor advertises none), so a no-op on macOS.
-    let train_components =
-        match resolve_trainer_components(engine_id, &plan.target.base_model, settings) {
+    let train_components = match task_inputs {
+        Some(inputs) => inputs.components,
+        None => match resolve_trainer_components(engine_id, &plan.target.base_model, settings) {
             Ok(components) => components,
             Err(error) => return prepared_run.finish(Err(error)),
-        };
+        },
+    };
 
     if let Err(error) = tokio::fs::create_dir_all(&prepared_run.request.output_dir).await {
         return prepared_run.finish(Err(error.into()));
@@ -2013,11 +2085,10 @@ async fn iris_training_preflight(
     };
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let capacity = crate::iris_training::candle_training_capacity_gb(&settings.gpu_id).await;
-    let network_type = advanced_str(&plan.config.advanced, "networkType", "lora");
-    if let Some(refusal) = crate::iris_training::iris_memory_refusal(
+    if let Some(refusal) = crate::iris_training::iris_plan_memory_refusal(
         lane,
-        &network_type,
-        plan.config.resolution,
+        &plan.target.base_model,
+        &plan.config,
         capacity,
     ) {
         return Err(WorkerError::InvalidPayload(refusal));

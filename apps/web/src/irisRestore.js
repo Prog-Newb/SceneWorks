@@ -51,13 +51,21 @@ export function normalizeIrisInputSizing(value) {
   return value === "original" ? "original" : "budgeted";
 }
 
-// The three Iris controls as the job / `upscale` block carries them. No `factor` / `softness` /
-// `seed`: the API and worker refuse those for the Iris engine by name.
-export function irisRestoreControls({ scale, inputSizing, colorFix } = {}) {
+// Installed models a Training Studio depth / restoration run registered (sc-25687 / sc-25688):
+// `task` is "depth" | "restoration".
+export function trainedTaskModels(models, task) {
+  return (models ?? []).filter((model) => model?.trainedCheckpoint?.task === task && model.installState === "installed");
+}
+
+// The Iris controls as the job / `upscale` block carries them. No `factor` / `softness` /
+// `seed`: the API and worker refuse those for the Iris engine by name. `irisModel` names a trained
+// restoration model (sc-25688); absent = the release export.
+export function irisRestoreControls({ scale, inputSizing, colorFix, irisModel } = {}) {
   return {
     scale: normalizeIrisScale(scale) ?? IRIS_DEFAULT_SCALE,
     inputSizing: normalizeIrisInputSizing(inputSizing),
     colorFix: colorFix !== false,
+    ...(irisModel && irisModel !== IRIS_RESTORE_MODEL_ID ? { irisModel } : {}),
   };
 }
 
@@ -100,5 +108,6 @@ export function irisControlsFromRecord(record) {
     scale: record.scale,
     inputSizing: record.inputSizing,
     colorFix: record.colorFix,
+    irisModel: record.irisModel,
   });
 }

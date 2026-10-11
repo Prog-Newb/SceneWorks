@@ -23,6 +23,24 @@ export function isIrisTarget(target) {
   return target?.kernel === IRIS_TRAINING_KERNEL;
 }
 
+// Which Iris objective a target trains (sc-25687 / sc-25688): "generation" | "depth" |
+// "restoration", or null for a non-Iris target. Depth and restoration share the kernel, so the
+// target's own `irisObjective` (or `ui.objective`, else its base model) tells them apart.
+const TASK_BASE_MODELS = { iris_3b_depth: "depth", iris_3b_restore: "restoration" };
+export function irisObjective(target) {
+  if (!isIrisTarget(target)) return null;
+  const objective = target.irisObjective ?? target.ui?.objective ?? TASK_BASE_MODELS[target.baseModel];
+  return objective === "depth" || objective === "restoration" ? objective : "generation";
+}
+
+export function isIrisGenerationTarget(target) {
+  return irisObjective(target) === "generation";
+}
+
+export function isIrisTaskTarget(target) {
+  return ["depth", "restoration"].includes(irisObjective(target));
+}
+
 const between = (min, max, { maxExclusive = false } = {}) => ({
   check: (x) => x >= min && (maxExclusive ? x < max : x <= max),
   expect: maxExclusive ? `in [${min}, ${max})` : `between ${min} and ${max}`,
@@ -71,8 +89,10 @@ export const IRIS_OPTION_KEYS = Object.freeze(Object.keys(IRIS_OPTION_SPECS));
 // Draft value for one key: strings for inputs/selects, booleans (or "" = trainer default) for
 // toggles, an array of names for caption_fields, "a, b" text for milestone steps, a pair of
 // strings for betas.
-function draftValue(spec, value) {
+export function draftValue(spec, value) {
   switch (spec.kind) {
+    case "json":
+      return value && typeof value === "object" ? JSON.stringify(value) : asText(value);
     case "bool":
       return typeof value === "boolean" ? value : "";
     case "strings":
@@ -80,6 +100,7 @@ function draftValue(spec, value) {
     case "ints":
       return Array.isArray(value) ? value.join(", ") : asText(value);
     case "betas":
+    case "size":
       return Array.isArray(value) && value.length === 2 ? value.map(numericDraft) : ["", ""];
     case "number":
     case "int":
@@ -101,8 +122,8 @@ function parseIntList(text) {
 
 // Parse one draft value. `{ value }` when set, `{}` when empty (= trainer/backbone default),
 // `{ invalid }` when the user typed something outside the key's domain.
-function parseOption(key, raw) {
-  const spec = IRIS_OPTION_SPECS[key];
+export function parseOption(key, raw, specs = IRIS_OPTION_SPECS) {
+  const spec = specs[key];
   const label = spec.label;
   switch (spec.kind) {
     case "choice": {
@@ -158,6 +179,25 @@ function parseOption(key, raw) {
         return { invalid: `${label} must both be numbers in [0, 1)` };
       }
       return { value: values };
+    }
+    case "size": {
+      // Depth training size [height, width]: multiples of 16 in [64, 2048] (depth.rs).
+      const pair = (Array.isArray(raw) ? raw : ["", ""]).map(numberFromDraft);
+      if (pair.some((side) => side === null || !Number.isInteger(side) || side < 64 || side > 2048 || side % 16)) {
+        return { invalid: `${label} sides must be multiples of 16 between 64 and 2048` };
+      }
+      return { value: pair };
+    }
+    case "json": {
+      const text = asText(raw).trim();
+      if (!text) return {};
+      try {
+        const value = JSON.parse(text);
+        if (value && typeof value === "object" && !Array.isArray(value)) return { value };
+      } catch {
+        // fall through
+      }
+      return { invalid: `${label} must be a JSON object` };
     }
     default:
       return {};
@@ -271,22 +311,24 @@ export function trainingLaneFromCapabilities(caps) {
   return null;
 }
 
-// The DECLARED floor(s) for this run, `[{ lane, gb }]`. A resolution between two declared rows
-// takes the next row up (iris.rs `iris_training_memory_floor_gb`); none above the table. With an
-// unknown lane, both lanes' floors.
-export function irisMemoryFloors(target, networkType, resolution, lane) {
+// The DECLARED floor(s) for this run, `[{ lane, gb }]`. `size` is the row key the target's table
+// is keyed by (`memoryFloors.key`: the resolution, or the micro-batch pixels for depth /
+// restoration). A size between two declared rows takes the next row up (iris.rs
+// `iris_training_memory_floor_gb`); none above the table. With an unknown lane, both lanes' floors.
+// A depth table has no artifact level (always a full fine-tune).
+export function irisMemoryFloors(target, networkType, size, lane) {
   const lanes = target?.memoryFloors?.lanes;
   if (!lanes || typeof lanes !== "object") return [];
   const artifact = asText(networkType).trim().toLowerCase() === "full" ? "full" : "adapter";
-  const wanted = Number(resolution);
+  const wanted = Number(size);
   const laneNames = lane ? [lane] : ["mlx", "candle"];
   return laneNames
     .map((name) => {
-      const rows = lanes[name]?.[artifact];
+      const rows = lanes[name]?.[artifact] ?? lanes[name];
       if (!rows) return null;
       const match = Object.entries(rows)
         .map(([row, gb]) => [Number(row), Number(gb)])
-        .filter(([row]) => Number.isFinite(wanted) && row >= wanted)
+        .filter(([row, gb]) => Number.isFinite(wanted) && Number.isFinite(gb) && row >= wanted)
         .sort((left, right) => left[0] - right[0])[0];
       return match ? { lane: name, gb: match[1] } : null;
     })
@@ -320,13 +362,17 @@ function jobNetworkType(job) {
 }
 
 // Terminal Iris training runs (newest first) a new run can resume or start from. The API is the
-// authority on whether a run left a durable checkpoint; this only narrows the picker.
-export function irisPreviousRuns(jobs, { projectId, fullOnly = false } = {}) {
+// authority on whether a run left a durable checkpoint; this only narrows the picker. `baseModel`
+// selects a depth / restoration target's runs (its plan's `target.baseModel`); without it, the
+// generation target's.
+export function irisPreviousRuns(jobs, { projectId, fullOnly = false, baseModel } = {}) {
   return (jobs ?? [])
     .filter(
       (job) =>
         job?.type === "lora_train" &&
-        jobTargetId(job) === IRIS_TRAINING_TARGET_ID &&
+        (baseModel
+          ? job.payload?.plan?.target?.baseModel === baseModel
+          : jobTargetId(job) === IRIS_TRAINING_TARGET_ID) &&
         terminalStatuses.has(job.status) &&
         (!projectId || job.projectId === projectId) &&
         (!fullOnly || jobNetworkType(job) === "full"),

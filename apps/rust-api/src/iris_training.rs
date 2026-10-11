@@ -18,7 +18,7 @@ use super::*;
 use crate::training::is_plain_relative_file;
 
 use sceneworks_core::training::iris::{
-    is_iris_training_kernel, IRIS_BASE_MODEL, IRIS_FAMILY, IRIS_GENERATION_TASK, IRIS_OPTIONS_KEY,
+    is_iris_training_kernel, IrisObjective, IRIS_BASE_MODEL, IRIS_FAMILY, IRIS_GENERATION_TASK,
     LOAD_FROM_JOB_KEY, RESUME_FROM_JOB_KEY,
 };
 use sceneworks_core::training::TrainingPlan;
@@ -32,6 +32,27 @@ pub(crate) const CHECKPOINT_MODEL_ID_KEY: &str = "checkpointModelId";
 const BACKBONE_CONFIG_FILE: &str = "config.yaml";
 const BACKBONE_WEIGHTS_FILE: &str = "model.safetensors";
 const CHECKPOINT_STATE_FILE: &str = "state.json";
+/// The third file of a depth / restoration task export (`gen_core::iris::downstream`).
+const EMPTY_PROMPT_FILE: &str = "empty_prompt.safetensors";
+
+/// The objective of a plan (`None` for a non-Iris plan).
+fn plan_objective(plan: &TrainingPlan) -> Option<IrisObjective> {
+    is_iris_training_kernel(&plan.target.kernel)
+        .then(|| IrisObjective::from_base_model(&plan.target.base_model))
+        .flatten()
+}
+
+/// The files of an objective's exported model directory.
+fn export_files(objective: IrisObjective) -> &'static [&'static str] {
+    match objective {
+        IrisObjective::Generation => &[BACKBONE_CONFIG_FILE, BACKBONE_WEIGHTS_FILE],
+        _ => &[
+            BACKBONE_CONFIG_FILE,
+            BACKBONE_WEIGHTS_FILE,
+            EMPTY_PROMPT_FILE,
+        ],
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,13 +107,17 @@ pub(crate) async fn training_data_walk(
 }
 
 fn plan_network_type(plan: &TrainingPlan) -> String {
+    let default = match plan_objective(plan) {
+        Some(IrisObjective::Depth | IrisObjective::Restoration) => "full",
+        _ => "lora",
+    };
     plan.config
         .advanced
         .get("networkType")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("lora")
+        .unwrap_or(default)
         .to_ascii_lowercase()
 }
 
@@ -168,6 +193,7 @@ async fn previous_iris_run(
     project_id: &str,
     job_id: &str,
     key: &str,
+    base_model: &str,
 ) -> Result<(JobSnapshot, TrainingPlan, PathBuf), ApiError> {
     if !job_id.starts_with("job_")
         || !job_id
@@ -206,9 +232,12 @@ async fn previous_iris_run(
         .ok_or_else(|| {
             ApiError::bad_request(format!("advanced.{key}: {job_id} has no training plan."))
         })?;
-    if !is_iris_training_kernel(&plan.target.kernel) || plan.target.base_model != IRIS_BASE_MODEL {
+    // A run continues / starts from a run of the SAME objective (generation, depth, restoration).
+    if !is_iris_training_kernel(&plan.target.kernel) || plan.target.base_model != base_model {
+        let task =
+            IrisObjective::from_base_model(base_model).map_or("", |objective| objective.task());
         return Err(ApiError::bad_request(format!(
-            "advanced.{key}: {job_id} is not an Iris 3B training run."
+            "advanced.{key}: {job_id} is not an Iris 3B {task} training run."
         )));
     }
     let output_dir = trusted_previous_output_dir(state, &job).await?;
@@ -223,9 +252,11 @@ pub(crate) async fn resolve_iris_run_sources(
     project_id: &str,
     plan: &mut TrainingPlan,
 ) -> Result<(), ApiError> {
-    if !is_iris_training_kernel(&plan.target.kernel) {
+    let Some(objective) = plan_objective(plan) else {
         return Ok(());
-    }
+    };
+    let options_key = objective.options_key();
+    let base_model = plan.target.base_model.clone();
     let resume_job = plan
         .config
         .advanced
@@ -242,14 +273,14 @@ pub(crate) async fn resolve_iris_run_sources(
         return Ok(());
     }
     let network_type = plan_network_type(plan);
-    let mut options = match plan.config.advanced.remove(IRIS_OPTIONS_KEY) {
+    let mut options = match plan.config.advanced.remove(options_key) {
         Some(Value::Object(map)) => map,
         _ => JsonObject::new(),
     };
 
     if let Some(job_id) = resume_job {
         let (_, previous, output_dir) =
-            previous_iris_run(state, project_id, &job_id, RESUME_FROM_JOB_KEY).await?;
+            previous_iris_run(state, project_id, &job_id, RESUME_FROM_JOB_KEY, &base_model).await?;
         if plan_network_type(&previous) != network_type {
             return Err(ApiError::bad_request(format!(
                 "advanced.{RESUME_FROM_JOB_KEY}: {job_id} trained a {} run; a resume continues the \
@@ -281,7 +312,7 @@ pub(crate) async fn resolve_iris_run_sources(
 
     if let Some(job_id) = load_job {
         let (_, previous, output_dir) =
-            previous_iris_run(state, project_id, &job_id, LOAD_FROM_JOB_KEY).await?;
+            previous_iris_run(state, project_id, &job_id, LOAD_FROM_JOB_KEY, &base_model).await?;
         if plan_network_type(&previous) != "full" {
             return Err(ApiError::bad_request(format!(
                 "advanced.{LOAD_FROM_JOB_KEY}: {job_id} trained an adapter; a full run starts \
@@ -313,8 +344,26 @@ pub(crate) async fn resolve_iris_run_sources(
     }
     plan.config
         .advanced
-        .insert(IRIS_OPTIONS_KEY.to_owned(), Value::Object(options));
+        .insert(options_key.to_owned(), Value::Object(options));
     Ok(())
+}
+
+/// Restoration's synthetic-degradation overrides (`iris_restore.degradation`), through the engine's
+/// own parser against the run's crop — refused at submit, not after the weights load. Aligned-pair
+/// datasets carry only `use_hflip` (the core dataset contract refuses the rest).
+pub(crate) fn check_restore_degradation_overrides(plan: &TrainingPlan) -> Result<(), ApiError> {
+    let Some(degradation) = plan
+        .config
+        .advanced
+        .get(sceneworks_core::training::iris::restore::RESTORE_OPTIONS_KEY)
+        .and_then(|options| options.get("degradation"))
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(());
+    };
+    sceneworks_worker::check_restore_degradation(degradation, plan.config.resolution).map_err(
+        |error| ApiError::bad_request(format!("advanced.iris_restore.degradation: {error}")),
+    )
 }
 
 /// The exported full model's directory inside a full run's output dir (`<output_dir>/<stem>`).
@@ -323,21 +372,29 @@ pub(crate) fn iris_full_export_dir(output_dir: &FsPath, file_name: &str) -> Opti
 }
 
 /// Shape the submit-time (descriptive) manifest entry for an Iris run: an adapter carries its task
-/// identity; a full run describes the exported model directory instead of Mage's transformer tree.
+/// identity; a full run (every depth / restoration run) describes the exported model directory
+/// instead of Mage's transformer tree.
 pub(crate) fn shape_iris_manifest_entry(
     entry: &mut JsonObject,
     output_dir: &FsPath,
     file_name: &str,
     is_full: bool,
+    base_model: &str,
 ) {
+    let objective = IrisObjective::from_base_model(base_model).unwrap_or(IrisObjective::Generation);
     entry.insert(
         "irisTask".to_owned(),
-        Value::String(IRIS_GENERATION_TASK.to_owned()),
+        Value::String(objective.task().to_owned()),
     );
     if !is_full {
         return;
     }
     entry.remove("importSourceShape");
+    if objective != IrisObjective::Generation {
+        // A task model belongs to its task surface (depth / restoration), not the image pickers.
+        entry.remove("triggerWords");
+        entry.insert("type".to_owned(), Value::String("utility".to_owned()));
+    }
     if let (Some(export), Some(stem)) = (
         iris_full_export_dir(output_dir, file_name),
         file_stem(file_name),
@@ -348,26 +405,41 @@ pub(crate) fn shape_iris_manifest_entry(
         );
         entry.insert(
             "files".to_owned(),
-            json!([
-                format!("{stem}/{BACKBONE_CONFIG_FILE}"),
-                format!("{stem}/{BACKBONE_WEIGHTS_FILE}")
-            ]),
+            json!(export_files(objective)
+                .iter()
+                .map(|file| format!("{stem}/{file}"))
+                .collect::<Vec<_>>()),
         );
     }
     entry.insert(
         TRAINED_CHECKPOINT_KEY.to_owned(),
-        trained_checkpoint_block(),
+        trained_checkpoint_block(objective),
     );
 }
 
-fn trained_checkpoint_block() -> Value {
+fn trained_checkpoint_block(objective: IrisObjective) -> Value {
     json!({
-        "engineModel": IRIS_BASE_MODEL,
+        "engineModel": objective.base_model(),
         "family": IRIS_FAMILY,
-        "task": IRIS_GENERATION_TASK,
-        "baseModel": IRIS_BASE_MODEL,
-        "layout": "iris_backbone_directory"
+        "task": objective.task(),
+        "baseModel": objective.base_model(),
+        "layout": match objective {
+            IrisObjective::Generation => "iris_backbone_directory",
+            IrisObjective::Depth => "iris_depth_export",
+            IrisObjective::Restoration => "iris_upscaler_export",
+        }
     })
+}
+
+/// The objective of ANY trained Iris model entry (generation, depth or restoration): the engine whose
+/// surface it carries and the task pickers that list it. Builtin entries never qualify.
+pub(crate) fn trained_task_checkpoint(entry: &JsonObject) -> Option<IrisObjective> {
+    if entry.get("catalogScope").and_then(Value::as_str) == Some("builtin") {
+        return None;
+    }
+    let block = entry.get(TRAINED_CHECKPOINT_KEY)?.as_object()?;
+    let objective = IrisObjective::from_base_model(block.get("engineModel")?.as_str()?)?;
+    (block.get("task").and_then(Value::as_str) == Some(objective.task())).then_some(objective)
 }
 
 /// Whether a user model entry is a trained checkpoint of a builtin generation engine — its engine
@@ -388,7 +460,7 @@ pub(crate) fn trained_checkpoint_engine_model(entry: &JsonObject) -> Option<&str
 /// catalog entry every time the catalog is read, so a registered export follows later changes to
 /// the engine entry (new adapter families, limits, capabilities) instead of a registration-time
 /// snapshot.
-const ENGINE_SURFACE_KEYS: [&str; 10] = [
+const ENGINE_SURFACE_KEYS: [&str; 11] = [
     "type",
     "adapter",
     "capabilities",
@@ -399,11 +471,14 @@ const ENGINE_SURFACE_KEYS: [&str; 10] = [
     "macOnly",
     "mlx",
     "candle",
+    // The depth task's job-admission declaration (sc-25682): a trained depth model is the same
+    // architecture, so it carries its engine's declaration.
+    "depth",
 ];
 
 /// Overlay a trained checkpoint's engine surface ([`ENGINE_SURFACE_KEYS`]) from its engine's
 /// builtin entry — found in `builtin` (the configured manifest), else the compiled-in manifest.
-/// A no-op for any entry that is not a trained checkpoint.
+/// A no-op for any entry that is not a trained checkpoint (generation, depth or restoration).
 pub(crate) fn overlay_trained_checkpoint_surface(
     entry: &mut Value,
     builtin: &[Value],
@@ -411,11 +486,10 @@ pub(crate) fn overlay_trained_checkpoint_surface(
     let Some(object) = entry.as_object_mut() else {
         return Ok(());
     };
-    let Some(engine) = trained_checkpoint_engine_model(object).map(str::to_owned) else {
+    let Some(engine) = trained_task_checkpoint(object).map(IrisObjective::base_model) else {
         return Ok(());
     };
-    let is_engine =
-        |candidate: &Value| candidate.get("id").and_then(Value::as_str) == Some(&engine);
+    let is_engine = |candidate: &Value| candidate.get("id").and_then(Value::as_str) == Some(engine);
     let engine_entry = match builtin.iter().find(|candidate| is_engine(candidate)) {
         Some(found) => Some(found.clone()),
         None => crate::models::embedded_builtin_catalog_entry(is_engine)?,
@@ -436,88 +510,139 @@ pub(crate) fn overlay_trained_checkpoint_surface(
     Ok(())
 }
 
-/// Register a completed (or exported-on-cancel) Iris FULL run's export as a user image model.
-/// Same trusted-input discipline as the Mage registrar: the directory is recomputed from the
-/// validated id + the plan's validated file stem, and its shape is checked on disk.
+/// Register a completed (or exported-on-cancel) Iris FULL run's export as a user model carrying its
+/// task identity: a generation backbone (an image model), or a depth / restoration task export (a
+/// utility the depth / restoration job paths select). Same trusted-input discipline as the Mage
+/// registrar: the directory is recomputed from the validated id + the plan's validated file stem,
+/// and its shape is checked on disk.
 pub(crate) fn iris_full_checkpoint_entry(
     job: &JobSnapshot,
     manifest_entry: JsonObject,
     output_dir: &FsPath,
     model_id: &str,
 ) -> Result<JsonObject, ApiError> {
-    let file_name = job
-        .payload
-        .get("plan")
+    let plan = job.payload.get("plan");
+    let file_name = plan
         .and_then(|plan| plan.get("output"))
         .and_then(|output| output.get("fileName"))
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let objective = plan
+        .and_then(|plan| plan.get("target"))
+        .and_then(|target| target.get("baseModel"))
+        .and_then(Value::as_str)
+        .and_then(IrisObjective::from_base_model)
+        .unwrap_or(IrisObjective::Generation);
     let export = iris_full_export_dir(output_dir, file_name).ok_or_else(|| {
         ApiError::internal("The Iris full run has no valid output name; skipping registration")
     })?;
-    if !export.join(BACKBONE_CONFIG_FILE).is_file() || !export.join(BACKBONE_WEIGHTS_FILE).is_file()
-    {
+    let files = export_files(objective);
+    if let Some(missing) = files.iter().find(|file| !export.join(file).is_file()) {
         return Err(ApiError::internal(format!(
-            "No complete Iris full-model export under {} (expected {BACKBONE_CONFIG_FILE} and \
-             {BACKBONE_WEIGHTS_FILE}); skipping model registration",
+            "No complete Iris {} export under {} (missing {missing}); skipping model registration",
+            objective.task(),
             export.display()
         )));
     }
     let mut entry = manifest_entry;
-    // The generation surface is the ENGINE's, overlaid at catalog read time
-    // ([`overlay_trained_checkpoint_surface`]); only the identity is stored here.
+    // The engine surface is overlaid at catalog read time ([`overlay_trained_checkpoint_surface`]);
+    // only the identity is stored here.
     for key in ENGINE_SURFACE_KEYS {
         entry.remove(key);
     }
-    entry.insert("type".to_owned(), Value::String("image".to_owned()));
     let name = entry
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or(model_id)
         .to_owned();
-    entry.insert(
-        "ui".to_owned(),
-        json!({
-            "label": name,
-            "description": format!(
+    let (entry_type, description, recommended) = match objective {
+        IrisObjective::Generation => (
+            "image",
+            format!(
                 "Iris 3B full fine-tune trained in SceneWorks (job {}). Renders with the Iris 3B \
                  generation engine and the installed Qwen3-VL text encoder.",
                 job.id
             ),
-            "recommendedFor": ["text_to_image"]
+            "text_to_image",
+        ),
+        IrisObjective::Depth => (
+            "utility",
+            format!(
+                "Iris 3B depth model trained in SceneWorks (job {}). Pick it in the Image Editor or \
+                 Library depth action; it needs no text encoder.",
+                job.id
+            ),
+            "depth",
+        ),
+        IrisObjective::Restoration => (
+            "utility",
+            format!(
+                "Iris 3B restoration model trained in SceneWorks (job {}). Pick it wherever Iris \
+                 restores (Image Studio post-processing, Image Editor, Library).",
+                job.id
+            ),
+            "image_upscale",
+        ),
+    };
+    entry.insert("type".to_owned(), Value::String(entry_type.to_owned()));
+    entry.insert(
+        "ui".to_owned(),
+        json!({
+            "label": name,
+            "description": description,
+            "recommendedFor": [recommended]
         }),
     );
     entry.insert("id".to_owned(), Value::String(model_id.to_owned()));
     entry.insert("family".to_owned(), Value::String(IRIS_FAMILY.to_owned()));
     entry.insert(
         "baseModel".to_owned(),
-        Value::String(IRIS_BASE_MODEL.to_owned()),
+        Value::String(objective.base_model().to_owned()),
     );
     entry.insert(
         "irisTask".to_owned(),
-        Value::String(IRIS_GENERATION_TASK.to_owned()),
+        Value::String(objective.task().to_owned()),
     );
     entry.insert(
         TRAINED_CHECKPOINT_KEY.to_owned(),
-        trained_checkpoint_block(),
+        trained_checkpoint_block(objective),
     );
     entry.insert(
         "source".to_owned(),
         json!({ "provider": "training", "path": format!("models/finetunes/{model_id}") }),
     );
-    entry.insert(
-        "files".to_owned(),
-        json!([BACKBONE_CONFIG_FILE, BACKBONE_WEIGHTS_FILE]),
-    );
+    entry.insert("files".to_owned(), json!(files));
     entry.insert(
         "paths".to_owned(),
         json!({ "model": export.display().to_string() }),
     );
     entry.remove("importSourceShape");
     entry.remove("downloads");
+    entry.remove("triggerWords");
     entry.insert("scope".to_owned(), Value::String("global".to_owned()));
     entry.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
     Ok(entry)
+}
+
+/// Refuse a depth / restoration job naming a model that is not a registered trained model of that
+/// task (the worker re-checks the export's own task identity before it loads).
+pub(crate) async fn validate_trained_task_model(
+    state: &AppState,
+    model_id: &str,
+    objective: IrisObjective,
+) -> Result<(), ApiError> {
+    let entry = crate::models::resolve_model_manifest_entry(state, model_id)
+        .await
+        .map_err(|_| {
+            ApiError::bad_request(format!("irisModel: no model {model_id} in the catalog"))
+        })?;
+    match entry.as_object().and_then(trained_task_checkpoint) {
+        Some(found) if found == objective => Ok(()),
+        _ => Err(ApiError::bad_request(format!(
+            "irisModel: {model_id} is not a trained Iris {} model",
+            objective.task()
+        ))),
+    }
 }
 
 /// The export directory a registered Iris checkpoint loads from, confined under the app's
@@ -584,7 +709,7 @@ pub(crate) async fn alias_trained_checkpoint(
     let mut block = object
         .get(TRAINED_CHECKPOINT_KEY)
         .cloned()
-        .unwrap_or_else(trained_checkpoint_block);
+        .unwrap_or_else(|| trained_checkpoint_block(IrisObjective::Generation));
     if let Some(block) = block.as_object_mut() {
         block.insert("modelId".to_owned(), Value::String(requested.to_owned()));
     }

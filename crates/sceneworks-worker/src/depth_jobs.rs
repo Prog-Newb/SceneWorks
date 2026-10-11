@@ -114,7 +114,20 @@ where
         ),
     )
     .await?;
-    let export = resolve_depth_export(settings)?;
+    // A trained depth model (sc-25687) replaces the release export; its task is checked.
+    let export = match request.trained_model() {
+        Some(model) => {
+            let dir = crate::iris_task_training::trained_task_export_dir(
+                &settings.data_dir,
+                model,
+                IrisTask::Depth,
+            )
+            .map_err(|detail| typed(WRONG_TASK, detail))?;
+            TaskExport::from_dir(&dir, IrisTask::Depth, DEPTH_MODEL_ID)
+                .map_err(|error| typed(WRONG_TASK, error))?
+        }
+        None => resolve_depth_export(settings)?,
+    };
 
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store
@@ -665,7 +678,39 @@ fn depth_asset_fact(inputs: DepthFactInputs<'_>) -> WorkerResult<Value> {
     } = inputs;
     let (input_resample, output_resample) = (m.input_resample, m.output_resample);
     let resolution = resolution_json(request.resolution);
-    Ok(json!({
+    let mut fact = depth_asset_fact_json(
+        outputs,
+        request,
+        source_name,
+        source,
+        m,
+        resolution,
+        input_resample,
+        output_resample,
+    );
+    // A trained depth model (sc-25687): the catalog id of the Training Studio export used, on the
+    // asset (`model`), its reload settings (`irisModel`) and its model identity (`trainedModelId`).
+    if let Some(model) = request.trained_model() {
+        fact["model"] = json!(model);
+        fact["rawAdapterSettings"]["depth"]["irisModel"] = json!(model);
+        fact["depth"]["model"]["trainedModelId"] = json!(model);
+        fact["depth"]["model"]["weightsSubdir"] = Value::Null;
+    }
+    Ok(fact)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn depth_asset_fact_json(
+    outputs: &DepthOutputPaths,
+    request: &ImageDepthJobPayload,
+    source_name: &str,
+    source: &SourceGeometry,
+    m: &DepthMetadata,
+    resolution: Value,
+    input_resample: &str,
+    output_resample: &str,
+) -> Value {
+    json!({
         "assetId": outputs.asset_id,
         "type": DEPTH_ASSET_TYPE,
         "mediaPath": outputs.npy_rel,
@@ -735,7 +780,7 @@ fn depth_asset_fact(inputs: DepthFactInputs<'_>) -> WorkerResult<Value> {
                 "computeDtype": m.compute_dtype,
             },
         },
-    }))
+    })
 }
 
 fn depth_job_result(

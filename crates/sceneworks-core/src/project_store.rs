@@ -1948,6 +1948,19 @@ impl ProjectStore {
         )
     }
 
+    /// Install or remove an Iris training sidecar of a dataset item (sc-25687 / sc-25688).
+    pub fn set_iris_item_sidecar(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_id: &str,
+        sidecar: &crate::training_store::IrisItemSidecar,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path)
+            .set_iris_item_sidecar(project_id, dataset_id, item_id, sidecar)
+    }
+
     /// Persist freshly-extracted Tier-0 scalars onto dataset items as the readiness cache (sc-6533).
     /// Locked like any dataset mutation; a metadata-only write (no version/`updated_at` bump).
     pub fn cache_dataset_tier0_scalars(

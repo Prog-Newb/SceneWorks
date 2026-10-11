@@ -2144,9 +2144,15 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
         }
         // Iris-3B generation (sc-25686): `candle-gen-iris` registers ONE trainer under the
         // generation install's id, serving LoRA, LoKr and the full (weights- or random-init) run.
-        "iris_train" => {
-            base_model == "iris_3b" && (is_adapter || network_type.eq_ignore_ascii_case("full"))
-        }
+        // Depth (sc-25687) is always a full fine-tune; restoration (sc-25688) is the full recipe or
+        // HYPIR's LoRA / LoKr arm (merged into the export).
+        "iris_train" => match base_model {
+            "iris_3b" | "iris_3b_restore" => {
+                is_adapter || network_type.eq_ignore_ascii_case("full")
+            }
+            "iris_3b_depth" => network_type.eq_ignore_ascii_case("full"),
+            _ => false,
+        },
         // Existing native families keep their established admission. Their trainers perform the
         // final typed validation; Krea ControlNet deliberately has no adapter-kind selector.
         _ => true,

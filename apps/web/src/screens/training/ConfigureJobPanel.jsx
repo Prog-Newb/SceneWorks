@@ -5,6 +5,7 @@ import { Icon } from "../../components/Icons.jsx";
 import { RequiredModelsNotice } from "../../components/RequiredModelsNotice.jsx";
 import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
+import { IrisTaskOptions } from "./IrisTaskOptions.jsx";
 import { IrisTrainingOptions } from "./IrisTrainingOptions.jsx";
 import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Validation.jsx";
 import {
@@ -20,7 +21,8 @@ import {
   timestepTypeOptionsForTarget,
   trainingAdapterVersionLabels,
 } from "../../training/trainingConfig.js";
-import { irisMemoryFloors, irisUpstreamPromptsOn, isIrisTarget } from "../../training/irisOptions.js";
+import { irisMemoryFloors, irisObjective, irisUpstreamPromptsOn } from "../../training/irisOptions.js";
+import { irisFloorSize } from "../../training/irisTaskOptions.js";
 
 // Configure-training-job panel. The Purpose zone of the Training Studio under the
 // page-frame standard (sc-10475): one work-panel holding the twelve basic plan
@@ -122,10 +124,18 @@ export function ConfigureJobPanel({
   const advertisedPrecisions = choiceOptionsForTarget(selectedTarget, "mixedPrecisions", null);
   const checkpointingUnsupported = gradientCheckpointingUnsupported(selectedTarget);
   const sampleCountRange = Array.isArray(selectedTarget?.limits?.sampleCount) ? selectedTarget.limits.sampleCount : null;
-  const iris = isIrisTarget(selectedTarget);
+  // Iris (sc-25685): generation shows the generation options; depth / restoration (sc-25687 /
+  // sc-25688) take no prompt, no sampler and no trigger word, and always produce a model.
+  const objective = irisObjective(selectedTarget);
+  const iris = objective === "generation";
+  const irisTask = objective === "depth" || objective === "restoration";
+  const depthTask = objective === "depth";
+  const producesModel = isFullFinetune || irisTask;
   const upstreamPrompts = iris && irisUpstreamPromptsOn(configDraft);
-  const memoryFloors = iris
-    ? irisMemoryFloors(selectedTarget, configDraft.networkType, configDraft.resolution, irisContext.trainingLane ?? null)
+  const floorSize = irisFloorSize(selectedTarget, configDraft);
+  const pixelFloors = selectedTarget?.memoryFloors?.key === "microBatchPixels";
+  const memoryFloors = objective
+    ? irisMemoryFloors(selectedTarget, configDraft.networkType, floorSize, irisContext.trainingLane ?? null)
     : [];
   const laneNames = { mlx: "MLX (Apple Silicon unified memory)", candle: "Candle/CUDA (GPU memory)" };
   const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
@@ -238,13 +248,15 @@ export function ConfigureJobPanel({
                   `networkType`, so the RUN decides this label, not the target alone. Kept as an
                   explicit three-way branch (rather than `outputKindLabel`) so a target that
                   declares no `outputKind` still reads "LoRA name" exactly as before. */}
-              {isFullFinetune ? "Base checkpoint name" : isControlTarget ? "Control branch name" : "LoRA name"}
+              {producesModel ? "Base checkpoint name" : isControlTarget ? "Control branch name" : "LoRA name"}
               <input onChange={(event) => updateConfigDraft("outputName", event.target.value)} value={configDraft.outputName ?? ""} />
             </label>
-            <label>
-              Trigger phrase
-              <input onChange={(event) => updateConfigDraft("triggerWord", event.target.value)} value={configDraft.triggerWord ?? ""} />
-            </label>
+            {irisTask ? null : (
+              <label>
+                Trigger phrase
+                <input onChange={(event) => updateConfigDraft("triggerWord", event.target.value)} value={configDraft.triggerWord ?? ""} />
+              </label>
+            )}
             <label>
               Steps
               <input
@@ -268,7 +280,7 @@ export function ConfigureJobPanel({
                 global user manifest — there is no project-scoped model store to honour a "project"
                 scope with. Replace the picker with the explanation rather than leaving a control
                 that silently does nothing (the sc-14056 gradient-checkpointing precedent below). */}
-            {isFullFinetune ? (
+            {producesModel ? (
               <label>
                 Output scope
                 <p className="training-field-hint">
@@ -289,25 +301,29 @@ export function ConfigureJobPanel({
                 </select>
               </label>
             )}
-            <label>
-              Sample count
-              <input
-                max={sampleCountRange?.[1]}
-                min="0"
-                onChange={(event) => updateConfigDraft("sampleCount", event.target.value)}
-                type="number"
-                value={configDraft.sampleCount ?? ""}
-                {...invalidProps(configValidity, "sampleCount")}
-              />
-            </label>
-            <label>
-              Sample steps
-              <input
-                onChange={(event) => updateConfigDraft("sampleSteps", event.target.value)}
-                type="number"
-                value={configDraft.sampleSteps ?? ""}
-              />
-            </label>
+            {irisTask ? null : (
+              <>
+                <label>
+                  Sample count
+                  <input
+                    max={sampleCountRange?.[1]}
+                    min="0"
+                    onChange={(event) => updateConfigDraft("sampleCount", event.target.value)}
+                    type="number"
+                    value={configDraft.sampleCount ?? ""}
+                    {...invalidProps(configValidity, "sampleCount")}
+                  />
+                </label>
+                <label>
+                  Sample steps
+                  <input
+                    onChange={(event) => updateConfigDraft("sampleSteps", event.target.value)}
+                    type="number"
+                    value={configDraft.sampleSteps ?? ""}
+                  />
+                </label>
+              </>
+            )}
             <label>
               Sample cadence
               <input
@@ -323,9 +339,33 @@ export function ConfigureJobPanel({
             <p className="training-field-hint" aria-label="Declared memory floor">
               Memory floor (declared, not yet measured):{" "}
               {memoryFloors.map((floor) => `${laneNames[floor.lane] ?? floor.lane} ${floor.gb} GB`).join(" · ")} for a{" "}
-              {configDraft.resolution}px {isFullFinetune ? "full fine-tune" : "adapter"} run. On a Mac the floor must fit
+              {pixelFloors ? `${floorSize}-pixel micro-batch` : `${floorSize}px`} {isFullFinetune ? "full fine-tune" : "adapter"} run. On a Mac the floor must fit
               after the macOS/app memory reserve. A machine under its floor is refused before the model loads.
+              {irisTask && selectedTarget.memoryFloors?.basis ? ` ${selectedTarget.memoryFloors.basis}` : null}
             </p>
+          ) : null}
+
+          {irisTask ? (
+            <>
+              <IrisTaskOptions
+                configDraft={configDraft}
+                configValidity={configValidity}
+                objective={objective}
+                onCheckDataset={activeDataset?.id ? irisContext.checkDataset : undefined}
+                previousRuns={irisContext.previousRuns}
+                updateConfigDraft={updateConfigDraft}
+              />
+              <RequiredModelsNotice
+                detail="The restoration loss reads these training-only weights; install them in Models before starting."
+                downloadJobs={controlModelDownloadJobs}
+                feature="Iris restoration training"
+                models={irisContext.missingResources ?? []}
+                onCancelJob={onCancelJob}
+                onDownload={onDownloadModel}
+                onOpenModels={onOpenModels}
+                onOpenQueue={onOpenQueue}
+              />
+            </>
           ) : null}
 
           {ltxWorkflows.length ? (
@@ -456,24 +496,28 @@ export function ConfigureJobPanel({
                   ))}
                 </select>
               </label>
-              <label>
-                Rank
-                <input
-                  onChange={(event) => updateConfigDraft("rank", event.target.value)}
-                  type="number"
-                  value={configDraft.rank ?? ""}
-                  {...invalidProps(configValidity, "rank")}
-                />
-              </label>
-              <label>
-                Alpha
-                <input
-                  onChange={(event) => updateConfigDraft("alpha", event.target.value)}
-                  type="number"
-                  value={configDraft.alpha ?? ""}
-                  {...invalidProps(configValidity, "alpha")}
-                />
-              </label>
+              {irisTask && isFullFinetune ? null : (
+                <>
+                  <label>
+                    Rank
+                    <input
+                      onChange={(event) => updateConfigDraft("rank", event.target.value)}
+                      type="number"
+                      value={configDraft.rank ?? ""}
+                      {...invalidProps(configValidity, "rank")}
+                    />
+                  </label>
+                  <label>
+                    Alpha
+                    <input
+                      onChange={(event) => updateConfigDraft("alpha", event.target.value)}
+                      type="number"
+                      value={configDraft.alpha ?? ""}
+                      {...invalidProps(configValidity, "alpha")}
+                    />
+                  </label>
+                </>
+              )}
               {/* Real hyperparameters the config validates (sc-10689). They live here
                   beside the other numeric knobs so every `> 0` error the rule set can
                   raise names an input the user can reach. The draft always seeds a
@@ -578,6 +622,8 @@ export function ConfigureJobPanel({
                   {...invalidProps(configValidity, "lrWarmupSteps")}
                 />
               </label>
+              {irisTask ? null : (
+                <>
               <label>
                 Timestep type
                 <select onChange={(event) => updateConfigDraft("timestepType", event.target.value)} value={configDraft.timestepType ?? ""}>
@@ -602,6 +648,8 @@ export function ConfigureJobPanel({
                   ))}
                 </select>
               </label>
+                </>
+              )}
               <label>
                 Loss type
                 <select
@@ -631,6 +679,7 @@ export function ConfigureJobPanel({
                   </select>
                 </label>
               ) : null}
+              {depthTask ? null : (
               <label>
                 Resolution
                 <select
@@ -646,6 +695,7 @@ export function ConfigureJobPanel({
                   ))}
                 </select>
               </label>
+              )}
               <label>
                 Precision
                 {advertisedPrecisions && !requiredFullPrecision ? (
@@ -669,17 +719,20 @@ export function ConfigureJobPanel({
                   </span>
                 ) : null}
               </label>
-              <label>
-                Guidance scale
-                <input
-                  onChange={(event) => updateConfigDraft("sampleGuidanceScale", event.target.value)}
-                  step="0.1"
-                  type="number"
-                  value={configDraft.sampleGuidanceScale ?? ""}
-                />
-              </label>
+              {irisTask ? null : (
+                <label>
+                  Guidance scale
+                  <input
+                    onChange={(event) => updateConfigDraft("sampleGuidanceScale", event.target.value)}
+                    step="0.1"
+                    type="number"
+                    value={configDraft.sampleGuidanceScale ?? ""}
+                  />
+                </label>
+              )}
             </div>
 
+            {irisTask ? null : (
             <label className="training-sample-prompts">
               Sample prompts
               <textarea
@@ -695,6 +748,7 @@ export function ConfigureJobPanel({
                   : "One prompt per line. Renders one preview per prompt, up to the sample count."}
               </span>
             </label>
+            )}
 
             <div className="training-advanced-toggles">
               {checkpointingUnsupported ? (

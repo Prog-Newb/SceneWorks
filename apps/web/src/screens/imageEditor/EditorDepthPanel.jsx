@@ -4,11 +4,13 @@ import { terminalStatuses } from "../../constants.js";
 import { useAppContext } from "../../context/AppContext.js";
 import { AssetThumbnail } from "../../components/assetMedia.jsx";
 import { DepthResolutionFields } from "../../components/DepthResolutionFields.jsx";
+import { TrainedIrisModelSelect } from "../../components/IrisRestoreControls.jsx";
 import {
   DEFAULT_DEPTH_RESOLUTION,
   DEPTH_ENDPOINT,
   buildDepthJobBody,
   depthAvailability,
+  depthModelFromAsset,
   depthResolutionError,
   depthSettingsFromAsset,
   isDepthAsset,
@@ -34,6 +36,7 @@ export function EditorDepthPanel({ working, dirty }) {
     token = "",
   } = useAppContext();
   const [resolution, setResolution] = useState(DEFAULT_DEPTH_RESOLUTION);
+  const [irisModel, setIrisModel] = useState("");
   const [jobId, setJobId] = useState(null);
   const [submitError, setSubmitError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -72,6 +75,7 @@ export function EditorDepthPanel({ working, dirty }) {
         sourceAssetId,
         resolution,
         displayName: working?.source?.name ?? undefined,
+        irisModel,
       });
       const created = await apiFetch(DEPTH_ENDPOINT, token, { method: "POST", body: JSON.stringify(body) });
       if (!created?.id) throw new Error("The job response did not include an id.");
@@ -91,6 +95,13 @@ export function EditorDepthPanel({ working, dirty }) {
           Estimates relative depth (Iris-3B) from the saved image and saves it as a new Library asset: the raw float32
           map (.npy, not metric) plus a colorized preview. The image itself is not changed.
         </p>
+        <TrainedIrisModelSelect
+          models={models}
+          onChange={setIrisModel}
+          releaseLabel="Iris 3B Depth (release)"
+          task="depth"
+          value={irisModel}
+        />
         <DepthResolutionFields
           idPrefix="editor-depth"
           onChange={setResolution}
@@ -151,7 +162,14 @@ export function EditorDepthPanel({ working, dirty }) {
                   <span className="ie-note">
                     {settings.mode === "native" ? "Native" : `Max side ${settings.maxSide}px`}
                   </span>
-                  <button className="ie-btn" onClick={() => setResolution(settings)} type="button">
+                  <button
+                    className="ie-btn"
+                    onClick={() => {
+                      setResolution(settings);
+                      setIrisModel(depthModelFromAsset(asset));
+                    }}
+                    type="button"
+                  >
                     Use these settings
                   </button>
                 </li>

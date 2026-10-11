@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { configDraftFromTarget, configValidation } from "../../training/trainingConfig.js";
-import { irisJob, irisTarget } from "../../training/iris.testSupport.js";
+import { irisDepthTarget, irisJob, irisRestoreTarget, irisTarget } from "../../training/iris.testSupport.js";
 import { summarize } from "../../validation/issues.js";
 import { ConfigureJobPanel } from "./ConfigureJobPanel.jsx";
 
@@ -672,5 +672,55 @@ describe("ConfigureJobPanel — Iris", () => {
     expect(labelled("Sample cadence", "input").getAttribute("aria-invalid")).toBe("true");
     expect(labelled("Checkpoint cadence", "input").getAttribute("aria-invalid")).toBeNull();
     expect(submitButton().disabled).toBe(true);
+  });
+});
+
+describe("Iris depth / restoration (sc-25687 / sc-25688)", () => {
+  // A label's own text (its direct text nodes), not its control's options.
+  const labels = () =>
+    [...container.querySelectorAll("label")].map((label) =>
+      [...label.childNodes].filter((node) => node.nodeType === 3).map((node) => node.textContent).join("").trim(),
+    );
+  const mountTask = (selectedTarget, extra = {}) => {
+    const configDraft = { ...configDraftFromTarget(selectedTarget, DATASET, ["auto"]), outputName: "out" };
+    const configValidity = summarize(configValidation(configDraft, { activeDataset: DATASET, selectedTarget }));
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({ selectedTarget, configDraft, configValidity, showAdvancedConfig: true, isFullFinetune: configDraft.networkType === "full", ...extra })}
+      />,
+    );
+    return configValidity;
+  };
+
+  it("hides the prompt/sampler controls, shows the start, size and invalid-example policy, and is ready", () => {
+    const validity = mountTask(irisDepthTarget(), { irisContext: { checkDataset: async () => ({}) } });
+    expect(validity.ready).toBe(true);
+    const shown = labels();
+    for (const hidden of ["Trigger phrase", "Sample count", "Sample steps", "Timestep type", "Guidance scale", "Rank", "Resolution"]) {
+      expect(shown).not.toContain(hidden);
+    }
+    expect(container.querySelector(".training-sample-prompts textarea")).toBeNull();
+    expect(shown).toEqual(expect.arrayContaining(["Start from", "Training size height", "Invalid examples"]));
+    expect([...container.querySelectorAll("button")].map((button) => button.textContent)).toContain("Check dataset");
+    expect(container.textContent).toContain("Base checkpoint name");
+  });
+
+  it("keeps rank for a restoration adapter and reports the dataset check", async () => {
+    const report = {
+      policy: "synthetic", trainable: 3, invalid: 0, errors: 1, ok: false,
+      items: [{ itemId: "i1", displayName: "bad.png", status: "error", reason: "unreadable" }],
+    };
+    mountTask(irisRestoreTarget(), { irisContext: { checkDataset: async () => report } });
+    expect(labels()).not.toContain("Rank");
+    expect(labels()).toContain("Resolution");
+    const check = [...container.querySelectorAll("button")].find((button) => button.textContent === "Check dataset");
+    await act(async () => check.click());
+    const status = container.querySelector('[aria-label="Dataset check"]');
+    expect(status.textContent).toContain("3 trainable · 0 invalid · 1 unreadable");
+    expect(status.textContent).toContain("bad.png: unreadable");
+
+    const lora = { ...configDraftFromTarget(irisRestoreTarget(), DATASET, ["auto"]), outputName: "out", networkType: "lora" };
+    mount(<ConfigureJobPanel {...baseProps({ selectedTarget: irisRestoreTarget(), configDraft: lora, showAdvancedConfig: true })} />);
+    expect(labels()).toContain("Rank");
   });
 });

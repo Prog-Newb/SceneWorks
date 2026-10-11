@@ -1,11 +1,36 @@
 import React, { useEffect, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
+import { useAppContextOptional } from "../context/AppContext.js";
 import {
   IRIS_INPUT_SIZINGS,
   IRIS_SCALE_PRESETS,
   normalizeIrisScale,
   summarizeRestorePlans,
+  trainedTaskModels,
 } from "../irisRestore.js";
+
+// The trained Iris model picker (sc-25687 depth / sc-25688 restoration): shown only when a Training
+// Studio run of `task` is installed (or a reopened setting names one). "" = the release export.
+// `models` defaults to the app catalog.
+export function TrainedIrisModelSelect({ task, value, onChange, models, releaseLabel, disabled = false }) {
+  const catalog = useAppContextOptional()?.models;
+  const trained = trainedTaskModels(models ?? catalog, task);
+  if (!trained.length && !value) return null;
+  return (
+    <label className="iris-restore-row">
+      Model
+      <select aria-label={`Iris ${task} model`} disabled={disabled} onChange={(event) => onChange(event.target.value)} value={value ?? ""}>
+        <option value="">{releaseLabel}</option>
+        {trained.map((model) => (
+          <option key={model.id} value={model.id}>
+            {model.name ?? model.id}
+          </option>
+        ))}
+        {value && !trained.some((model) => model.id === value) ? <option value={value}>{value} (not installed)</option> : null}
+      </select>
+    </label>
+  );
+}
 
 // The Iris restoration controls (sc-25683) shared by the Image Studio post-processing pass, the
 // Image Editor upscale tool and the Library batch panel: scale (presets + any positive value),
@@ -16,7 +41,7 @@ import {
 // `{ projectId, assetIds }`), or null when there is nothing to plan yet. `onStatus` reports
 // `{ ready, blocked, error }` so the host can gate its Run button: a refused plan (or an invalid
 // scale) blocks submission rather than being silently changed.
-export function IrisRestoreControls({ value, onChange, planBody = null, token = "", disabled = false, onStatus, idPrefix = "iris" }) {
+export function IrisRestoreControls({ value, onChange, planBody = null, token = "", disabled = false, onStatus, idPrefix = "iris", models }) {
   const [scaleText, setScaleText] = useState(String(value?.scale ?? 4));
   const [preview, setPreview] = useState({ state: "idle", lines: [], error: null, blocked: false });
   const statusRef = useRef(onStatus);
@@ -75,6 +100,14 @@ export function IrisRestoreControls({ value, onChange, planBody = null, token = 
 
   return (
     <div className="iris-restore-controls">
+      <TrainedIrisModelSelect
+        disabled={disabled}
+        models={models}
+        onChange={(irisModel) => update({ irisModel })}
+        releaseLabel="Iris 3B Restoration (release)"
+        task="restoration"
+        value={value?.irisModel}
+      />
       <div className="iris-restore-row" role="group" aria-label="Iris scale">
         <span className="iris-restore-label">Scale</span>
         {IRIS_SCALE_PRESETS.map((preset) => (

@@ -9016,7 +9016,10 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
             .filter(|value| !value.is_empty());
         // A trained checkpoint of a builtin generation engine (the Iris full-model export,
         // sc-25685) renders through that engine's id-keyed lane, so it carries the engine's verdict.
-        let id = crate::iris_training::trained_checkpoint_engine_model(object).unwrap_or(id);
+        let id: &str = match crate::iris_training::trained_task_checkpoint(object) {
+            Some(objective) => objective.base_model(),
+            None => id,
+        };
         model_mac_support(id, model_type, family)
     };
     if let Ok(mac_support) = serde_json::to_value(mac_support) {
@@ -9034,7 +9037,10 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let id = crate::iris_training::trained_checkpoint_engine_model(object).unwrap_or(id);
+        let id: &str = match crate::iris_training::trained_task_checkpoint(object) {
+            Some(objective) => objective.base_model(),
+            None => id,
+        };
         model_candle_support(id, model_type)
     };
     if let Ok(candle_support) = serde_json::to_value(candle_support) {

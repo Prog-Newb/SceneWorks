@@ -1721,6 +1721,10 @@ jobs:
           cargo test -p sceneworks-worker --features backend-candle --release iris_worker_gpu_smoke -- --ignored --nocapture --test-threads=1
       # SC-25686: one bounded Iris LoRA `lora_train` job through the production executor (8 steps,
       # 256²), then the trained adapter applied by an `image_generate` job (same snapshots, offline).
+      # SC-25687 / SC-25688: the same filter selects `iris_training_gpu_smoke_depth` (a 4-step depth
+      # full fine-tune at 128² → its export selected by id in an `image_depth` job) and
+      # `iris_training_gpu_smoke_restore` (a 2-step restoration LoRA at 256² with the three pinned
+      # training resources → its export selected by id in an Iris `image_upscale` job).
       - name: Run the Iris-3B Candle training smoke
         shell: cmd
         run: |
