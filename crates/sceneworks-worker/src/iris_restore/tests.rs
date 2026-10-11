@@ -9,6 +9,10 @@ use serde_json::{json, Value};
 pub(crate) const UPSCALER_CONFIG: &str = include_str!("fixtures/upscaler_config.yaml");
 const DEPTH_CONFIG: &str = include_str!("fixtures/depth_config.yaml");
 
+/// The smallest valid safetensors file: an 8-byte little-endian header length and an empty JSON
+/// header (padded to 8 bytes), no tensors and no `__metadata__`.
+const EMPTY_SAFETENSORS: &[u8] = b"\x08\x00\x00\x00\x00\x00\x00\x00{}      ";
+
 fn params(
     scale: Option<f64>,
     sizing: RestoreInputSizing,
@@ -372,15 +376,17 @@ pub(crate) fn snapshot_dir(data_dir: &Path) -> PathBuf {
 }
 
 /// Stage the `upscaler/` export the way the `iris_3b_restore` Model Manager install leaves it (the
-/// real release `config.yaml`; placeholder weight bytes — the stub transform never reads them).
+/// real release `config.yaml`; header-only safetensors weights — the stub transform never reads tensors).
 pub(crate) fn stage_restore_install(data_dir: &Path, config: &str, files: &[&str]) -> PathBuf {
     let dir = snapshot_dir(data_dir).join(restore_subdir());
     std::fs::create_dir_all(&dir).unwrap();
     for file in files {
+        // A header-only safetensors file: export resolution reads the weights header for a
+        // trained export's `irisTask` stamp, so the bytes must parse as a (metadata-free) header.
         let bytes: &[u8] = if *file == "config.yaml" {
             config.as_bytes()
         } else {
-            b"placeholder weights"
+            EMPTY_SAFETENSORS
         };
         std::fs::write(dir.join(file), bytes).unwrap();
     }
