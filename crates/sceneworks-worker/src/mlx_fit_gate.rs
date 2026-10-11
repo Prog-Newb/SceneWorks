@@ -4782,7 +4782,7 @@ const LENS_DENSE_HEADROOM_GB: f64 = 29.88;
 ///
 /// It applies to [`HEADROOM_GB`] ONLY. See [`HeadroomAllowance`] for why that distinction is load
 /// bearing rather than pedantic.
-const OS_APP_RESERVE_GB: f64 = 4.0;
+pub(crate) const OS_APP_RESERVE_GB: f64 = 4.0;
 
 /// A family's flat 1024² allowance, together with how much of it is fixed OS/app reserve rather than
 /// this request's area-dependent activation transient.
@@ -5335,7 +5335,7 @@ pub(crate) fn sum_text_encoder_bytes(dir: &Path) -> u64 {
 /// on the generator-cache thread, which is already blocking on the weight load, so a one-shot
 /// subprocess probe there is free. `None` off macOS or when the probe fails ⇒ the gate no-ops (a
 /// cached `None` is a deliberate fail-open, consistent with `Unknown` never blocking).
-fn probe_total_unified_memory_gib() -> Option<f64> {
+pub(crate) fn probe_total_unified_memory_gib() -> Option<f64> {
     probe_total_unified_memory_bytes().map(|bytes| bytes as f64 / BYTES_PER_GIB)
 }
 

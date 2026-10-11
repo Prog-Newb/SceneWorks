@@ -158,7 +158,10 @@ fn builtin_targets_gate_network_types() {
             // list only because the target never advertised `lokr` — shipped but unreachable.
             // Base only: `mage_flow_edit_base_lora` is no longer offered (sc-15277 — no edit
             // trainer exists, so it could only ever claim-then-fail; restoring it is sc-15320).
-            "mage_flow_base_lora"
+            "mage_flow_base_lora",
+            // Iris-3B generation (sc-25685/sc-25686): both native trainers report `supports_lokr`
+            // and write the LyCORIS layout the Iris adapter loader reads.
+            "iris_3b_generation"
         ]
     );
 }
@@ -331,8 +334,9 @@ fn only_mage_flow_targets_advertise_the_full_finetune_network_type() {
         .collect();
     assert_eq!(
         full_targets,
-        vec!["mage_flow_base_lora"],
-        "only the Mage-Flow Base target may advertise the full base fine-tune network type"
+        vec!["mage_flow_base_lora", "iris_3b_generation"],
+        "only the Mage-Flow Base and Iris-3B targets may advertise the full fine-tune network type \
+         (both native trainers report `supports_full_finetune`)"
     );
 }
 
@@ -1545,6 +1549,11 @@ fn set_training_numeric_field(config: &mut TrainingConfig, field: &str, value: u
         "steps" => config.steps = value,
         "batchSize" => config.batch_size = value,
         "resolutions" => config.resolution = value,
+        "sampleCount" => {
+            config
+                .advanced
+                .insert("sampleCount".to_owned(), serde_json::json!(value));
+        }
         other => panic!("missing test mutation for advertised numeric limit {other}"),
     }
 }
@@ -1575,7 +1584,7 @@ fn trainer_capability_numeric_boundaries_are_typed_and_preserved() {
             assert!(
                 matches!(
                     field.as_str(),
-                    "rank" | "alpha" | "steps" | "batchSize" | "resolutions"
+                    "rank" | "alpha" | "steps" | "batchSize" | "resolutions" | "sampleCount"
                 ),
                 "{}/{} is advertised but has no shared request-field validator",
                 target.id,

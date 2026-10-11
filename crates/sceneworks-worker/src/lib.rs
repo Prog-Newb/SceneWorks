@@ -243,6 +243,17 @@ mod video_admission;
 // (it reuses that module's byte-summing + unified-memory budget probe). Re-exported for the rust-api
 // training submit gate, which calls it alongside `training_base_model_status`/`training_disk_space_error`.
 pub use mlx_fit_gate::full_finetune_memory_error;
+// Iris-3B generation training seams (sc-25685/sc-25686): the trainer's data-walk report the API
+// surfaces before launch, and the declared memory-floor gate (the macOS submit-time twin is public).
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+mod iris_training;
+pub use iris_training::{iris_data_walk_report, iris_training_memory_error, IrisDataWalkReport};
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
 // into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
 // helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.
@@ -481,6 +492,17 @@ mod imported_nvfp4_gpu_smoke;
 // `image_generate` job through the shipped catalog entry and the generic text_encoder seam.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod iris_gpu_smoke;
+// Real-weight Iris-3B generation TRAINING smoke (sc-25685 MLX / sc-25686 Candle): one bounded LoRA
+// `lora_train` job through the production executor, then the adapter applied by an `image_generate`
+// job. Backend-neutral, so the same test runs on Apple Silicon and on the CUDA real-weights card.
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
+mod iris_training_gpu_smoke;
 // Real-weight GPU smoke for the candle Anima 2B lane (epic 10512, sc-10625 — the hardware-gated
 // acceptance extracted from sc-10525). Test-only + candle-only; drives `crate::inference_runtime::load("anima_base" |
 // "anima_aesthetic" | "anima_turbo")` against the dense bf16 circlestone-labs/Anima split_files

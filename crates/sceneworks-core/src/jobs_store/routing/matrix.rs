@@ -1076,6 +1076,9 @@ fn expected_backend_local_trainer_id(
         ("mage_flow_base_lora", "mage_flow_base", "mage_flow_lora") => {
             ("mage_flow_base", "mage_flow_base")
         }
+        // Iris-3B generation (sc-25685/sc-25686): both backends register one trainer under the
+        // generation install's id.
+        ("iris_3b_generation", "iris_3b", "iris_train") => ("iris_3b", "iris_3b"),
         _ => {
             return Err(format!(
                 "production training target {:?} (base {:?}, kernel {:?}) has no explicit backend-local trainer identity contract",

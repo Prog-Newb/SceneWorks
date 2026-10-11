@@ -544,6 +544,10 @@ pub(crate) struct DatasetParquetImportJobRequest {
     /// Case-insensitive caption substrings. A matching row is always rejected.
     #[serde(default)]
     pub(crate) caption_excludes: Vec<String>,
+    /// Extra columns imported as per-item named captions (`captions: {column: text}`), the
+    /// HF-style multi-field caption source the Iris trainer's `caption_field(s)` read (sc-25685).
+    #[serde(default)]
+    pub(crate) caption_field_columns: Vec<String>,
 }
 
 fn default_parquet_url_column() -> String {

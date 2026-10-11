@@ -1640,6 +1640,180 @@
           "style"
         ]
       }
+    },
+    {
+      "id": "iris_3b_generation",
+      "name": "Iris 3B",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "iris",
+      "baseModel": "iris_3b",
+      "baseModelRepo": "speridlabs/iris-3b",
+      "kernel": "iris_train",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 1000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 256,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw",
+        "advanced": {
+          "decomposeFactor": -1,
+          "gradientCheckpointing": false,
+          "iris": {
+            "auto_lr": "none",
+            "base_batch_size": 256,
+            "betas": [
+              0.9,
+              0.95
+            ],
+            "caption_field": "caption",
+            "caption_fields": [],
+            "ema_decay": 0.9999,
+            "ema_enabled": true,
+            "export_dtype": "fp32",
+            "gradient_clip": 0.5,
+            "init": "weights",
+            "keep_last_checkpoints": 2,
+            "milestone_steps": [],
+            "nan_loss_tolerance": 20,
+            "on_caption_overflow": "warn",
+            "preview_negative_prompt": "",
+            "text_conditioning": "cached",
+            "text_dropout": 0.1,
+            "upstream_validation_prompts": false
+          },
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "lrWarmupSteps": 0,
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleCount": 4,
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 3.0,
+          "sampleSteps": 30,
+          "timestepBias": "balanced",
+          "timestepType": "logit_normal",
+          "weightDecay": 0.0
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          64
+        ],
+        "gradientCheckpointing": false,
+        "inits": [
+          "weights",
+          "random"
+        ],
+        "lossTypes": [
+          "mse"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "cosine"
+        ],
+        "microStepFields": [
+          "steps",
+          "saveEvery",
+          "sampleEvery",
+          "lrWarmupSteps"
+        ],
+        "mixedPrecisions": [
+          "bf16",
+          "f32"
+        ],
+        "networkTypes": [
+          "lora",
+          "lokr",
+          "full"
+        ],
+        "optimizers": [
+          "adamw",
+          "muon"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "rank": [
+          1,
+          128
+        ],
+        "resolutions": [
+          256,
+          512,
+          1024
+        ],
+        "sampleCount": [
+          1,
+          4
+        ],
+        "steps": [
+          1,
+          200000
+        ],
+        "timestepBiases": [
+          "balanced"
+        ],
+        "timestepTypes": [
+          "logit_normal",
+          "uniform"
+        ]
+      },
+      "ui": {
+        "datasetModality": "image",
+        "description": "Train Iris-3B generation: a LoRA or LoKr adapter, or a full fine-tune from the released weights or from random init. Pixel-space flow matching on the frozen Qwen3-VL text encoder, on Apple Silicon (MLX) and NVIDIA (Candle/CUDA).",
+        "label": "Iris 3B",
+        "recommendedFor": [
+          "character",
+          "style",
+          "concept"
+        ]
+      },
+      "memoryFloors": {
+        "basis": "Declared floors (no measurement campaign): MLX LoRA 256px peak 15.3 GB and Candle LoRA 256px peak 21.8 GB on the real 3B backbone; larger resolutions and full fine-tuning are conservative declarations. An MLX floor is judged against unified memory minus the macOS/app reserve the MLX generation gate holds out. A machine under its floor is refused before the model loads.",
+        "lanes": {
+          "candle": {
+            "adapter": {
+              "1024": 48,
+              "256": 24,
+              "512": 32
+            },
+            "full": {
+              "1024": 104,
+              "256": 80,
+              "512": 88
+            }
+          },
+          "mlx": {
+            "adapter": {
+              "1024": 40,
+              "256": 16,
+              "512": 24
+            },
+            "full": {
+              "1024": 104,
+              "256": 80,
+              "512": 88
+            }
+          }
+        },
+        "measured": false,
+        "unit": "GB"
+      }
     }
   ]
 }

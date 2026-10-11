@@ -167,7 +167,18 @@ function datasetItemExtras(item) {
   return extra;
 }
 
-export function datasetPayload({ activeDataset, assetsById, associatedCharacterId, captionDraftById = {}, name, selectedAssetIds }) {
+// `namedCaptionsById` (sc-25685): per-item named captions (`{ field: text }`) freshly imported from
+// `.json` sidecars, keyed by selection id. A saved item keeps its stored `captions` through
+// `datasetItemExtras`; an imported map replaces it.
+export function datasetPayload({
+  activeDataset,
+  assetsById,
+  associatedCharacterId,
+  captionDraftById = {},
+  namedCaptionsById = {},
+  name,
+  selectedAssetIds,
+}) {
   const itemsByAssetId = new Map(
     (activeDataset?.items ?? []).map((item, index) => [datasetItemSelectionKey(activeDataset, item, index), item]),
   );
@@ -207,6 +218,9 @@ export function datasetPayload({ activeDataset, assetsById, associatedCharacterI
           ...source,
           displayName: asset.displayName ?? imageAssetName(asset),
           caption,
+          ...(namedCaptionsById[selectionId] && Object.keys(namedCaptionsById[selectionId]).length
+            ? { captions: namedCaptionsById[selectionId] }
+            : {}),
         };
       })
       .filter(Boolean),

@@ -4,32 +4,32 @@
   "summary": {
     "modelCount": 110,
     "importedFamilyCount": 4,
-    "cellCount": 1016,
+    "cellCount": 1019,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "5df3a9f36ec4932b3ba562227680546f60acdb730b149cd750c8e9244fd182ca",
-    "apiDto": "50f37331e5f3f398c803c15afee3a5f54cbbcab265e233d02098377ad78d9ac9",
+    "apiContractEntry": "6ae6c25df03d59053d216ffc7baccbf0e869effc9d21d8cb7637ceb613ca8291",
+    "apiDto": "58d81445e42b63b0a53d61e6fd32097f51f1414e3f55cc1eaa9c9c196d28f0eb",
     "apiGeneration": "75e502e31d13ac2018e9bfdc17e6bc939f24704fc04fd4a93008eb9c5cdffa12",
-    "apiValidation": "af10f934201399fb91d995b81e77bffe8feff97d4698ccb54ec16fc522cdb9b5",
+    "apiValidation": "b8843f295b24becf71789e419c9236cd20f0c8e574f0ae259fc00ccf3ca3ab96",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
     "descriptorAudioFacts": "701d4120bef0920a05178ace2ec320cdd87cf5f3b7a318cde3625a86c47ed62c",
     "descriptorCandleFacts": "af21a3a949f0db398eb05d39e7ff28e660450eb907e041d53dd2d21642f6239a",
-    "descriptorCandleRuntime": "029c15a82e7ddaa017839b19407fdea25c2608fab4d3201c09c4bf9e6216e369",
+    "descriptorCandleRuntime": "fcd0577f2f09a5175e84ce923c2be818273ab198af9f7070d13965f30c2fd493",
     "descriptorMlxFacts": "08ceb97ce2f0a45ae3978423fbf894160a425d74ca0af4303e2bbd3b99c98232",
-    "descriptorMlxRuntime": "a9d5c24276d1c61e2e44e2f903b79235888c347e155ce3c3631621b4c06bb04e",
+    "descriptorMlxRuntime": "a0fea63e0d9ff276e1124b30330deee4f524e30565118afd96771d48676aa764",
     "descriptorPreviewFacts": "fa8a482398c5c6d8b6979905444655a645e2a7f9c6fc609cb6e247904017601f",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
     "manifest": "54f6be00e4b71cce76c995c1e01ce34083f7ebed6bc4daf03bb681752699daba",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
-    "routerCandle": "2799481c1aae4731b0ccabfce7fcefb762356aaf765ac57c44f30a299a7c908b",
-    "routerCatalog": "2004467284047349a78d69dce2c8e1b50cadd8d4903bcc284e75268f00d1c463",
+    "routerCandle": "f2c232e63686bfc8692ffa7052044d4d6b9578f81ce4dce15f6292531cb84917",
+    "routerCatalog": "b961e2516f3713d6ab641d8735afd3cbc55b401f72970571f4ffafb18755f56a",
     "routerGaps": "22183cc9b0753640b97ed2ed08d1d5a499b173b593b13f57e111ffebb1cfab44",
-    "routerMlx": "156c2dc1a07c3e74fe0eb6fcb4a1b524bcf82afd3426e987816f02d6ec3f0b52",
+    "routerMlx": "2d8ca145498672937b07ecc09725a9de46ad7bb8b6ad5654650b3f9cc50a4034",
     "scheduler": "458818bae4c621c331978dc7000adfef7b6f18c0c81862334ae1880abf883782",
-    "trainingCatalog": "1c78847209ffbc12498b189761963043ba4e5d01ae69e6e031a709d9f0e523de",
+    "trainingCatalog": "66df64efedb130a4a39986a202648e1d775c2e3567211d10117986a057d63a82",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
     "webImageAdvanced": "685edcd46c3b986eec15916c31261ec5b18e527d6c70b76a0fbacff7c9487b8d",
@@ -45,7 +45,7 @@
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
-    "workerDispatch": "b94b4b75b1ec4191c42232a4052285f71bb514c0e37ca0fe3bffc6e333638ad1",
+    "workerDispatch": "a58cc9c0709105af7027c84b118998342557201c46a7ec6f32d9c058964a3123",
     "workerEngineTable": "85d32676e6f2ea02fb6ff94a5bf21aa80275c032574219a9c7c7fa6f4a32ebb4",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
     "workerImageDispatch": "7515fad6feabcdc8209ef401bbe77f2fdbbfe820ee23ec140634116f9434dbab",
@@ -55,8 +55,8 @@
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "7a1670cffbe9cbbc61ce4c4335bb14760132457a54d930c2b3c308c61d848f76",
-    "workerUtilityDispatch": "635bd9aa2a01454091e49145d9fa86583242680f0dc996e5ab4dd36240790da5",
+    "workerTrainingDispatch": "e4f2692558a8d83721ce27c754303bd01a31ccad5942146e606807d3bbb82610",
+    "workerUtilityDispatch": "0f487f18a5567ca0ba1680882af07519b767d0049bde929fb8573e014f79d6f3",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
     "workerVideoDispatch": "14ebc949a182da1ecc3af1ba5b38c584fd2d629a55e1d16d2e13f10c4ac84697",
@@ -7829,6 +7829,39 @@
       "target": "illustrious_xl_v2_lora",
       "baseModel": "illustrious_xl_v2",
       "kernel": "sdxl_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_generation",
+      "baseModel": "iris_3b",
+      "kernel": "iris_train",
+      "networkType": "full",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_generation",
+      "baseModel": "iris_3b",
+      "kernel": "iris_train",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_generation",
+      "baseModel": "iris_3b",
+      "kernel": "iris_train",
       "networkType": "lora",
       "support": {
         "capability": "train",

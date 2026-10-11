@@ -150,6 +150,7 @@ use workflows::{get_asset_workflow, inspect_workflow, max_inspect_multipart_body
 // crate-root consumer.
 #[cfg(test)]
 use assets::sweep_stale_asset_uploads_before;
+mod iris_training;
 mod training;
 use training::{
     batch_rename_training_dataset_items, create_training_dataset,
@@ -1510,6 +1511,10 @@ fn create_app_with_state_mode(
         .route("/api/v1/auth/verify", post(verify_access))
         .route("/api/v1/training/targets", get(list_training_targets))
         .route("/api/v1/training/presets", get(list_training_presets))
+        .route(
+            "/api/v1/training/data-walk",
+            get(iris_training::training_data_walk),
+        )
         .route("/api/v1/catalogs", get(list_catalogs).post(create_catalog))
         .route("/api/v1/catalogs/attach", post(attach_catalog))
         .route(
