@@ -231,6 +231,13 @@ mod video_admission;
 pub use mlx_fit_gate::full_finetune_memory_error;
 // Iris-3B generation training seams (sc-25685/sc-25686): the trainer's data-walk report the API
 // surfaces before launch, and the declared memory-floor gate (the macOS submit-time twin is public).
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
 mod iris_training;
 pub use iris_training::{iris_data_walk_report, iris_training_memory_error, IrisDataWalkReport};
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
