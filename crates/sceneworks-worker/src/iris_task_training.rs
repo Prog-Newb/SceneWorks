@@ -938,19 +938,17 @@ mod tests {
         ])
     }
 
-    /// A well-formed (tensor-less) safetensors file: the engine reads export headers at resolve.
-    pub(crate) fn placeholder_safetensors() -> Vec<u8> {
-        let header = br#"{"__metadata__":{"format":"pt"}}"#;
-        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
-        bytes.extend_from_slice(header);
-        bytes
-    }
-
     fn stage_export_dir(dir: &Path, config: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("config.yaml"), config).unwrap();
+        let task = if config == DEPTH_CONFIG {
+            IrisTask::Depth
+        } else {
+            IrisTask::Restoration
+        };
+        let weights = crate::iris_test_weights::task_weights(task);
         for file in ["model.safetensors", "empty_prompt.safetensors"] {
-            std::fs::write(dir.join(file), placeholder_safetensors()).unwrap();
+            std::fs::write(dir.join(file), &weights).unwrap();
         }
     }
 
