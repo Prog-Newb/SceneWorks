@@ -372,15 +372,16 @@ pub(crate) fn snapshot_dir(data_dir: &Path) -> PathBuf {
 }
 
 /// Stage the `upscaler/` export the way the `iris_3b_restore` Model Manager install leaves it (the
-/// real release `config.yaml`; placeholder weight bytes — the stub transform never reads them).
+/// real release `config.yaml`; header-only safetensors weights stamped for the restoration task —
+/// the stub transform never reads tensors).
 pub(crate) fn stage_restore_install(data_dir: &Path, config: &str, files: &[&str]) -> PathBuf {
     let dir = snapshot_dir(data_dir).join(restore_subdir());
     std::fs::create_dir_all(&dir).unwrap();
     for file in files {
-        let bytes: &[u8] = if *file == "config.yaml" {
-            config.as_bytes()
+        let bytes = if *file == "config.yaml" {
+            config.as_bytes().to_vec()
         } else {
-            b"placeholder weights"
+            crate::iris_test_weights::task_weights(gen_core::iris::IrisTask::Restoration)
         };
         std::fs::write(dir.join(file), bytes).unwrap();
     }

@@ -2691,6 +2691,9 @@ fn retry_delay(poll_seconds: u64, attempt: u32) -> u64 {
 #[cfg(test)]
 mod test_env;
 
+#[cfg(test)]
+mod iris_test_weights;
+
 // NTFS disk discipline for the multi-gigabyte weight fixtures (StorageFull incident, 2026-08-20).
 // The `set_len`-extended fixtures the memory gates need are holes on APFS/ext4 and FULL allocations
 // on NTFS, so on Windows they have to be marked sparse explicitly. See the module docs.
