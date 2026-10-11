@@ -268,6 +268,13 @@ struct CacheIdentityWeights {
 }
 
 impl LoadIdentity {
+    /// The named components (`LoadSpec::components` ids, e.g. Iris's `text_encoder`) this identity
+    /// was loaded with. Test/introspection helper.
+    #[cfg(test)]
+    pub(crate) fn component_ids(&self) -> Vec<String> {
+        self.components.iter().map(|(id, _)| id.clone()).collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn from_load_spec(engine_id: &str, spec: &LoadSpec) -> Self {
         Self::try_from_load_spec(engine_id, spec)
@@ -1632,6 +1639,42 @@ pub(crate) async fn mlx_tier_budget(
     reply_rx.await.map_err(|_| {
         crate::WorkerError::Engine("MLX generator cache worker dropped the tier budget".to_owned())
     })?
+}
+
+/// Test seam (sc-25684): load the backend-neutral staging stub into the PROCESS-GLOBAL generator
+/// cache through the production cache entry point (including its eviction of a resident transform),
+/// standing in for a warm generator a task switch must evict. Callers hold
+/// [`crate::test_env::env_lock`] so tests touching the global caches serialize.
+#[cfg(test)]
+pub(crate) async fn load_stub_into_global_cache(weights: &Path) -> WorkerResult<()> {
+    with_cached_generator_for_request_using_on(
+        generator_worker(),
+        "sc3724_stub",
+        LoadSpec::new(WeightsSource::Dir(weights.to_path_buf())),
+        "stub load",
+        |_id, spec| tests::staging_stub_load(spec),
+        |_, _, _, warm_policy: crate::execution_planner::WarmPolicyProposal, _, _| {
+            warm_policy
+                .decline(crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory);
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// Test seam (sc-25684): whether the process-global generator cache holds a resident generator
+/// (without evicting it), and the component ids of the spec it was loaded with — so a task-switch
+/// test can see a text encoder leave with its generator.
+#[cfg(test)]
+pub(crate) async fn global_generator_resident() -> Option<Vec<String>> {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<Option<Vec<String>>>();
+    let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let _ = reply_tx.send(cache.resident_key().map(LoadIdentity::component_ids));
+    });
+    generator_worker()
+        .send(job)
+        .expect("generator worker alive");
+    reply_rx.await.expect("generator worker replies")
 }
 
 #[cfg(test)]
@@ -3023,7 +3066,9 @@ mod tests {
 
     /// A stub that attests the staged-residency lifecycle, which is what makes a warm switch
     /// grantable at all (`OffloadPolicy::Sequential` is advisory in gen-core).
-    fn staging_stub_load(_spec: &gen_core::LoadSpec) -> gen_core::Result<Box<dyn Generator>> {
+    pub(super) fn staging_stub_load(
+        _spec: &gen_core::LoadSpec,
+    ) -> gen_core::Result<Box<dyn Generator>> {
         let mut descriptor = stub_descriptor();
         descriptor.capabilities.supports_sequential_offload = true;
         // The descriptor bit alone is NOT what sc-18317 consults — a granted switch needs the loaded

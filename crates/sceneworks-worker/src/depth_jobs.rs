@@ -172,6 +172,13 @@ where
     )
     .map_err(|e| typed(INVALID_SOURCE, e))?;
 
+    // One resident engine across the Iris tasks (sc-25684): the estimator below loads its own ~6.5 GB
+    // depth backbone for this job, so a warm generator (with its Qwen3-VL text encoder) or a resident
+    // restoration transform leaves first. Otherwise the two would sit side by side over the user's
+    // memory cap — the unified budget below is the cap minus the host reserve and does not see
+    // them — and on CUDA the free-VRAM probe would count the departing model and refuse a run that
+    // fits once it is gone.
+    evict_resident_engines().await?;
     #[cfg(target_os = "macos")]
     let available_gb = mlx_available_gb();
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -289,6 +296,22 @@ where
     {
         outputs.discard();
         return Err(error);
+    }
+    Ok(())
+}
+
+/// Drop the resident generator (and with it any staged text encoder) and the resident restoration
+/// transform before a depth estimate loads. The depth estimator is per-job (never cached), so after
+/// this job nothing of it stays resident either.
+async fn evict_resident_engines() -> WorkerResult<()> {
+    let generator = crate::generator_cache::evict_cached_generator().await?;
+    let transform = crate::transform_cache::evict_resident_transform().await?;
+    if generator || transform {
+        tracing::info!(
+            event = "iris_depth_evicted_resident_engines",
+            generator,
+            transform
+        );
     }
     Ok(())
 }

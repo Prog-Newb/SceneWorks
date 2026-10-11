@@ -5983,31 +5983,38 @@
         // pixel-space activations. Existing inference CUDA real-weight runs on an RTX PRO 6000
         // (38068347300, 38075865079) recorded an overall nvidia-smi peak of 21.3–21.4 GB at 1024²,
         // 100 steps, bf16, count 1, text encoder resident (load peak 15.7 GB); SceneWorks smoke
-        // 38106019178 ran at 512². Nothing here is a calibrated measurement, hence `measured: false`.
+        // 38106019178 ran at 512². Only the staged row below was measured (one bounded run, not a
+        // calibration), hence `measured: false`.
         // * `minMemoryGb` — like every padded Candle floor it folds in the 2 GB allocator reserve
         //   (21.4 + 2.0 = 23.4, rounded up to 24), because `vram_gate::predicted_peak_gb` adds no
         //   headroom to this scalar. Without it the fit gate had no prediction and admitted a load on
         //   any card (FitDecision::Unknown).
-        // * `sequentialPeakGb` — `candle-gen-iris` advertises sequential offload, so a card under the
-        //   resident floor is routed to staged residency, whose second-stage check needs this row or
-        //   it runs best-effort into a reactive OOM. No staged run has been recorded, so the row is the
-        //   recorded RESIDENT overall peak, which bounds every staged working set from above (the gate
-        //   adds its 2 GB reserve: 23.4 GB). A card under it is refused before load. One row per
-        //   bits-derived key the gate can name: the single bf16 artifact has no tier subdir, so the gate
-        //   names it from `advanced.mlxQuantize` (q8 by default).
-        // Replaced by measured evidence at the epic-end campaign.
-        // * `promptBatchImageGb` — each EXTRA image of a native prompt batch (image.maxPromptBatchImages)
-        //   adds its pixel-space activations: the recorded 1024² resident peak minus the load peak
-        //   (21.4 − 15.7 = 5.7 GB), rounded up. The gate charges (images − 1) × this × max(1, MP) on
-        //   both predictions above; S6 (sc-25684) owns the measured value.
+        // * `sequentialPeakGb` — `candle-gen-iris` advertises sequential offload (encode with the
+        //   Qwen3-VL encoder, drop it, then denoise), so a card under the resident floor is routed to
+        //   staged residency, whose second-stage check reads this row. MEASURED ONCE (sc-25684, the
+        //   bounded dispatch-only `iris_worker_gpu_smoke_staged`, windows-candle run 38160084545,
+        //   RTX PRO 6000): a 1024², count-1, 30-step job routed to `OffloadPolicy::Sequential` peaked at
+        //   11.97 GB overall card memory (nvidia-smi, 100 ms sampling, 0.47 GB idle baseline) — rounded
+        //   up to 12.0. The gate adds its 2 GB reserve (14.0), so a 16 GB card runs 1024² staged
+        //   instead of being refused. One row per bits-derived key the gate can name: the single bf16
+        //   artifact has no tier subdir, so the gate names it from `advanced.mlxQuantize` (q8 by
+        //   default). The block's `measured` flag stays false: it covers the declared values too.
+        // * `imageActivationGbPerMegapixel` — the pixel-space activations of ONE image per output
+        //   megapixel (1024² = 1 MP): the recorded 1024² resident peak minus the load peak
+        //   (21.4 − 15.7 = 5.7 GB), rounded up. Both floors above carry one image at <= 1024²; the gate
+        //   (`lane_controls::declared_activation_overlay_bytes`) charges
+        //   this × (images × max(1, MP) − 1) on both predictions, so a native prompt batch
+        //   (image.maxPromptBatchImages) and an output above 1024² (limits allow 2048² = 4 MP: +18 GB)
+        //   are never admitted on a floor sized for one 1024² image. Linear in area because both
+        //   engines run fused attention (transient linear in tokens). Declared, not measured.
         "measured": false,
         "minMemoryGb": 24,
-        "sequentialPeakGb": { "bf16": 21.4, "q8": 21.4, "q4": 21.4 },
-        "promptBatchImageGb": 6.0
+        "sequentialPeakGb": { "bf16": 12.0, "q8": 12.0, "q4": 12.0 },
+        "imageActivationGbPerMegapixel": 6.0
       },
       "ui": {
         "label": "Iris 3B",
-        "description": "Speridlabs Iris-3B text-to-image: a 3B pixel-space flow-matching DiT (no VAE) conditioned on Qwen3-VL-4B. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 100-step FlowDPM-Solver++ at CFG 3.0 by default. Downloads ~12 GB backbone + ~8.9 GB text encoder; needs ~32 GB unified memory on a Mac or ~24 GB VRAM on an NVIDIA GPU.",
+        "description": "Speridlabs Iris-3B text-to-image: a 3B pixel-space flow-matching DiT (no VAE) conditioned on Qwen3-VL-4B. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 100-step FlowDPM-Solver++ at CFG 3.0 by default. Downloads ~12 GB backbone + ~8.9 GB text encoder; needs ~32 GB unified memory on a Mac, or ~16 GB VRAM on an NVIDIA GPU at 1024² (staged: the text encoder is dropped before denoising; ~24 GB keeps it resident).",
         "recommendedFor": ["text_to_image"],
         "promptGuide": {
           "title": "Iris 3B Prompt Guide",
