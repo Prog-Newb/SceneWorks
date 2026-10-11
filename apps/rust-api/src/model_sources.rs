@@ -64,6 +64,8 @@ fn fixed_runtime_model_ids(job_type: &JobType, payload: &JsonObject) -> Vec<&'st
         JobType::PersonTrack => vec!["person_detector", "sam3_person_segment"],
         JobType::PoseDetect => vec!["dwpose_pose_detector"],
         JobType::ImageSegment => vec!["sam3_person_segment"],
+        // sc-25682: the Iris depth task export — its own resource closure, no text encoder.
+        JobType::ImageDepth => vec![sceneworks_core::depth_map::DEPTH_MODEL_ID],
         JobType::ImageDetail
             if payload
                 .get("model")

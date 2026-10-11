@@ -1041,6 +1041,9 @@ async fn validate_raw_job_payload(
     ) {
         validate_payload_model_id(payload)?;
     }
+    if matches!(job_type, JobType::ImageDepth) {
+        crate::depth_jobs::validate_raw_image_depth_payload(payload)?;
+    }
     // Licence-acknowledgment gate for the FETCHING job types (sc-17227), keyed on the payload's
     // `repo`/`sourceUrl` rather than on a model id.
     //

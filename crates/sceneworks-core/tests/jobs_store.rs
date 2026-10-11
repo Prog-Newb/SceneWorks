@@ -5938,6 +5938,9 @@ fn mac_capabilities_master_switch_and_infra_features() {
     // Smart-select segmentation is native SAM3 on MLX and Candle (sc-6105 / sc-18480).
     assert_eq!(epic("imageSegment"), None);
     assert!(mac.features["imageSegment"].supported);
+    // Iris-3B depth runs on native MLX on Mac and Candle off-Mac (sc-25682).
+    assert_eq!(epic("imageDepth"), None);
+    assert!(mac.features["imageDepth"].supported);
     assert_eq!(epic("datasetCaptioning"), None);
     // LyCORIS is ported to MLX (epic 3641) → no longer a capability gap entry at all.
     assert!(!mac.features.contains_key("lycoris"));
@@ -5960,6 +5963,7 @@ fn mac_capabilities_master_switch_and_infra_features() {
             !matches!(
                 key.as_str(),
                 "datasetCaptioning"
+                    | "imageDepth"
                     | "imageSegment"
                     | "imageUpscale"
                     | "imageUpscaleSeedvr2"
@@ -5983,6 +5987,14 @@ fn mac_capabilities_master_switch_and_infra_features() {
     assert!(windows.features["imageSegment"].reason.is_none());
     assert!(inert.features["imageSegment"].supported);
     assert!(inert.features["imageSegment"].reason.is_none());
+    assert!(windows.features["imageDepth"].supported);
+    assert!(inert.features["imageDepth"].supported);
+    let other = mac_capabilities("freebsd", false);
+    assert!(!other.features["imageDepth"].supported);
+    assert_eq!(
+        other.features["imageDepth"].reason.as_ref().and_then(|r| r.suggested_epic.clone()),
+        Some("sc-25682".to_owned())
+    );
     // AuraSR is dropped as an offered engine off-Mac too (sc-5499): unsupported on Windows (and Linux),
     // not just under active Mac gating — so the web picker hides it on every platform.
     assert!(!windows.features["imageUpscaleAuraSr"].supported);
@@ -8028,6 +8040,7 @@ fn native_candle_utility_capabilities_dispatch_supported_shapes_only() {
             WorkerCapability::Gpu,
             WorkerCapability::ImageDetail,
             WorkerCapability::ImageSegment,
+            WorkerCapability::ImageDepth,
             WorkerCapability::DatasetAnalysis,
             WorkerCapability::Unknown("candle".to_owned()),
         ],
@@ -8055,6 +8068,11 @@ fn native_candle_utility_capabilities_dispatch_supported_shapes_only() {
             "SAM3 box segment",
             JobType::ImageSegment,
             json!({ "sourceAssetId": "asset_src", "box": [8, 12, 64, 80] }),
+        ),
+        (
+            "Iris depth",
+            JobType::ImageDepth,
+            json!({ "sourceAssetId": "asset_src", "resolution": { "mode": "capped", "maxSide": 1024 } }),
         ),
         (
             "CLIP dataset analysis",

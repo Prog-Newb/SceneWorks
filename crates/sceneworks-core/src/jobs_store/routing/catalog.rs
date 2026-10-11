@@ -621,6 +621,26 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         },
     );
     features.insert(
+        // Iris-3B monocular depth (sc-25682): the `iris_3b_depth` task export runs in-process on
+        // the native MLX worker on Mac and the Candle worker on Windows/Linux (same native-backend
+        // footprint as smart-select). Platform-intrinsic: whether the task export is INSTALLED is
+        // the model catalog's `installState`, not this flag.
+        "imageDepth".to_owned(),
+        MacFeatureSupport {
+            supported: image_segment_supported,
+            reason: if image_segment_supported {
+                None
+            } else {
+                Some(UnsupportedReason::new(
+                    None,
+                    "image_depth (Iris-3B depth)",
+                    "Iris-3B depth requires the native MLX backend on macOS or the Candle backend on Windows/Linux.",
+                    Some("sc-25682"),
+                ))
+            },
+        },
+    );
+    features.insert(
         "datasetCaptioning".to_owned(),
         MacFeatureSupport {
             supported: true,

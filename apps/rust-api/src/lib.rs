@@ -283,6 +283,10 @@ use prompts::create_prompt_refine_job;
 // `face_likeness_compare` job scoring a candidate asset against a source identity reference asset.
 mod face_likeness;
 use face_likeness::create_face_likeness_compare_job;
+// Iris-3B monocular depth (sc-25682): the typed `image_depth` route behind the Image Editor and
+// Library depth actions.
+mod depth_jobs;
+use depth_jobs::create_image_depth_job;
 mod poses;
 use poses::{create_pose_sources, create_poses, get_pose_preview, sweep_stale_pose_uploads};
 mod keypoints;
@@ -1983,6 +1987,7 @@ fn create_app_with_state_mode(
             "/api/v1/image/vectorize/prompt/jobs",
             post(create_vector_prompt_workflow),
         )
+        .route("/api/v1/image/depth/jobs", post(create_image_depth_job))
         .route("/api/v1/image/vqa/jobs", post(create_vqa_job))
         .route("/api/v1/image/interleave/jobs", post(create_interleave_job))
         .route("/api/v1/video/jobs", post(create_video_job))
