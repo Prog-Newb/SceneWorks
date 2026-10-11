@@ -2142,6 +2142,10 @@ fn web_depth_anchoring_bounds_match_the_api_bounds() {
         num("depthAnchoringEveryDefault"),
         DEPTH_ANCHORING_EVERY_DEFAULT as f64
     );
+    assert_eq!(
+        num("depthAnchoringMaxTDefault"),
+        DEPTH_ANCHORING_MAX_T_DEFAULT
+    );
     let models: Vec<String> =
         serde_json::from_str(&web_training_const("depthAnchoringModelOptions"))
             .expect("depthAnchoringModelOptions is a JSON-compatible string array");
@@ -2767,7 +2771,7 @@ fn subject_mask_loss_is_refused_at_submit_on_targets_that_do_not_advertise_it() 
 }
 
 /// sc-24832 (epic 2123 E6): in-range body-loss values survive into the plan verbatim and parse
-/// into the per-loss schedules (with upstream's default windows); every out-of-range / wrong-type
+/// into the per-loss schedules (with the low-noise default window `[0, 0.5]`, sc-2124); every out-of-range / wrong-type
 /// value is a field-level error naming the offending key. Mutation: drop the `min_t > max_t` check
 /// in `body_losses::schedule` ⇒ the inverted-window case is accepted ⇒ red.
 #[test]
@@ -2791,11 +2795,14 @@ fn build_training_plan_validates_body_losses_as_field_errors() {
     }
     let s = body_loss_settings(&plan.config.advanced).unwrap();
     let p = s.proportion.as_ref().expect("proportion on");
-    assert_eq!((p.min_t, p.max_t, p.every), (0.0, 1.0, 1));
+    assert_eq!(
+        (p.min_t, p.max_t, p.every),
+        (0.0, BODY_LOSS_MAX_T_DEFAULT, 1)
+    );
     let sh = s.shape.as_ref().expect("shape on");
     assert_eq!(
         (sh.min_t, sh.max_t, sh.every),
-        (0.4, 0.8, BODY_LOSS_EVERY_DEFAULT)
+        (0.0, 0.5, BODY_LOSS_EVERY_DEFAULT)
     );
     assert_eq!(s.normal.as_ref().unwrap().every, BODY_LOSS_EVERY_MAX as u32);
     assert!(s.include_head && s.normal_restrict_to_subject);
@@ -2883,6 +2890,7 @@ fn web_body_loss_bounds_match_the_api_bounds() {
     assert_eq!(num("bodyLossWeightSuggested"), BODY_LOSS_WEIGHT_SUGGESTED);
     assert_eq!(num("bodyLossEveryMax"), BODY_LOSS_EVERY_MAX as f64);
     assert_eq!(num("bodyLossEveryDefault"), BODY_LOSS_EVERY_DEFAULT as f64);
+    assert_eq!(num("bodyLossMaxTDefault"), BODY_LOSS_MAX_T_DEFAULT);
     assert_eq!(num("bodyShapeMinCosDefault"), BODY_SHAPE_MIN_COS_DEFAULT);
 }
 
@@ -3187,6 +3195,7 @@ fn web_face_loss_bounds_match_the_api_bounds() {
     assert_eq!(num("faceLossWeightSuggested"), FACE_LOSS_WEIGHT_SUGGESTED);
     assert_eq!(num("faceLossEveryMax"), FACE_LOSS_EVERY_MAX as f64);
     assert_eq!(num("faceLossEveryDefault"), FACE_LOSS_EVERY_DEFAULT as f64);
+    assert_eq!(num("faceLossMaxTDefault"), FACE_LOSS_MAX_T_DEFAULT);
     assert_eq!(
         num("identityLossMinCosDefault"),
         IDENTITY_LOSS_MIN_COS_DEFAULT
@@ -3861,4 +3870,70 @@ fn training_adapters_are_cataloged_at_the_loaded_revision() {
         assert_eq!(download["revision"], adapter.revision, "{}", adapter.id);
         assert_eq!(download["files"], json!([adapter.file]), "{}", adapter.id);
     }
+}
+
+/// sc-2124: every decoded-x0 (pixel-space) aux loss — depth anchoring, the identity and landmark
+/// losses and the three body losses — defaults to the latent losses' low-noise window `[0, 0.5]`
+/// once given only a weight (near pure noise the decoded x0 is mush), keeps every-other-update
+/// alternation, and honours an explicit window unchanged. Mutation: restore any `1.0` / `(0.4,
+/// 0.8)` default ⇒ red.
+#[test]
+fn pixel_space_aux_losses_default_to_the_low_noise_window() {
+    use sceneworks_core::training::body_losses::{body_loss_settings, BODY_LOSS_EVERY_DEFAULT};
+    use sceneworks_core::training::depth_anchoring::{
+        depth_anchoring_settings, DEPTH_ANCHORING_EVERY_DEFAULT,
+    };
+    use sceneworks_core::training::face_losses::{
+        face_landmark_loss_settings, identity_loss_settings, FACE_LOSS_EVERY_DEFAULT,
+    };
+    use sceneworks_core::training::latent_perceptual::LATENT_LOSS_MAX_T_DEFAULT;
+    let bag = |v: Value| v.as_object().cloned().unwrap();
+    let weights_only = bag(json!({
+        "depthAnchoringWeight": 0.1,
+        "identityLossWeight": 0.1,
+        "faceLandmarkLossWeight": 0.1,
+        "bodyProportionWeight": 0.1,
+        "bodyShapeWeight": 0.1,
+        "normalWeight": 0.1,
+    }));
+    let d = depth_anchoring_settings(&weights_only).unwrap().unwrap();
+    assert_eq!(
+        (d.min_t, d.max_t, d.every),
+        (0.0, 0.5, DEPTH_ANCHORING_EVERY_DEFAULT)
+    );
+    let id = identity_loss_settings(&weights_only)
+        .unwrap()
+        .unwrap()
+        .schedule;
+    let lm = face_landmark_loss_settings(&weights_only).unwrap().unwrap();
+    for s in [id, lm] {
+        assert_eq!(
+            (s.min_t, s.max_t, s.every),
+            (0.0, 0.5, FACE_LOSS_EVERY_DEFAULT)
+        );
+    }
+    let b = body_loss_settings(&weights_only).unwrap();
+    for s in [b.proportion, b.shape, b.normal] {
+        let s = s.expect("on");
+        assert_eq!(
+            (s.min_t, s.max_t, s.every),
+            (0.0, 0.5, BODY_LOSS_EVERY_DEFAULT)
+        );
+    }
+    assert_eq!(LATENT_LOSS_MAX_T_DEFAULT, 0.5);
+
+    let explicit = bag(json!({
+        "depthAnchoringWeight": 0.1, "depthAnchoringMinT": 0.2, "depthAnchoringMaxT": 1.0,
+        "identityLossWeight": 0.1, "identityLossMaxT": 0.9,
+        "faceLandmarkLossWeight": 0.1, "faceLandmarkLossMinT": 0.6, "faceLandmarkLossMaxT": 1.0,
+        "bodyShapeWeight": 0.1, "bodyShapeMinT": 0.4, "bodyShapeMaxT": 0.8,
+    }));
+    let d = depth_anchoring_settings(&explicit).unwrap().unwrap();
+    assert_eq!((d.min_t, d.max_t), (0.2, 1.0));
+    let id = identity_loss_settings(&explicit).unwrap().unwrap().schedule;
+    assert_eq!((id.min_t, id.max_t), (0.0, 0.9));
+    let lm = face_landmark_loss_settings(&explicit).unwrap().unwrap();
+    assert_eq!((lm.min_t, lm.max_t), (0.6, 1.0));
+    let sh = body_loss_settings(&explicit).unwrap().shape.unwrap();
+    assert_eq!((sh.min_t, sh.max_t), (0.4, 0.8));
 }

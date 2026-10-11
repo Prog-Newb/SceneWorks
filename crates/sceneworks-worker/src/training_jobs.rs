@@ -6237,7 +6237,7 @@ mod tests {
             gen_core::AuxLossSchedule {
                 weight: 0.15,
                 t_min: 0.0,
-                t_max: 1.0,
+                t_max: 0.5,
                 every_n: 1,
             }
         );
@@ -6286,7 +6286,7 @@ mod tests {
         );
         assert_eq!(
             (body.shape.weight, body.shape.t_min, body.shape.t_max),
-            (0.2, 0.4, 0.8)
+            (0.2, 0.0, 0.5)
         );
         assert_eq!(body.shape_min_cos, 0.5);
         assert_eq!(body.normal.weight, 0.3);
@@ -6416,7 +6416,7 @@ mod tests {
             gen_core::AuxLossSchedule {
                 weight: 0.2,
                 t_min: 0.0,
-                t_max: 1.0,
+                t_max: 0.5,
                 every_n: 4,
             }
         );

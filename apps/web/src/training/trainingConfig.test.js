@@ -32,10 +32,12 @@ import {
   trainingAdapterModelId,
   depthAnchoringNoVideoLtxWorkflows,
   depthAnchoringEveryMax,
+  depthAnchoringMaxTDefault,
   depthAnchoringModelOptions,
   depthAnchoringWeightMax,
   depthAnchoringWeightSuggested,
   faceLossEveryMax,
+  faceLossMaxTDefault,
   faceLossWeightMax,
   faceLossWeightSuggested,
   identityLossReferenceOptions,
@@ -54,6 +56,7 @@ import {
   bodyLosses,
   bodyLossCombinationRefusal,
   bodyLossEveryMax,
+  bodyLossMaxTDefault,
   bodyLossWeightMax,
   bodyLossWeightSuggested,
   targetSupportsBodyLoss,
@@ -831,6 +834,12 @@ describe("depth anchoring (sc-2125)", () => {
     expect(issuesOn({ ...on, depthAnchoringMinT: "-0.1" }, "depthAnchoringMinT")).toHaveLength(1);
     expect(issuesOn({ ...on, depthAnchoringMaxT: "1.5" }, "depthAnchoringMaxT")).toHaveLength(1);
     expect(issuesOn({ ...on, depthAnchoringMinT: "0.7", depthAnchoringMaxT: "0.3" }, "depthAnchoringMaxT")).toHaveLength(1);
+    // sc-2124: the default window is [0, 0.5] — a lone max inside it is fine, a lone min above it
+    // is inverted against the default max.
+    expect(depthAnchoringMaxTDefault).toBe(0.5);
+    expect(issuesOn({ ...on, depthAnchoringMaxT: "0.3" }, "depthAnchoringMaxT")).toEqual([]);
+    expect(issuesOn({ ...on, depthAnchoringMinT: "0.6" }, "depthAnchoringMaxT")).toHaveLength(1);
+    expect(issuesOn({ ...on, depthAnchoringMinT: "0.6", depthAnchoringMaxT: "1" }, "depthAnchoringMaxT")).toEqual([]);
     for (const bad of ["0", "2.5", String(depthAnchoringEveryMax + 1)]) {
       expect(issuesOn({ ...on, depthAnchoringEvery: bad }, "depthAnchoringEvery")).toHaveLength(1);
     }
@@ -1391,8 +1400,12 @@ describe("body losses (sc-24832)", () => {
     expect(issuesOn(on, "bodyShapeWeight")).toEqual([]);
     expect(issuesOn({ ...on, bodyShapeMinT: "-0.1" }, "bodyShapeMinT")).toHaveLength(1);
     expect(issuesOn({ ...on, bodyShapeMaxT: "1.5" }, "bodyShapeMaxT")).toHaveLength(1);
-    // The shape window defaults to [0.4, 0.8]: a lone max below the default min is inverted.
-    expect(issuesOn({ ...on, bodyShapeMaxT: "0.3" }, "bodyShapeMaxT")).toHaveLength(1);
+    // The shape window defaults to [0, 0.5] (sc-2124): a lone max inside it is fine, a lone min
+    // above the default max is inverted (flagged on the max).
+    expect(issuesOn({ ...on, bodyShapeMaxT: "0.3" }, "bodyShapeMaxT")).toEqual([]);
+    expect(issuesOn({ ...on, bodyShapeMinT: "0.7" }, "bodyShapeMaxT")).toHaveLength(1);
+    expect(bodyLossMaxTDefault).toBe(0.5);
+    expect(bodyLosses.map((loss) => loss.window)).toEqual([[0, 0.5], [0, 0.5], [0, 0.5]]);
     expect(issuesOn({ ...on, bodyShapeMinCos: "1.5" }, "bodyShapeMinCos")).toHaveLength(1);
     for (const bad of ["0", "2.5", String(bodyLossEveryMax + 1)]) {
       expect(issuesOn({ ...on, bodyShapeEvery: bad }, "bodyShapeEvery")).toHaveLength(1);
@@ -1573,6 +1586,10 @@ describe("face losses (sc-24831)", () => {
     expect(issuesOn({ ...on, identityLossMinCos: "-0.5" }, "identityLossMinCos")).toEqual([]);
     expect(issuesOn({ ...on, identityLossReference: "random" }, "identityLossReference")).toHaveLength(1);
     expect(issuesOn({ ...on, identityLossMinT: "0.7", identityLossMaxT: "0.3" }, "identityLossMaxT")).toHaveLength(1);
+    // sc-2124: both face losses default to the window [0, 0.5].
+    expect(faceLossMaxTDefault).toBe(0.5);
+    expect(issuesOn({ ...on, identityLossMinT: "0.6" }, "identityLossMaxT")).toHaveLength(1);
+    expect(issuesOn({ faceLandmarkLossWeight: "0.1", faceLandmarkLossMinT: "0.6" }, "faceLandmarkLossMaxT")).toHaveLength(1);
     for (const bad of ["0", "2.5", String(faceLossEveryMax + 1)]) {
       expect(issuesOn({ ...on, identityLossEvery: bad }, "identityLossEvery")).toHaveLength(1);
     }

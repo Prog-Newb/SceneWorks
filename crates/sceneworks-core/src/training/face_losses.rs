@@ -55,6 +55,9 @@ pub const FACE_LOSS_WEIGHT_SUGGESTED: f64 = 0.1;
 pub const FACE_LOSS_EVERY_MAX: u64 = 16;
 /// Default alternation period: strict diffusion / aux alternation (web: `faceLossEveryDefault`).
 pub const FACE_LOSS_EVERY_DEFAULT: u32 = 2;
+/// Default upper noise-level bound of both face losses (web: `faceLossMaxTDefault`; sc-2124): the
+/// latent losses' low-noise window `[0, 0.5]` — the decoded x0 near pure noise is mush, so an aux-only update there trains toward the frozen model's reading of noise (the epic 2123 real-weight A/B: `[0, 1]` destroyed SDXL likeness and hurt Z-Image). An explicit `*MaxT` is honoured unchanged.
+pub const FACE_LOSS_MAX_T_DEFAULT: f64 = 0.5;
 /// Default identity gate (upstream `identity_loss_min_cos`; web: `identityLossMinCosDefault`).
 pub const IDENTITY_LOSS_MIN_COS_DEFAULT: f64 = 0.2;
 /// The accepted [`IDENTITY_LOSS_REFERENCE_KEY`] values, default first (web:
@@ -167,7 +170,7 @@ fn schedule(
 ) -> Result<Option<FaceLossSchedule>, TrainingPlanError> {
     let weight = bounded(advanced, weight_key, (0.0, FACE_LOSS_WEIGHT_MAX), 0.0)?;
     let min_t = bounded(advanced, min_key, (0.0, 1.0), 0.0)?;
-    let max_t = bounded(advanced, max_key, (0.0, 1.0), 1.0)?;
+    let max_t = bounded(advanced, max_key, (0.0, 1.0), FACE_LOSS_MAX_T_DEFAULT)?;
     if min_t > max_t {
         return Err(field_error(
             max_key,

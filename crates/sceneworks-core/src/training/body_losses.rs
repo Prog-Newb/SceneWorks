@@ -62,13 +62,11 @@ impl BodyLoss {
         format!("{}Weight", self.prefix())
     }
 
-    /// The default noise-level window (upstream: proportion `[0, 1]`, shape and normal
-    /// `[0.4, 0.8]`).
+    /// The default noise-level window: `[0, BODY_LOSS_MAX_T_DEFAULT]` for all three (sc-2124;
+    /// upstream used proportion `[0, 1]`, shape and normal `[0.4, 0.8]`, but the decoded x0 at high
+    /// noise is mush and the real-weight A/B saw high-noise pixel losses destroy likeness).
     pub fn default_window(self) -> (f64, f64) {
-        match self {
-            Self::Proportion => (0.0, 1.0),
-            Self::Shape | Self::Normal => (0.4, 0.8),
-        }
+        (0.0, BODY_LOSS_MAX_T_DEFAULT)
     }
 
     /// The frozen model this loss needs installed besides ViTPose — `None` for the proportion
@@ -119,6 +117,9 @@ pub const BODY_LOSS_WEIGHT_SUGGESTED: f64 = 0.1;
 pub const BODY_LOSS_EVERY_MAX: u64 = 16;
 /// Default alternation period: strict diffusion / aux alternation (upstream default).
 pub const BODY_LOSS_EVERY_DEFAULT: u32 = 2;
+/// Default upper noise-level bound of every body loss (web: `bodyLossMaxTDefault`; sc-2124): the
+/// latent losses' low-noise window `[0, 0.5]` — the decoded x0 near pure noise is mush, so an aux-only update there trains toward the frozen model's reading of noise (the epic 2123 real-weight A/B: `[0, 1]` destroyed SDXL likeness and hurt Z-Image). An explicit `*MaxT` is honoured unchanged.
+pub const BODY_LOSS_MAX_T_DEFAULT: f64 = 0.5;
 /// Upstream `body_shape_loss_min_cos` (web: `bodyShapeMinCosDefault`).
 pub const BODY_SHAPE_MIN_COS_DEFAULT: f64 = 0.2;
 
