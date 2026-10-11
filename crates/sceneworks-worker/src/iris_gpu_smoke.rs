@@ -378,12 +378,14 @@ fn nvidia_memory_used_mib(index: &str) -> Option<u64> {
 /// memory.used` on the job's card every 100 ms; the reported peak is the overall card high-water (the
 /// same quantity as the recorded 21.3–21.4 GB RESIDENT peak), and the catalog's
 /// `candle.sequentialPeakGb` row is set from it. Dispatch with
-/// `-f iris_worker_smoke_filter=iris_worker_gpu_smoke_staged` to run this alone in a fresh process
-/// (nothing else resident on the card).
+/// `-f iris_worker_smoke_filter=iris_staged_vram_measurement` to run this alone in a fresh process
+/// (nothing else resident on the card). Deliberately NOT named `iris_worker_gpu_smoke*`: the default
+/// smoke filter is a substring match and would run it last in the shared process, contaminating its
+/// baseline and peak.
 #[cfg(not(target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real-weight worker GPU measurement; needs the pinned speridlabs/iris-3b and Qwen3-VL-4B-Instruct snapshots under HF_HUB_CACHE and a CUDA device"]
-async fn iris_worker_gpu_smoke_staged() {
+async fn iris_staged_vram_measurement() {
     const STAGED_JOB: &str = "iris-cuda-staged";
     const STAGED_SIZE: u32 = 1024;
     const STAGED_STEPS: u32 = 30;

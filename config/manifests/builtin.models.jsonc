@@ -5992,7 +5992,8 @@
         // * `sequentialPeakGb` — `candle-gen-iris` advertises sequential offload (encode with the
         //   Qwen3-VL encoder, drop it, then denoise), so a card under the resident floor is routed to
         //   staged residency, whose second-stage check reads this row. MEASURED ONCE (sc-25684, the
-        //   bounded dispatch-only `iris_worker_gpu_smoke_staged`, windows-candle run 38160084545,
+        //   bounded dispatch-only `iris_staged_vram_measurement` — then named
+        //   `iris_worker_gpu_smoke_staged` — windows-candle run 38160084545,
         //   RTX PRO 6000): a 1024², count-1, 30-step job routed to `OffloadPolicy::Sequential` peaked at
         //   11.97 GB overall card memory (nvidia-smi, 100 ms sampling, 0.47 GB idle baseline) — rounded
         //   up to 12.0. The gate adds its 2 GB reserve (14.0), so a 16 GB card runs 1024² staged

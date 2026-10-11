@@ -227,7 +227,7 @@ on:
         type: boolean
         default: false
       iris_worker_smoke_filter:
-        description: "cargo test filter for the Iris worker smoke step (default: every Iris worker smoke + the training smoke). sc-25684: iris_worker_gpu_smoke_staged runs only the staged-residency VRAM measurement, alone in a fresh process, and skips the training smoke"
+        description: "cargo test filter for the Iris worker smoke step (default: every Iris worker smoke + the training smoke). sc-25684: iris_staged_vram_measurement runs only the staged-residency VRAM measurement, alone in a fresh process, and skips the training smoke (the default filter never selects it)"
         required: false
         type: string
         default: iris_worker_gpu_smoke

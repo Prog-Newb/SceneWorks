@@ -1259,7 +1259,8 @@ mod tests {
 
     /// An emulated budget that admits ONE weightless 64² Iris image but not eight: the MLX generic
     /// estimate charges its activation term per batched image; the Candle gate adds
-    /// `(images − 1) × candle.imageActivationGbPerMegapixel` to the 24 GB floor (8 images: 66 GB).
+    /// `(images × max(1, MP) − 1) × candle.imageActivationGbPerMegapixel` to the 24 GB floor (8
+    /// images: 66 GB).
     #[cfg(target_os = "macos")]
     const BATCH_ADMISSION_CAP_GB: &str = "40";
     #[cfg(not(target_os = "macos"))]
@@ -1402,7 +1403,7 @@ mod tests {
     /// eight-image native batch BEFORE load, instead of admitting it on a one-image estimate.
     ///
     /// *Mutation that reds this:* `request_batch` back to a constant 1 (MLX) /
-    /// `native_batch_overlay_bytes` back to 0 (Candle).
+    /// `declared_activation_overlay_bytes` back to 0 (Candle).
     #[test]
     fn a_native_prompt_batch_is_admitted_against_its_whole_image_count() {
         let cap = BATCH_ADMISSION_CAP_GB;
