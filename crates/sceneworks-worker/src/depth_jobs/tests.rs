@@ -109,10 +109,6 @@ fn settings_at(data_dir: &Path) -> Settings {
     settings
 }
 
-/// The smallest valid safetensors file: an 8-byte little-endian header length and an empty JSON
-/// header (padded to 8 bytes), no tensors and no `__metadata__`.
-const EMPTY_SAFETENSORS: &[u8] = b"\x08\x00\x00\x00\x00\x00\x00\x00{}      ";
-
 fn export_dir(data_dir: &Path) -> PathBuf {
     sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir, UPSTREAM_WEIGHTS_REPO)
         .unwrap()
@@ -122,17 +118,15 @@ fn export_dir(data_dir: &Path) -> PathBuf {
 }
 
 /// Stage `files` of the depth export; `config.yaml` gets `config` (the tiny depth config by
-/// default), the weights get a header-only safetensors file.
+/// default), the weights get a header-only safetensors file stamped for the depth task.
 fn stage_export(data_dir: &Path, files: &[&str], config: &str) {
     let dir = export_dir(data_dir);
     std::fs::create_dir_all(&dir).unwrap();
     for file in files {
-        // A header-only safetensors file: export resolution reads the weights header for a
-        // trained export's `irisTask` stamp, so the bytes must parse as a (metadata-free) header.
-        let bytes: &[u8] = if *file == BACKBONE_CONFIG_FILE {
-            config.as_bytes()
+        let bytes = if *file == BACKBONE_CONFIG_FILE {
+            config.as_bytes().to_vec()
         } else {
-            EMPTY_SAFETENSORS
+            crate::iris_test_weights::task_weights(IrisTask::Depth)
         };
         std::fs::write(dir.join(file), bytes).unwrap();
     }
