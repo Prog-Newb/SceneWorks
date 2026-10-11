@@ -5995,6 +5995,77 @@
       }
     },
     {
+      // sc-25682 (epic 25678, E4/E5) — Iris-3B MONOCULAR DEPTH as its own TASK install. The depth
+      // task is a separate fine-tune shipped in the `depth/` folder of the same upstream repo: one
+      // forward of the widened backbone conditioned on the export's shipped empty-prompt states, so
+      // it installs and runs WITHOUT the Qwen3-VL text encoder and without the generation backbone
+      // (the engine refuses either if staged). Its resource closure is exactly the three files below
+      // at the pinned revision; the generation entry `iris_3b` owns the repo root files, and a
+      // whole-model delete of either entry is scoped so it never takes the other's files.
+      "id": "iris_3b_depth",
+      "name": "Iris 3B Depth",
+      "family": "iris",
+      "type": "utility",
+      // Served on both lanes: `mlx-gen-iris` (Apple Silicon) and `candle-gen-iris` (Windows/Linux
+      // NVIDIA) both implement the depth task, so the entry is not platform-scoped.
+      "macOnly": false,
+      "capabilities": [],
+      "downloads": [
+        {
+          // Upstream (Apache-2.0; no SceneWorks re-host). FP32 on disk; bf16 compute by default.
+          "provider": "huggingface",
+          "repo": "speridlabs/iris-3b",
+          "revision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+          "default": true,
+          "files": ["depth/config.yaml", "depth/model.safetensors", "depth/empty_prompt.safetensors"],
+          "estimatedSizeBytes": 11989604079,
+          "footprint": { "diskSizeBytes": 11989604079, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/speridlabs/iris-3b"
+      },
+      "gated": false,
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      // DECLARED (measured: false) admission for the depth job (`depth_jobs::DepthAdmission`); the
+      // epic-end campaign (sc-25684) replaces it with measured evidence. Existing real-weight
+      // evidence: a 1024x2048 photo at the default 1024 cap (model input 512x1024 = 524288 px) peaked
+      // at 9.4 GB on MLX and 8.4 GB (nvidia-smi) on CUDA. `residentGb` is the bf16 backbone + reducer
+      // (~3B parameters) the forward keeps resident; the rest of the reference peak is treated as
+      // activations that grow with the model input's pixel count (both engines run fused/budgeted
+      // attention, so the transient is linear in tokens), padded by `extrapolationFactor` above the
+      // observed area. A request over the host budget is refused before load — never downscaled.
+      "depth": {
+        "admission": {
+          "measured": false,
+          "referenceModelPixels": 524288,
+          "extrapolationFactor": 1.5,
+          "mlx": { "residentGb": 6.5, "referencePeakGb": 9.4 },
+          "candle": { "residentGb": 6.5, "referencePeakGb": 8.4 }
+        }
+      },
+      "mlx": {
+        // Catalog display floor (unified memory) for the default 1024 cap; the job's own admission
+        // above is what gates a request.
+        "minMemoryGb": 16
+      },
+      "candle": {
+        // 8.4 GB recorded peak at the reference geometry + the 2 GB allocator reserve, rounded up.
+        "measured": false,
+        "minMemoryGb": 11
+      },
+      "ui": {
+        "label": "Iris 3B Depth",
+        "description": "Monocular depth estimation from the Iris-3B depth fine-tune (Sperid Labs, Apache-2.0). Saves a raw float32 relative-log-depth map (.npy) plus a colorized preview from the Image Editor or the Library. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; downloads only the ~12 GB depth export (no text encoder).",
+        "recommendedFor": []
+      }
+    },
+    {
       "id": "flux_schnell",
       // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
       // `video` sub-block sc-8445 added for Krea Realtime. FLUX.1 [schnell] is the 4-step timestep-distilled student: the `flux1_schnell`

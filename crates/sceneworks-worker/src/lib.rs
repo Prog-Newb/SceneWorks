@@ -851,6 +851,20 @@ mod person_segment_sam3;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 mod segment_jobs;
+// Iris-3B monocular depth (sc-25682): the `image_depth` job — a raw float32 `.npy` depth asset plus a
+// derived preview, served by the native MLX worker on macOS and the Candle worker off-Mac.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod depth_jobs;
+// Reading a saved depth asset as a consumer (sc-25682): the depth-control adapter. Compiled on every
+// build; its only caller (strict depth control) is gated behind a native lane.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+mod depth_asset;
 // Off-Mac candle SAM3 text-concept person segmenter (sc-6247, epic 5482 under sc-5062) — the
 // Windows/CUDA sibling of `person_segment_sam3`, driving `candle-gen-sam3`'s `Sam3VideoModel` to
 // replace the SAM2 box-prompt STUB in the off-Mac person-track (`media_jobs` `maskState = "missing"`).
@@ -2360,6 +2374,16 @@ async fn run_utility_job(
             JobType::ImageSegment => segment_jobs::run_image_segment_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Smart-select segmentation failed.", error)),
+            // Iris-3B monocular depth (sc-25682): the `iris_3b_depth` task export on the native MLX
+            // worker (macOS) or the Candle worker (off-Mac); a build without either lane never
+            // advertises `image_depth`, so the job remains queued.
+            #[cfg(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            ))]
+            JobType::ImageDepth => depth_jobs::run_image_depth_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Depth estimation failed.", error)),
             // SeedVR2 video upscaling (epic 4811): one-step super-resolution — native MLX on Mac (sc-4816)
             // / candle CUDA on Windows (sc-5928). SceneWorks' first video upscaler: decodes the source
             // clip, runs the temporal-chunked 5D upscale, re-encodes, and passes the source audio through.

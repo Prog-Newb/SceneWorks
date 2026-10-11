@@ -364,6 +364,8 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         // sc-6105: smart-select segmentation uses native-MLX SAM3 box prompts here; the Candle GPU
         // descriptor advertises the sibling route off-Mac.
         WorkerCapability::ImageSegment,
+        // sc-25682: Iris-3B monocular depth (native-MLX `mlx-gen-iris` depth task).
+        WorkerCapability::ImageDepth,
         WorkerCapability::VideoUpscale,
         WorkerCapability::PersonDetect,
         WorkerCapability::PersonTrack,
@@ -2985,6 +2987,7 @@ fn an_unusable_gpu_withholds_every_candle_capability() {
         WorkerCapability::PersonReplace,
         WorkerCapability::ImageDetail,
         WorkerCapability::ImageSegment,
+        WorkerCapability::ImageDepth,
         WorkerCapability::DatasetAnalysis,
     ] {
         assert!(
