@@ -22,9 +22,9 @@ import {
 } from "./irisOptions.js";
 import {
   IRIS_TASK_BAG_KEYS,
+  IRIS_TASK_SPECS,
   irisDepthResolution,
   irisTaskBagOf,
-  irisTaskDraftFromDefaults,
   irisTaskOptionsSnapshot,
   irisTaskRequestKeys,
   irisTaskValidation,
@@ -426,9 +426,9 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     // Depth / restoration (sc-25687 / sc-25688): the objective's options bag plus the run's start.
     ...(taskBag
       ? {
-          irisTask: irisTaskDraftFromDefaults(
-            objective,
+          irisTask: irisDraftFromDefaults(
             irisTaskBagOf(objective, advanced) ?? irisTaskBagOf(objective, target?.defaults?.advanced),
+            IRIS_TASK_SPECS[objective],
           ),
           depthInit: asText(advanced.depthInit || "export"),
           resumeFromJobId: "",

@@ -68,9 +68,8 @@ export function IrisSidecarPanel({ items = [], onSidecar }) {
       {open ? (
         <>
           <p className="training-field-hint">
-            Depth maps and masks: .npy or 8/16-bit grayscale PNG, pixel-aligned with the image. Degraded inputs:
-            PNG/JPEG/WebP at the image size or an integer downscale of it. Bulk files match items by name: photo.png ←
-            photo.npy, photo_depth.png, photo_mask.png, photo.jpg.
+            Depth/mask: aligned .npy or grayscale PNG. Degraded: image at 1× or an integer downscale. Bulk files match by
+            name (photo.npy, photo_depth.png, photo_mask.png).
             {onSidecar ? "" : " Save the dataset first."}
           </p>
           <div className="training-advanced-grid">

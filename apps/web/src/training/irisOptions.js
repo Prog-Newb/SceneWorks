@@ -110,10 +110,30 @@ export function draftValue(spec, value) {
   }
 }
 
-export function irisDraftFromDefaults(defaults = {}) {
+// The draft of an options bag: every key of `specs` (generation's by default) as an input value.
+export function irisDraftFromDefaults(defaults, specs = IRIS_OPTION_SPECS) {
   const source = defaults && typeof defaults === "object" ? defaults : {};
-  return Object.fromEntries(IRIS_OPTION_KEYS.map((key) => [key, draftValue(IRIS_OPTION_SPECS[key], source[key])]));
+  return Object.fromEntries(Object.keys(specs).map((key) => [key, draftValue(specs[key], source[key])]));
 }
+
+// One pass over an options bag (generation, depth or restoration): `values` = the filled, in-play,
+// in-domain keys for the request; `issues` = one error (field `<prefix>.<key>`) per out-of-domain
+// value, and per EMA-weight choice made with the EMA off.
+export function parseOptionsBag(specs, bag = {}, inPlay, prefix, emaOn) {
+  const values = {};
+  const issues = [];
+  for (const key of Object.keys(specs)) {
+    if (!inPlay(key)) continue;
+    const parsed = parseOption(key, bag[key], specs);
+    const message = parsed.invalid ?? (!emaOn && parsed.value === "ema" ? `${specs[key].label}: EMA weights need the EMA enabled` : null);
+    if (message) issues.push(issue.error(`${prefix}.${key}`, message));
+    if ("value" in parsed) values[key] = parsed.value;
+  }
+  return { values, issues };
+}
+
+export const RESUME_OR_LOAD_MESSAGE =
+  "Resume continues a run; starting from a previous run's weights begins a new one — choose one";
 
 function parseIntList(text) {
   const tokens = String(text ?? "").split(/[\s,]+/).filter(Boolean);
@@ -244,17 +264,18 @@ export function irisOptionInPlay(key, configDraft) {
 }
 
 // `advanced.iris` for the request: only filled, in-play, in-domain keys.
+function irisBag(configDraft) {
+  return parseOptionsBag(
+    IRIS_OPTION_SPECS,
+    configDraft.iris,
+    (key) => irisOptionInPlay(key, configDraft),
+    "iris",
+    !irisRunContext(configDraft).emaOff,
+  );
+}
+
 export function irisOptionsSnapshot(configDraft = {}) {
-  const iris = configDraft.iris ?? {};
-  const out = {};
-  for (const key of IRIS_OPTION_KEYS) {
-    if (!irisOptionInPlay(key, configDraft)) continue;
-    const parsed = parseOption(key, iris[key]);
-    if (Object.prototype.hasOwnProperty.call(parsed, "value")) {
-      out[key] = parsed.value;
-    }
-  }
-  return out;
+  return irisBag(configDraft).values;
 }
 
 // The request-level keys that ride beside `advanced.iris`.
@@ -274,26 +295,12 @@ export function irisUpstreamPromptsOn(configDraft = {}) {
 
 // The Iris-specific rules (fields `iris.<key>` outline their own inputs).
 export function irisValidation(configDraft = {}) {
-  const issues = [];
+  const { issues } = irisBag(configDraft);
   const iris = configDraft.iris ?? {};
   const run = irisRunContext(configDraft);
-  for (const key of IRIS_OPTION_KEYS) {
-    if (!irisOptionInPlay(key, configDraft)) continue;
-    const parsed = parseOption(key, iris[key]);
-    if (parsed.invalid) {
-      issues.push(issue.error(`iris.${key}`, parsed.invalid));
-    }
-  }
-  if (run.emaOff) {
-    for (const key of ["preview_weights", "export_weights"]) {
-      if (asText(iris[key]).trim() === "ema") {
-        issues.push(issue.error(`iris.${key}`, `${IRIS_OPTION_SPECS[key].label}: EMA weights need the EMA enabled`));
-      }
-    }
-  }
   const { loadFromJobId } = irisRequestKeys(configDraft);
   if (loadFromJobId && run.resuming) {
-    issues.push(issue.error("loadFromJobId", "Resume continues a run; starting from a previous run's weights begins a new one — choose one"));
+    issues.push(issue.error("loadFromJobId", RESUME_OR_LOAD_MESSAGE));
   }
   if (loadFromJobId && asText(iris.init).trim() === "random") {
     issues.push(issue.error("loadFromJobId", "Starting from a previous run's weights cannot be combined with random initialization"));

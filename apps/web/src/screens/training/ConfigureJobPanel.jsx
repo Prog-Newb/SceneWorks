@@ -356,7 +356,7 @@ export function ConfigureJobPanel({
                 updateConfigDraft={updateConfigDraft}
               />
               <RequiredModelsNotice
-                detail="The restoration loss reads these training-only weights; install them in Models before starting."
+                detail="Training-only weights for the restoration loss."
                 downloadJobs={controlModelDownloadJobs}
                 feature="Iris restoration training"
                 models={irisContext.missingResources ?? []}

@@ -11,7 +11,7 @@
 
 import { issue } from "../validation/issues.js";
 import { asText, numberFromDraft } from "./drafts.js";
-import { IRIS_OPTION_SPECS, draftValue, irisObjective, parseOption } from "./irisOptions.js";
+import { IRIS_OPTION_SPECS, RESUME_OR_LOAD_MESSAGE, irisObjective, parseOption, parseOptionsBag } from "./irisOptions.js";
 
 const pick = (keys) => Object.fromEntries(keys.map((key) => [key, IRIS_OPTION_SPECS[key]]));
 const choice = (label, ...values) => ({ kind: "choice", values, label });
@@ -60,12 +60,6 @@ export const IRIS_TASK_SPECS = Object.freeze({
 // The request bag key each objective's options travel under.
 export const IRIS_TASK_BAG_KEYS = Object.freeze({ depth: "iris", restoration: "iris_restore" });
 
-export function irisTaskDraftFromDefaults(objective, defaults = {}) {
-  const specs = IRIS_TASK_SPECS[objective] ?? {};
-  const source = defaults && typeof defaults === "object" ? defaults : {};
-  return Object.fromEntries(Object.keys(specs).map((key) => [key, draftValue(specs[key], source[key])]));
-}
-
 function taskRun(objective, configDraft = {}) {
   const bag = configDraft.irisTask ?? {};
   return {
@@ -104,16 +98,18 @@ export function irisTaskOptionInPlay(objective, key, configDraft) {
   }
 }
 
+function taskBag(objective, configDraft) {
+  return parseOptionsBag(
+    IRIS_TASK_SPECS[objective] ?? {},
+    configDraft.irisTask,
+    (key) => irisTaskOptionInPlay(objective, key, configDraft),
+    "irisTask",
+    taskRun(objective, configDraft).emaOn,
+  );
+}
+
 export function irisTaskOptionsSnapshot(objective, configDraft = {}) {
-  const specs = IRIS_TASK_SPECS[objective] ?? {};
-  const bag = configDraft.irisTask ?? {};
-  const out = {};
-  for (const key of Object.keys(specs)) {
-    if (!irisTaskOptionInPlay(objective, key, configDraft)) continue;
-    const parsed = parseOption(key, bag[key], specs);
-    if (Object.prototype.hasOwnProperty.call(parsed, "value")) out[key] = parsed.value;
-  }
-  return out;
+  return taskBag(objective, configDraft).values;
 }
 
 // The depth run trains at `depth_size`; `resolution` must mirror its larger side.
@@ -154,34 +150,14 @@ export function microStepMultiple(target, accumulation) {
 }
 
 export function irisTaskValidation(objective, configDraft = {}) {
-  const specs = IRIS_TASK_SPECS[objective];
-  if (!specs) return [];
-  const issues = [];
-  const run = taskRun(objective, configDraft);
-  const { bag } = run;
-  const field = (key) => `irisTask.${key}`;
-  for (const key of Object.keys(specs)) {
-    if (!irisTaskOptionInPlay(objective, key, configDraft)) continue;
-    const parsed = parseOption(key, bag[key], specs);
-    if (parsed.invalid) issues.push(issue.error(field(key), parsed.invalid));
-  }
-  if (!run.emaOn) {
-    for (const key of ["preview_weights", "export_weights"]) {
-      if (asText(bag[key]).trim() === "ema") {
-        issues.push(issue.error(field(key), `${specs[key].label}: EMA weights need the EMA enabled`));
-      }
-    }
-  }
+  const { issues } = taskBag(objective, configDraft);
   if (objective === "depth") {
-    const low = numberFromDraft(bag.low_percentile) ?? 2;
-    const high = numberFromDraft(bag.high_percentile) ?? 98;
-    if (low >= high) issues.push(issue.error(field("low_percentile"), "Low percentile must be below the high percentile"));
-    if (asText(configDraft.loadFromJobId).trim()) {
-      if (run.resuming) {
-        issues.push(issue.error("loadFromJobId", "Resume continues a run; starting from a previous run's weights begins a new one — choose one"));
-      } else if (run.parent) {
-        issues.push(issue.error("loadFromJobId", "A previous depth run's weights replace the generation-backbone start — use the depth export start"));
-      }
+    const run = taskRun(objective, configDraft);
+    const low = numberFromDraft(run.bag.low_percentile) ?? 2;
+    const high = numberFromDraft(run.bag.high_percentile) ?? 98;
+    if (low >= high) issues.push(issue.error("irisTask.low_percentile", "Low percentile must be below the high percentile"));
+    if (asText(configDraft.loadFromJobId).trim() && (run.resuming || run.parent)) {
+      issues.push(issue.error("loadFromJobId", run.resuming ? RESUME_OR_LOAD_MESSAGE : "A previous run's weights need the depth export start"));
     }
   }
   return issues;
@@ -197,11 +173,11 @@ export function irisTrainingResourceIds(target) {
 
 // ---- Pre-launch dataset check -------------------------------------------------------------
 
-const POLICY_TEXT = {
+export const POLICY_TEXT = {
   reject: "Reject: the run refuses to start, naming the first invalid item.",
-  skip: "Skip: invalid items are dropped from the run with a warning.",
-  pairs: "Aligned pairs: every item trains on its attached degraded image.",
-  synthetic: "Clean images: each item's degraded input is synthesized (reproducible second-order degradation).",
+  skip: "Skip: invalid items are dropped with a warning.",
+  pairs: "Aligned pairs: each item trains on its degraded image.",
+  synthetic: "Clean images: degraded inputs are synthesized.",
 };
 
 export function irisCheckSummary(report) {
@@ -212,7 +188,6 @@ export function irisCheckSummary(report) {
     policy: POLICY_TEXT[report.policy] ?? asText(report.policy),
     problems: items.filter((item) => item?.status !== "ok").slice(0, 5),
     configError: report.configError || null,
-    ok: Boolean(report.ok),
   };
 }
 

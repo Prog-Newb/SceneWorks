@@ -3,7 +3,7 @@ import React, { useState } from "react";
 import { errorMessage } from "../../errorMessage.js";
 import { invalidProps } from "../../validation/Validation.jsx";
 import { irisRunLabel } from "../../training/irisOptions.js";
-import { IRIS_TASK_SPECS, irisCheckSummary, irisTaskOptionInPlay } from "../../training/irisTaskOptions.js";
+import { IRIS_TASK_SPECS, POLICY_TEXT, irisCheckSummary, irisTaskOptionInPlay } from "../../training/irisTaskOptions.js";
 
 // Iris-3B depth (sc-25687) / restoration (sc-25688) training options. The run-defining choices (the
 // start, the depth training size, the invalid-example policy) and the dataset check sit in the
@@ -133,8 +133,8 @@ export function IrisTaskOptions({
       </div>
       <p className="training-field-hint">
         {depth
-          ? "The depth export start fine-tunes the installed Iris 3B Depth model (no text encoder). The generation backbone start is the paper's recipe: it uses the depth export's empty prompt, or encodes it once with the generation text encoder if the depth export is not installed. The run trains at the training size; invalid examples: reject refuses the run naming the first invalid item, skip drops invalid items with a warning."
-          : "Export fine-tunes the installed restoration model; parent starts from the Iris 3B generation backbone (needs that install). Train on clean images (synthetic degradation) or attach an aligned degraded image to every item (Data Sets → Iris sidecars). One step is a generator window plus a critic window."}
+          ? `Export fine-tunes the installed depth model; the backbone start uses its empty prompt (else the generation text encoder, once). ${POLICY_TEXT.reject} ${POLICY_TEXT.skip}`
+          : "Parent needs the Iris 3B install. Use clean images or a degraded image on every item (Data Sets → Iris sidecars). A step = generator + critic window."}
       </p>
       <button className="secondary-action" disabled={!onCheckDataset || check?.loading} onClick={runCheck} type="button">
         {check?.loading ? "Checking…" : "Check dataset"}
@@ -167,7 +167,7 @@ export function IrisTaskOptions({
             {specs.degradation.label}
             <textarea
               onChange={(event) => setBag("degradation", event.target.value)}
-              placeholder='Optional JSON, e.g. {"use_hflip": true}. Clean-image datasets only; checked when the run is queued.'
+              placeholder='Optional JSON for clean-image datasets, e.g. {"use_hflip": true}'
               rows={3}
               value={bag.degradation ?? ""}
               {...invalidProps(configValidity, "irisTask.degradation")}
