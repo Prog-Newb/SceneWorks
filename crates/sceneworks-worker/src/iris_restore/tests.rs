@@ -3,7 +3,7 @@
 //! driven end to end with an injected stub transform and a mock job API.
 
 use super::*;
-use gen_core::{Image, Progress, Transform, TransformCapabilities, TransformDescriptor};
+use gen_core::Image;
 use serde_json::{json, Value};
 
 pub(crate) const UPSCALER_CONFIG: &str = include_str!("fixtures/upscaler_config.yaml");
@@ -487,443 +487,490 @@ fn the_linked_restore_transform_declares_the_planned_capabilities() {
 // Real job code with a stub transform + mock job API
 // ---------------------------------------------------------------------------------------------
 
-/// A plan-faithful stand-in for the engine: validates and plans with the engine's own
-/// `plan_request`, reports one `Step` per planned tile (checking cancel before each, like the
-/// engine), and returns a flat image of the planned output size.
-struct StubRestorer {
-    descriptor: TransformDescriptor,
-    cancel_after_first_tile: bool,
-}
+// The job wiring (`upscale_jobs`) compiles only where an upscaler backend does (macOS / Candle), so
+// the job-level tests and their fixtures do too.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) use job_tests::*;
 
-impl Transform for StubRestorer {
-    fn descriptor(&self) -> &TransformDescriptor {
-        &self.descriptor
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod job_tests {
+    use super::*;
+    use gen_core::{Progress, Transform, TransformCapabilities, TransformDescriptor};
+
+    /// A plan-faithful stand-in for the engine: validates and plans with the engine's own
+    /// `plan_request`, reports one `Step` per planned tile (checking cancel before each, like the
+    /// engine), and returns a flat image of the planned output size.
+    struct StubRestorer {
+        descriptor: TransformDescriptor,
+        cancel_after_first_tile: bool,
     }
-    fn validate(&self, req: &TransformRequest) -> gen_core::Result<()> {
-        restoration::plan_request(req, TileGeometry::RELEASE, IRIS_RESTORE_MODEL_ID).map(|_| ())
-    }
-    fn apply(
-        &self,
-        req: &TransformRequest,
-        on_progress: &mut dyn FnMut(Progress),
-    ) -> gen_core::Result<Image> {
-        let plan = restoration::plan_request(req, TileGeometry::RELEASE, IRIS_RESTORE_MODEL_ID)?;
-        let total = plan.forward_count() as u32;
-        for current in 1..=total {
-            if req.cancel.is_cancelled() {
-                return Err(gen_core::Error::Canceled);
-            }
-            on_progress(Progress::Step { current, total });
-            if self.cancel_after_first_tile {
-                // A user cancel arriving while tile 1 runs.
-                req.cancel.cancel();
-            }
+
+    impl Transform for StubRestorer {
+        fn descriptor(&self) -> &TransformDescriptor {
+            &self.descriptor
         }
-        on_progress(Progress::Decoding);
-        let (w, h) = (plan.output.width, plan.output.height);
-        Ok(Image {
-            width: w,
-            height: h,
-            pixels: vec![128; (w * h * 3) as usize],
+        fn validate(&self, req: &TransformRequest) -> gen_core::Result<()> {
+            restoration::plan_request(req, TileGeometry::RELEASE, IRIS_RESTORE_MODEL_ID).map(|_| ())
+        }
+        fn apply(
+            &self,
+            req: &TransformRequest,
+            on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<Image> {
+            let plan =
+                restoration::plan_request(req, TileGeometry::RELEASE, IRIS_RESTORE_MODEL_ID)?;
+            let total = plan.forward_count() as u32;
+            for current in 1..=total {
+                if req.cancel.is_cancelled() {
+                    return Err(gen_core::Error::Canceled);
+                }
+                on_progress(Progress::Step { current, total });
+                if self.cancel_after_first_tile {
+                    // A user cancel arriving while tile 1 runs.
+                    req.cancel.cancel();
+                }
+            }
+            on_progress(Progress::Decoding);
+            let (w, h) = (plan.output.width, plan.output.height);
+            Ok(Image {
+                width: w,
+                height: h,
+                pixels: vec![128; (w * h * 3) as usize],
+            })
+        }
+    }
+
+    fn stub_descriptor() -> TransformDescriptor {
+        TransformDescriptor {
+            id: "iris_3b_restore",
+            family: "iris",
+            backend: "stub",
+            capabilities: TransformCapabilities::default(),
+        }
+    }
+
+    pub(crate) fn stub_loader(
+        id: &str,
+        spec: &gen_core::LoadSpec,
+    ) -> gen_core::Result<Box<dyn Transform>> {
+        assert_eq!(id, IRIS_RESTORE_MODEL_ID);
+        // The task resource closure: the export dir alone — no components, no text encoder.
+        assert!(spec.components.is_empty() && spec.text_encoder.is_none());
+        Ok(Box::new(StubRestorer {
+            descriptor: stub_descriptor(),
+            cancel_after_first_tile: false,
+        }))
+    }
+
+    fn canceling_stub_loader(
+        _id: &str,
+        _spec: &gen_core::LoadSpec,
+    ) -> gen_core::Result<Box<dyn Transform>> {
+        Ok(Box::new(StubRestorer {
+            descriptor: stub_descriptor(),
+            cancel_after_first_tile: true,
+        }))
+    }
+
+    pub(crate) type Posts = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
+
+    pub(crate) fn job_json(job_id: &str, payload: Value) -> Value {
+        json!({
+            "id": job_id, "type": "image_upscale", "status": "running",
+            "projectId": payload["projectId"], "projectName": null,
+            "payload": payload, "result": {}, "requestedGpu": "auto", "assignedGpu": "mlx",
+            "workerId": "worker", "progress": 0.1, "stage": "running", "message": "running",
+            "error": null, "etaSeconds": null, "elapsedSeconds": null, "attempts": 1,
+            "sourceJobId": null, "duplicateOfJobId": null, "cancelRequested": false,
+            "createdAt": "2026-10-11T00:00:00Z", "updatedAt": "2026-10-11T00:00:00Z",
+            "startedAt": "2026-10-11T00:00:00Z", "completedAt": null, "canceledAt": null,
+            "lastHeartbeatAt": "2026-10-11T00:00:00Z"
         })
     }
-}
 
-fn stub_descriptor() -> TransformDescriptor {
-    TransformDescriptor {
-        id: "iris_3b_restore",
-        family: "iris",
-        backend: "stub",
-        capabilities: TransformCapabilities::default(),
+    pub(crate) async fn spawn_job_api(job: Value) -> (String, Posts) {
+        spawn_job_api_with(job, false).await
     }
-}
 
-pub(crate) fn stub_loader(
-    id: &str,
-    spec: &gen_core::LoadSpec,
-) -> gen_core::Result<Box<dyn Transform>> {
-    assert_eq!(id, IRIS_RESTORE_MODEL_ID);
-    // The task resource closure: the export dir alone — no components, no text encoder.
-    assert!(spec.components.is_empty() && spec.text_encoder.is_none());
-    Ok(Box::new(StubRestorer {
-        descriptor: stub_descriptor(),
-        cancel_after_first_tile: false,
-    }))
-}
-
-fn canceling_stub_loader(
-    _id: &str,
-    _spec: &gen_core::LoadSpec,
-) -> gen_core::Result<Box<dyn Transform>> {
-    Ok(Box::new(StubRestorer {
-        descriptor: stub_descriptor(),
-        cancel_after_first_tile: true,
-    }))
-}
-
-pub(crate) type Posts = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
-
-pub(crate) fn job_json(job_id: &str, payload: Value) -> Value {
-    json!({
-        "id": job_id, "type": "image_upscale", "status": "running",
-        "projectId": payload["projectId"], "projectName": null,
-        "payload": payload, "result": {}, "requestedGpu": "auto", "assignedGpu": "mlx",
-        "workerId": "worker", "progress": 0.1, "stage": "running", "message": "running",
-        "error": null, "etaSeconds": null, "elapsedSeconds": null, "attempts": 1,
-        "sourceJobId": null, "duplicateOfJobId": null, "cancelRequested": false,
-        "createdAt": "2026-10-11T00:00:00Z", "updatedAt": "2026-10-11T00:00:00Z",
-        "startedAt": "2026-10-11T00:00:00Z", "completedAt": null, "canceledAt": null,
-        "lastHeartbeatAt": "2026-10-11T00:00:00Z"
-    })
-}
-
-pub(crate) async fn spawn_job_api(job: Value) -> (String, Posts) {
-    spawn_job_api_with(job, false).await
-}
-
-/// `cancel_on_progress`: progress posts answer with `cancelRequested: true` (a user cancel landing
-/// mid-run) while the cancel-peek GET keeps answering `false`.
-pub(crate) async fn spawn_job_api_with(job: Value, cancel_on_progress: bool) -> (String, Posts) {
-    use axum::extract::{Path as AxumPath, State};
-    use axum::routing::{get, post};
-    use axum::{Json, Router};
-    #[derive(Clone)]
-    struct Stub {
+    /// `cancel_on_progress`: progress posts answer with `cancelRequested: true` (a user cancel landing
+    /// mid-run) while the cancel-peek GET keeps answering `false`.
+    pub(crate) async fn spawn_job_api_with(
         job: Value,
-        posts: Posts,
         cancel_on_progress: bool,
+    ) -> (String, Posts) {
+        use axum::extract::{Path as AxumPath, State};
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        #[derive(Clone)]
+        struct Stub {
+            job: Value,
+            posts: Posts,
+            cancel_on_progress: bool,
+        }
+        let posts: Posts = Default::default();
+        let stub = Stub {
+            job,
+            posts: posts.clone(),
+            cancel_on_progress,
+        };
+        let app = Router::new()
+            .route(
+                "/api/v1/jobs/:job_id",
+                get(|State(stub): State<Stub>| async move { Json(stub.job.clone()) }),
+            )
+            .route(
+                "/api/v1/jobs/:job_id/progress",
+                post(
+                    |State(stub): State<Stub>,
+                     AxumPath(_id): AxumPath<String>,
+                     Json(body): Json<Value>| async move {
+                        stub.posts.lock().unwrap().push(body);
+                        let mut job = stub.job.clone();
+                        if stub.cancel_on_progress {
+                            job["cancelRequested"] = json!(true);
+                        }
+                        Json(job)
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/workers/:worker_id/heartbeat",
+                post(|AxumPath(worker_id): AxumPath<String>| async move {
+                    Json(json!({
+                        "id": worker_id, "gpuId": "mlx", "gpuName": null, "status": "busy",
+                        "currentJobId": null, "capabilities": [], "loadedModels": [],
+                        "registeredAt": "2026-10-11T00:00:00Z", "lastSeenAt": "2026-10-11T00:00:00Z"
+                    }))
+                }),
+            )
+            .with_state(stub);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), posts)
     }
-    let posts: Posts = Default::default();
-    let stub = Stub {
-        job,
-        posts: posts.clone(),
-        cancel_on_progress,
-    };
-    let app = Router::new()
-        .route(
-            "/api/v1/jobs/:job_id",
-            get(|State(stub): State<Stub>| async move { Json(stub.job.clone()) }),
-        )
-        .route(
-            "/api/v1/jobs/:job_id/progress",
-            post(
-                |State(stub): State<Stub>,
-                 AxumPath(_id): AxumPath<String>,
-                 Json(body): Json<Value>| async move {
-                    stub.posts.lock().unwrap().push(body);
-                    let mut job = stub.job.clone();
-                    if stub.cancel_on_progress {
-                        job["cancelRequested"] = json!(true);
-                    }
-                    Json(job)
+
+    struct JobFixture {
+        _temp: tempfile::TempDir,
+        settings: Settings,
+        project_id: String,
+        project_path: PathBuf,
+        source_id: String,
+        source_bytes: Vec<u8>,
+    }
+
+    fn job_fixture(source: image::RgbImage) -> JobFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        stage_restore_install(&data_dir, UPSCALER_CONFIG, &RESTORE_EXPORT_FILES);
+        let settings = settings_at(&data_dir);
+        let store =
+            sceneworks_core::project_store::ProjectStore::new(data_dir.clone(), "iris-test");
+        let project = store.create_project("Iris restore").unwrap();
+        let file = temp.path().join("source.png");
+        source.save(&file).unwrap();
+        let asset = store
+            .import_asset(
+                &project.id,
+                sceneworks_core::project_store::UploadAsset {
+                    filename: "source.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: file,
+                    source_asset_id: None,
+                    provenance: None,
                 },
-            ),
-        )
-        .route(
-            "/api/v1/workers/:worker_id/heartbeat",
-            post(|AxumPath(worker_id): AxumPath<String>| async move {
-                Json(json!({
-                    "id": worker_id, "gpuId": "mlx", "gpuName": null, "status": "busy",
-                    "currentJobId": null, "capabilities": [], "loadedModels": [],
-                    "registeredAt": "2026-10-11T00:00:00Z", "lastSeenAt": "2026-10-11T00:00:00Z"
-                }))
-            }),
-        )
-        .with_state(stub);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (format!("http://{address}"), posts)
-}
-
-struct JobFixture {
-    _temp: tempfile::TempDir,
-    settings: Settings,
-    project_id: String,
-    project_path: PathBuf,
-    source_id: String,
-    source_bytes: Vec<u8>,
-}
-
-fn job_fixture(source: image::RgbImage) -> JobFixture {
-    let temp = tempfile::tempdir().unwrap();
-    let data_dir = temp.path().join("data");
-    stage_restore_install(&data_dir, UPSCALER_CONFIG, &RESTORE_EXPORT_FILES);
-    let settings = settings_at(&data_dir);
-    let store = sceneworks_core::project_store::ProjectStore::new(data_dir.clone(), "iris-test");
-    let project = store.create_project("Iris restore").unwrap();
-    let file = temp.path().join("source.png");
-    source.save(&file).unwrap();
-    let asset = store
-        .import_asset(
-            &project.id,
-            sceneworks_core::project_store::UploadAsset {
-                filename: "source.png".to_owned(),
-                content_type: Some("image/png".to_owned()),
-                source_path: file,
-                source_asset_id: None,
-                provenance: None,
-            },
-        )
-        .unwrap();
-    let project_path = PathBuf::from(&project.path);
-    let source_rel = asset["file"]["path"].as_str().unwrap().to_owned();
-    let source_bytes = std::fs::read(project_path.join(&source_rel)).unwrap();
-    JobFixture {
-        _temp: temp,
-        settings,
-        project_id: project.id,
-        project_path,
-        source_id: asset["id"].as_str().unwrap().to_owned(),
-        source_bytes,
-    }
-}
-
-fn source_file_bytes(fixture: &JobFixture) -> Vec<u8> {
-    let store = sceneworks_core::project_store::ProjectStore::new(
-        fixture.settings.data_dir.clone(),
-        "iris-test",
-    );
-    let asset = store
-        .get_asset(&fixture.project_id, &fixture.source_id)
-        .unwrap();
-    std::fs::read(
-        fixture
-            .project_path
-            .join(asset["file"]["path"].as_str().unwrap()),
-    )
-    .unwrap()
-}
-
-pub(crate) fn png_files_under(dir: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                found.extend(png_files_under(&path));
-            } else if path.extension().is_some_and(|ext| ext == "png") {
-                found.push(path);
-            }
+            )
+            .unwrap();
+        let project_path = PathBuf::from(&project.path);
+        let source_rel = asset["file"]["path"].as_str().unwrap().to_owned();
+        let source_bytes = std::fs::read(project_path.join(&source_rel)).unwrap();
+        JobFixture {
+            _temp: temp,
+            settings,
+            project_id: project.id,
+            project_path,
+            source_id: asset["id"].as_str().unwrap().to_owned(),
+            source_bytes,
         }
     }
-    found
-}
 
-/// The standalone `image_upscale` job with `engine: "iris"` runs the REAL job code: install
-/// resolution, planning against the installed export, per-tile progress to the job API, and a NEW
-/// lineage-linked asset at the planned size with the applied settings recorded — the source asset is
-/// untouched.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_standalone_restore_writes_a_new_lineage_linked_asset_with_tile_progress() {
-    let _env = isolate();
-    let fixture = job_fixture(image::RgbImage::from_pixel(
-        512,
-        384,
-        image::Rgb([200, 30, 30]),
-    ));
-    let payload = json!({
-        "projectId": fixture.project_id,
-        "sourceAssetId": fixture.source_id,
-        "engine": "iris",
-        "scale": 4,
-        "inputSizing": "budgeted",
-        "colorFix": true,
-        "displayName": "Portrait",
-    });
-    let job_value = job_json("job-iris", payload);
-    let (api_url, posts) = spawn_job_api(job_value.clone()).await;
-    let mut settings = fixture.settings.clone();
-    settings.api_url = api_url;
-    let api = crate::ApiClient::new(&settings);
-    let job: sceneworks_core::contracts::JobSnapshot = serde_json::from_value(job_value).unwrap();
+    fn source_file_bytes(fixture: &JobFixture) -> Vec<u8> {
+        let store = sceneworks_core::project_store::ProjectStore::new(
+            fixture.settings.data_dir.clone(),
+            "iris-test",
+        );
+        let asset = store
+            .get_asset(&fixture.project_id, &fixture.source_id)
+            .unwrap();
+        std::fs::read(
+            fixture
+                .project_path
+                .join(asset["file"]["path"].as_str().unwrap()),
+        )
+        .unwrap()
+    }
 
-    crate::upscale_jobs::run_iris_restore_job_using(&api, &settings, &job, stub_loader)
-        .await
-        .expect("the restore job completes");
+    pub(crate) fn png_files_under(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    found.extend(png_files_under(&path));
+                } else if path.extension().is_some_and(|ext| ext == "png") {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
 
-    let posts = posts.lock().unwrap().clone();
-    let tiles: Vec<&str> = posts
-        .iter()
-        .filter_map(|post| post["message"].as_str())
-        .filter(|message| message.starts_with("Restoring tile"))
-        .collect();
-    assert_eq!(
-        tiles,
-        (1..=6)
-            .map(|k| format!("Restoring tile {k}/6 with Iris."))
-            .collect::<Vec<_>>()
+    /// The standalone `image_upscale` job with `engine: "iris"` runs the REAL job code: install
+    /// resolution, planning against the installed export, per-tile progress to the job API, and a NEW
+    /// lineage-linked asset at the planned size with the applied settings recorded — the source asset is
+    /// untouched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_standalone_restore_writes_a_new_lineage_linked_asset_with_tile_progress() {
+        let _env = isolate();
+        let fixture = job_fixture(image::RgbImage::from_pixel(
+            512,
+            384,
+            image::Rgb([200, 30, 30]),
+        ));
+        let payload = json!({
+            "projectId": fixture.project_id,
+            "sourceAssetId": fixture.source_id,
+            "engine": "iris",
+            "scale": 4,
+            "inputSizing": "budgeted",
+            "colorFix": true,
+            "displayName": "Portrait",
+        });
+        let job_value = job_json("job-iris", payload);
+        let (api_url, posts) = spawn_job_api(job_value.clone()).await;
+        let mut settings = fixture.settings.clone();
+        settings.api_url = api_url;
+        let api = crate::ApiClient::new(&settings);
+        let job: sceneworks_core::contracts::JobSnapshot =
+            serde_json::from_value(job_value).unwrap();
+
+        crate::upscale_jobs::run_iris_restore_job_using(&api, &settings, &job, stub_loader)
+            .await
+            .expect("the restore job completes");
+
+        let posts = posts.lock().unwrap().clone();
+        let tiles: Vec<&str> = posts
             .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        "one progress post per planned tile, in order"
-    );
-    let completed = posts
-        .iter()
-        .find(|post| post["status"] == "completed")
-        .expect("a completed post");
-    let asset = &completed["result"]["assetWrites"][0];
-    assert_eq!(
-        (asset["width"].as_u64(), asset["height"].as_u64()),
-        (Some(2048), Some(1536))
-    );
-    assert_eq!(asset["model"], json!("iris_3b_restore"));
-    assert_eq!(asset["sourceAssetId"], json!(fixture.source_id));
-    assert_eq!(asset["parents"], json!([fixture.source_id]));
-    assert_eq!(
-        asset["extra"]["upscaledFromAssetId"],
-        json!(fixture.source_id)
-    );
-    assert_eq!(asset["displayName"], json!("Portrait (Iris restored 4×)"));
-    let record = &asset["rawAdapterSettings"]["upscale"];
-    assert_eq!(record["engine"], json!("iris"));
-    assert_eq!(record["scale"], json!(4.0));
-    assert_eq!(record["inputSizing"], json!("budgeted"));
-    assert_eq!(record["colorFix"], json!(true));
-    assert_eq!(record["plan"]["tileCount"], json!(6));
-    assert_ne!(asset["assetId"], json!(fixture.source_id));
-    // The written file is the planned size, and the source is byte-identical.
-    let written = fixture
-        .project_path
-        .join(asset["mediaPath"].as_str().unwrap());
-    let decoded = image::open(&written).unwrap();
-    assert_eq!((decoded.width(), decoded.height()), (2048, 1536));
-    assert_eq!(source_file_bytes(&fixture), fixture.source_bytes);
-}
+            .filter_map(|post| post["message"].as_str())
+            .filter(|message| message.starts_with("Restoring tile"))
+            .collect();
+        assert_eq!(
+            tiles,
+            (1..=6)
+                .map(|k| format!("Restoring tile {k}/6 with Iris."))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            "one progress post per planned tile, in order"
+        );
+        let completed = posts
+            .iter()
+            .find(|post| post["status"] == "completed")
+            .expect("a completed post");
+        let asset = &completed["result"]["assetWrites"][0];
+        assert_eq!(
+            (asset["width"].as_u64(), asset["height"].as_u64()),
+            (Some(2048), Some(1536))
+        );
+        assert_eq!(asset["model"], json!("iris_3b_restore"));
+        assert_eq!(asset["sourceAssetId"], json!(fixture.source_id));
+        assert_eq!(asset["parents"], json!([fixture.source_id]));
+        assert_eq!(
+            asset["extra"]["upscaledFromAssetId"],
+            json!(fixture.source_id)
+        );
+        assert_eq!(asset["displayName"], json!("Portrait (Iris restored 4×)"));
+        let record = &asset["rawAdapterSettings"]["upscale"];
+        assert_eq!(record["engine"], json!("iris"));
+        assert_eq!(record["scale"], json!(4.0));
+        assert_eq!(record["inputSizing"], json!("budgeted"));
+        assert_eq!(record["colorFix"], json!(true));
+        assert_eq!(record["plan"]["tileCount"], json!(6));
+        assert_ne!(asset["assetId"], json!(fixture.source_id));
+        // The written file is the planned size, and the source is byte-identical.
+        let written = fixture
+            .project_path
+            .join(asset["mediaPath"].as_str().unwrap());
+        let decoded = image::open(&written).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (2048, 1536));
+        assert_eq!(source_file_bytes(&fixture), fixture.source_bytes);
+    }
 
-/// A budget-downscaled restore is recorded and named honestly.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_budgeted_restore_is_named_by_its_budgeted_input() {
-    let _env = isolate();
-    let fixture = job_fixture(image::RgbImage::from_pixel(
-        1200,
-        900,
-        image::Rgb([5, 90, 5]),
-    ));
-    let payload = json!({
-        "projectId": fixture.project_id,
-        "sourceAssetId": fixture.source_id,
-        "engine": "iris",
-        "displayName": "Field",
-    });
-    let job_value = job_json("job-iris-budget", payload);
-    let (api_url, posts) = spawn_job_api(job_value.clone()).await;
-    let mut settings = fixture.settings.clone();
-    settings.api_url = api_url;
-    let api = crate::ApiClient::new(&settings);
-    let job: sceneworks_core::contracts::JobSnapshot = serde_json::from_value(job_value).unwrap();
-    crate::upscale_jobs::run_iris_restore_job_using(&api, &settings, &job, stub_loader)
-        .await
-        .unwrap();
-    let posts = posts.lock().unwrap().clone();
-    let asset = &posts
-        .iter()
-        .find(|post| post["status"] == "completed")
-        .unwrap()["result"]["assetWrites"][0];
-    // 1200x900 → budget (short ≤ 512) → 683x512 → 4× → 2732x2048.
-    assert_eq!(
-        asset["displayName"],
-        json!("Field (Iris restored, budgeted 683x512 → 2732x2048)")
-    );
-    assert_eq!(
-        asset["rawAdapterSettings"]["upscale"]["plan"]["budgetApplied"],
-        json!(true)
-    );
-}
+    /// A budget-downscaled restore is recorded and named honestly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_budgeted_restore_is_named_by_its_budgeted_input() {
+        let _env = isolate();
+        let fixture = job_fixture(image::RgbImage::from_pixel(
+            1200,
+            900,
+            image::Rgb([5, 90, 5]),
+        ));
+        let payload = json!({
+            "projectId": fixture.project_id,
+            "sourceAssetId": fixture.source_id,
+            "engine": "iris",
+            "displayName": "Field",
+        });
+        let job_value = job_json("job-iris-budget", payload);
+        let (api_url, posts) = spawn_job_api(job_value.clone()).await;
+        let mut settings = fixture.settings.clone();
+        settings.api_url = api_url;
+        let api = crate::ApiClient::new(&settings);
+        let job: sceneworks_core::contracts::JobSnapshot =
+            serde_json::from_value(job_value).unwrap();
+        crate::upscale_jobs::run_iris_restore_job_using(&api, &settings, &job, stub_loader)
+            .await
+            .unwrap();
+        let posts = posts.lock().unwrap().clone();
+        let asset = &posts
+            .iter()
+            .find(|post| post["status"] == "completed")
+            .unwrap()["result"]["assetWrites"][0];
+        // 1200x900 → budget (short ≤ 512) → 683x512 → 4× → 2732x2048.
+        assert_eq!(
+            asset["displayName"],
+            json!("Field (Iris restored, budgeted 683x512 → 2732x2048)")
+        );
+        assert_eq!(
+            asset["rawAdapterSettings"]["upscale"]["plan"]["budgetApplied"],
+            json!(true)
+        );
+    }
 
-/// A cancel between tiles ends the job canceled with NO asset written and the source untouched.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_canceled_restore_publishes_no_asset() {
-    let _env = isolate();
-    let fixture = job_fixture(image::RgbImage::from_pixel(512, 384, image::Rgb([1, 2, 3])));
-    let payload = json!({
-        "projectId": fixture.project_id,
-        "sourceAssetId": fixture.source_id,
-        "engine": "iris",
-    });
-    let job_value = job_json("job-iris-cancel", payload);
-    let (api_url, posts) = spawn_job_api(job_value.clone()).await;
-    let mut settings = fixture.settings.clone();
-    settings.api_url = api_url;
-    let api = crate::ApiClient::new(&settings);
-    let job: sceneworks_core::contracts::JobSnapshot = serde_json::from_value(job_value).unwrap();
-    let before = png_files_under(&fixture.project_path.join("assets"));
-    let error = crate::upscale_jobs::run_iris_restore_job_using(
-        &api,
-        &settings,
-        &job,
-        canceling_stub_loader,
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(error, WorkerError::Canceled(_)), "{error:?}");
-    let posts = posts.lock().unwrap().clone();
-    assert!(
-        posts.iter().any(|post| post["status"] == "canceled"),
-        "{posts:#?}"
-    );
-    assert!(!posts.iter().any(|post| post["status"] == "completed"));
-    assert_eq!(
-        png_files_under(&fixture.project_path.join("assets")),
-        before
-    );
-    assert_eq!(source_file_bytes(&fixture), fixture.source_bytes);
-}
-
-/// A user cancel recorded on the job while it runs is seen on the next per-tile progress answer and
-/// stops the restore before the next tile — not only at the heartbeat's slower cancel poll, which a
-/// warm restore can outrun — so a canceled job never publishes an asset (found by the sc-25683
-/// real-weight E2E, where a warm 6-tile 4x finished inside one heartbeat interval).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cancel_seen_on_a_tile_progress_post_stops_the_restore() {
-    let _env = isolate();
-    let fixture = job_fixture(image::RgbImage::from_pixel(512, 384, image::Rgb([9, 9, 9])));
-    let job_value = job_json(
-        "job-iris-tile-cancel",
-        json!({ "projectId": fixture.project_id, "sourceAssetId": fixture.source_id, "engine": "iris" }),
-    );
-    let (api_url, posts) = spawn_job_api_with(job_value.clone(), true).await;
-    let mut settings = fixture.settings.clone();
-    settings.api_url = api_url;
-    // Keep the heartbeat's own cancel poll out of the picture for the whole run.
-    settings.heartbeat_seconds = 60;
-    let api = crate::ApiClient::new(&settings);
-    let job: sceneworks_core::contracts::JobSnapshot = serde_json::from_value(job_value).unwrap();
-    let before = png_files_under(&fixture.project_path.join("assets"));
-    let error = crate::upscale_jobs::run_iris_restore_job_using(&api, &settings, &job, stub_loader)
-        .await
-        .unwrap_err();
-    assert!(matches!(error, WorkerError::Canceled(_)), "{error:?}");
-    let posts = posts.lock().unwrap().clone();
-    assert!(
-        posts.iter().any(|post| post["status"] == "canceled"),
-        "{posts:#?}"
-    );
-    assert!(!posts.iter().any(|post| post["status"] == "completed"));
-    assert_eq!(
-        png_files_under(&fixture.project_path.join("assets")),
-        before
-    );
-}
-
-/// Controls that are not Iris's are refused by name, never ignored; a missing install is the typed
-/// install refusal.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn foreign_controls_and_missing_installs_are_typed_refusals() {
-    let _env = isolate();
-    let fixture = job_fixture(image::RgbImage::new(64, 64));
-    for (key, value) in [
-        ("factor", json!(4)),
-        ("softness", json!(0.5)),
-        ("seed", json!(7)),
-    ] {
-        let mut payload = json!({
+    /// A cancel between tiles ends the job canceled with NO asset written and the source untouched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_canceled_restore_publishes_no_asset() {
+        let _env = isolate();
+        let fixture = job_fixture(image::RgbImage::from_pixel(512, 384, image::Rgb([1, 2, 3])));
+        let payload = json!({
             "projectId": fixture.project_id,
             "sourceAssetId": fixture.source_id,
             "engine": "iris",
         });
-        payload[key] = value;
-        let job_value = job_json("job-iris-refuse", payload);
+        let job_value = job_json("job-iris-cancel", payload);
+        let (api_url, posts) = spawn_job_api(job_value.clone()).await;
+        let mut settings = fixture.settings.clone();
+        settings.api_url = api_url;
+        let api = crate::ApiClient::new(&settings);
+        let job: sceneworks_core::contracts::JobSnapshot =
+            serde_json::from_value(job_value).unwrap();
+        let before = png_files_under(&fixture.project_path.join("assets"));
+        let error = crate::upscale_jobs::run_iris_restore_job_using(
+            &api,
+            &settings,
+            &job,
+            canceling_stub_loader,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, WorkerError::Canceled(_)), "{error:?}");
+        let posts = posts.lock().unwrap().clone();
+        assert!(
+            posts.iter().any(|post| post["status"] == "canceled"),
+            "{posts:#?}"
+        );
+        assert!(!posts.iter().any(|post| post["status"] == "completed"));
+        assert_eq!(
+            png_files_under(&fixture.project_path.join("assets")),
+            before
+        );
+        assert_eq!(source_file_bytes(&fixture), fixture.source_bytes);
+    }
+
+    /// A user cancel recorded on the job while it runs is seen on the next per-tile progress answer and
+    /// stops the restore before the next tile — not only at the heartbeat's slower cancel poll, which a
+    /// warm restore can outrun — so a canceled job never publishes an asset (found by the sc-25683
+    /// real-weight E2E, where a warm 6-tile 4x finished inside one heartbeat interval).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancel_seen_on_a_tile_progress_post_stops_the_restore() {
+        let _env = isolate();
+        let fixture = job_fixture(image::RgbImage::from_pixel(512, 384, image::Rgb([9, 9, 9])));
+        let job_value = job_json(
+            "job-iris-tile-cancel",
+            json!({ "projectId": fixture.project_id, "sourceAssetId": fixture.source_id, "engine": "iris" }),
+        );
+        let (api_url, posts) = spawn_job_api_with(job_value.clone(), true).await;
+        let mut settings = fixture.settings.clone();
+        settings.api_url = api_url;
+        // Keep the heartbeat's own cancel poll out of the picture for the whole run.
+        settings.heartbeat_seconds = 60;
+        let api = crate::ApiClient::new(&settings);
+        let job: sceneworks_core::contracts::JobSnapshot =
+            serde_json::from_value(job_value).unwrap();
+        let before = png_files_under(&fixture.project_path.join("assets"));
+        let error =
+            crate::upscale_jobs::run_iris_restore_job_using(&api, &settings, &job, stub_loader)
+                .await
+                .unwrap_err();
+        assert!(matches!(error, WorkerError::Canceled(_)), "{error:?}");
+        let posts = posts.lock().unwrap().clone();
+        assert!(
+            posts.iter().any(|post| post["status"] == "canceled"),
+            "{posts:#?}"
+        );
+        assert!(!posts.iter().any(|post| post["status"] == "completed"));
+        assert_eq!(
+            png_files_under(&fixture.project_path.join("assets")),
+            before
+        );
+    }
+
+    /// Controls that are not Iris's are refused by name, never ignored; a missing install is the typed
+    /// install refusal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn foreign_controls_and_missing_installs_are_typed_refusals() {
+        let _env = isolate();
+        let fixture = job_fixture(image::RgbImage::new(64, 64));
+        for (key, value) in [
+            ("factor", json!(4)),
+            ("softness", json!(0.5)),
+            ("seed", json!(7)),
+        ] {
+            let mut payload = json!({
+                "projectId": fixture.project_id,
+                "sourceAssetId": fixture.source_id,
+                "engine": "iris",
+            });
+            payload[key] = value;
+            let job_value = job_json("job-iris-refuse", payload);
+            let (api_url, _posts) = spawn_job_api(job_value.clone()).await;
+            let mut settings = fixture.settings.clone();
+            settings.api_url = api_url;
+            let api = crate::ApiClient::new(&settings);
+            let job: sceneworks_core::contracts::JobSnapshot =
+                serde_json::from_value(job_value).unwrap();
+            let error =
+                crate::upscale_jobs::run_iris_restore_job_using(&api, &settings, &job, stub_loader)
+                    .await
+                    .unwrap_err();
+            assert!(
+                matches!(&error, WorkerError::InvalidPayload(text) if text.contains(key)),
+                "{key}: {error:?}"
+            );
+        }
+        // Remove the install: the job refuses with the install error, not an engine failure.
+        std::fs::remove_dir_all(snapshot_dir(&fixture.settings.data_dir)).unwrap();
+        let job_value = job_json(
+            "job-iris-missing",
+            json!({ "projectId": fixture.project_id, "sourceAssetId": fixture.source_id, "engine": "iris" }),
+        );
         let (api_url, _posts) = spawn_job_api(job_value.clone()).await;
         let mut settings = fixture.settings.clone();
         settings.api_url = api_url;
@@ -934,58 +981,40 @@ async fn foreign_controls_and_missing_installs_are_typed_refusals() {
             crate::upscale_jobs::run_iris_restore_job_using(&api, &settings, &job, stub_loader)
                 .await
                 .unwrap_err();
-        assert!(
-            matches!(&error, WorkerError::InvalidPayload(text) if text.contains(key)),
-            "{key}: {error:?}"
-        );
+        assert!(error.to_string().contains("not installed"), "{error:?}");
     }
-    // Remove the install: the job refuses with the install error, not an engine failure.
-    std::fs::remove_dir_all(snapshot_dir(&fixture.settings.data_dir)).unwrap();
-    let job_value = job_json(
-        "job-iris-missing",
-        json!({ "projectId": fixture.project_id, "sourceAssetId": fixture.source_id, "engine": "iris" }),
-    );
-    let (api_url, _posts) = spawn_job_api(job_value.clone()).await;
-    let mut settings = fixture.settings.clone();
-    settings.api_url = api_url;
-    let api = crate::ApiClient::new(&settings);
-    let job: sceneworks_core::contracts::JobSnapshot = serde_json::from_value(job_value).unwrap();
-    let error = crate::upscale_jobs::run_iris_restore_job_using(&api, &settings, &job, stub_loader)
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("not installed"), "{error:?}");
-}
 
-/// Admission refuses BEFORE loading anything (the stub loader would panic if reached) and never
-/// changes the request: the emulated small device names what the request needs.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn admission_refuses_before_load_on_a_small_device() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_dir = temp.path().join("data");
-    let _env = crate::test_env::EnvVars::set(&[
-        ("HF_HUB_CACHE", ""),
-        ("HUGGINGFACE_HUB_CACHE", ""),
-        ("HF_HOME", ""),
-        ("SCENEWORKS_MLX_MEMORY_CAP_GB", "8"),
-        ("SCENEWORKS_CUDA_VRAM_CAP_GB", "8"),
-    ]);
-    stage_restore_install(&data_dir, UPSCALER_CONFIG, &RESTORE_EXPORT_FILES);
-    let settings = settings_at(&data_dir);
-    fn never_loads(_: &str, _: &gen_core::LoadSpec) -> gen_core::Result<Box<dyn Transform>> {
-        panic!("an over-budget restore must be refused before loading");
+    /// Admission refuses BEFORE loading anything (the stub loader would panic if reached) and never
+    /// changes the request: the emulated small device names what the request needs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admission_refuses_before_load_on_a_small_device() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+            ("SCENEWORKS_MLX_MEMORY_CAP_GB", "8"),
+            ("SCENEWORKS_CUDA_VRAM_CAP_GB", "8"),
+        ]);
+        stage_restore_install(&data_dir, UPSCALER_CONFIG, &RESTORE_EXPORT_FILES);
+        let settings = settings_at(&data_dir);
+        fn never_loads(_: &str, _: &gen_core::LoadSpec) -> gen_core::Result<Box<dyn Transform>> {
+            panic!("an over-budget restore must be refused before loading");
+        }
+        let api = crate::ApiClient::new(&settings);
+        let error = crate::upscale_jobs::restore_with_progress(
+            &api,
+            &settings,
+            "job-small",
+            never_loads,
+            image::RgbImage::new(512, 384),
+            IrisRestoreParams::default(),
+            |_, _| unreachable!(),
+        )
+        .await
+        .expect_err("refused");
+        let text = error.to_string();
+        assert!(text.contains("needs ~") && text.contains("~8 GB"), "{text}");
     }
-    let api = crate::ApiClient::new(&settings);
-    let error = crate::upscale_jobs::restore_with_progress(
-        &api,
-        &settings,
-        "job-small",
-        never_loads,
-        image::RgbImage::new(512, 384),
-        IrisRestoreParams::default(),
-        |_, _| unreachable!(),
-    )
-    .await
-    .expect_err("refused");
-    let text = error.to_string();
-    assert!(text.contains("needs ~") && text.contains("~8 GB"), "{text}");
 }

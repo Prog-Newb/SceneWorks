@@ -2475,8 +2475,7 @@ pub(crate) fn standalone_upscale_workflow_share(
 /// ones. Geometry is the SOURCE image's, so the recipe reads "this image, restored at N×".
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) fn standalone_restore_workflow_share(
     job_payload: &JsonObject,
@@ -2501,8 +2500,7 @@ pub(crate) fn standalone_restore_workflow_share(
 /// The envelope's `upscale` record for an applied Iris restoration: exactly the reopenable controls.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) fn iris_upscale_overlay(plan: &gen_core::iris::restoration::RestorationPlan) -> Value {
     json!({
