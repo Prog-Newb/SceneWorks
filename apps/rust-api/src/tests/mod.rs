@@ -16,6 +16,7 @@ mod film_harness_fixes;
 mod film_harness_references;
 mod film_harness_review;
 mod films;
+mod image_restoration;
 mod jobs;
 mod mcp;
 mod media;

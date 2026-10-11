@@ -357,6 +357,46 @@ pub struct SubmitVideoJobArgs {
     pub replacement_mode: Option<String>,
 }
 
+/// Arguments for `estimate_depth` (Iris-3B monocular depth, sc-25682): the typed
+/// `POST /api/v1/image/depth/jobs` request.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EstimateDepthArgs {
+    #[schemars(description = "Project id (from list_projects).")]
+    pub project_id: String,
+    #[schemars(description = "The image asset to estimate depth from. It is not modified.")]
+    pub source_asset_id: String,
+    #[schemars(
+        description = "\"capped\" (default) downscales the model input so its long side is at most maxSide; \"native\" runs at the source resolution (much more memory on a large photo; refused if it does not fit)."
+    )]
+    pub resolution_mode: Option<String>,
+    #[schemars(description = "Max side in pixels for \"capped\" (64-8192, default 1024).")]
+    pub max_side: Option<u32>,
+}
+
+/// The `POST /api/v1/image/depth/jobs` body for [`EstimateDepthArgs`].
+pub(crate) fn depth_job_body(args: &EstimateDepthArgs) -> Result<Value, String> {
+    let resolution = match args.resolution_mode.as_deref().unwrap_or("capped") {
+        "native" => {
+            if args.max_side.is_some() {
+                return Err("maxSide applies only to resolutionMode \"capped\"".to_owned());
+            }
+            json!({ "mode": "native" })
+        }
+        "capped" => json!({ "mode": "capped", "maxSide": args.max_side.unwrap_or(1024) }),
+        other => {
+            return Err(format!(
+                "resolutionMode must be \"capped\" or \"native\", not {other:?}"
+            ))
+        }
+    };
+    Ok(json!({
+        "projectId": args.project_id,
+        "sourceAssetId": args.source_asset_id,
+        "resolution": resolution,
+    }))
+}
+
 /// Arguments for the generic job-polling tools (`get_job_status` /
 /// `get_job_result`) — they work for any job type (video AND image).
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -666,6 +706,39 @@ impl SceneWorksMcp {
     }
 
     #[tool(
+        description = "Estimate monocular depth (Iris-3B) for an existing image asset WITHOUT waiting. The result is a new depth asset: the raw float32 HxW relative log depth map (.npy, row-major <f4, affine-invariant: roughly -1 near to +1 far, NOT metric, not clamped) at the image's EXIF-corrected size, plus a separate colorized PNG preview, linked to the source image (which is not modified). Requires the \"Iris 3B Depth\" model to be installed; a request too large for the GPU memory budget is refused, never downscaled. Returns the job id; poll get_job_status, then get_job_result for the .npy and preview links."
+    )]
+    async fn estimate_depth(
+        &self,
+        Parameters(args): Parameters<EstimateDepthArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let body =
+            depth_job_body(&args).map_err(|message| ErrorData::invalid_params(message, None))?;
+        let job = self
+            .api
+            .post_json("/api/v1/image/depth/jobs", &body)
+            .await
+            .map_err(api_error)?;
+        if job.get("id").and_then(Value::as_str).is_none() {
+            return Err(ErrorData::internal_error(
+                "depth job submission returned no job id",
+                None,
+            ));
+        }
+        let mut snapshot = compact_job_status(&job);
+        if let Some(out) = snapshot.as_object_mut() {
+            out.insert(
+                "next".to_owned(),
+                json!(
+                    "Poll get_job_status with this jobId; once status is \"completed\", call \
+                     get_job_result for the raw .npy and its preview."
+                ),
+            );
+        }
+        json_result(snapshot)
+    }
+
+    #[tool(
         description = "Get the current status of a submitted job (works for video AND image jobs): status (queued/running/completed/failed/canceled/interrupted), stage, progressPercent, etaSeconds, and the error message when the job failed."
     )]
     async fn get_job_status(
@@ -968,14 +1041,45 @@ impl SceneWorksMcp {
                 link = link.with_mime_type(mime);
             }
             blocks.push(ContentBlock::resource_link(link));
-            summary_assets.push(json!({
+            // An asset whose stored file is not a picture (a depth map's raw .npy, a vector's
+            // SVG) carries a separately stored PNG preview; link it too (sc-25682).
+            let preview_url = asset
+                .pointer("/preview/path")
+                .and_then(Value::as_str)
+                .filter(|path| !path.is_empty() && !path.starts_with('/') && !path.contains(".."))
+                .map(|preview_path| {
+                    let relative = format!(
+                        "/api/v1/projects/{project_id}/files/{}?ticket={ticket}",
+                        encode_media_path(preview_path)
+                    );
+                    let url = format!("{link_base}{relative}");
+                    let name = preview_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(preview_path)
+                        .to_owned();
+                    blocks.push(ContentBlock::resource_link(
+                        Resource::new(&url, name)
+                            .with_description(format!(
+                                "Preview of SceneWorks asset {} from job {job_id}",
+                                asset.get("id").and_then(Value::as_str).unwrap_or("?")
+                            ))
+                            .with_mime_type("image/png"),
+                    ));
+                    url
+                });
+            let mut summary = json!({
                 "id": asset.get("id").cloned().unwrap_or(Value::Null),
                 "type": asset.get("type").cloned().unwrap_or(Value::Null),
                 "mimeType": mime_type,
                 "url": url,
                 "relativeUrl": relative_url,
                 "workflowPolicy": asset_workflow_policy,
-            }));
+            });
+            if let (Some(object), Some(preview_url)) = (summary.as_object_mut(), preview_url) {
+                object.insert("previewUrl".to_owned(), Value::String(preview_url));
+            }
+            summary_assets.push(summary);
         }
         blocks.push(ContentBlock::json(json!({
             "jobId": job_id,

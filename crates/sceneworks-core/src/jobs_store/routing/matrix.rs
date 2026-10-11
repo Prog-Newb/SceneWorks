@@ -2617,6 +2617,12 @@ fn utility_model_cells(
             JobType::ImageUpscale,
             json!({ "engine": "seedvr2", "sourceAssetId": "probe" }),
         )),
+        // Iris-3B restoration (sc-25683): its own task entry, served as the `iris` upscale engine.
+        "iris_3b_restore" => Some((
+            "engine:iris",
+            JobType::ImageUpscale,
+            json!({ "engine": "iris", "sourceAssetId": "probe" }),
+        )),
         "aura_sr_v2" => Some((
             "engine:aura-sr",
             JobType::ImageUpscale,
@@ -2626,6 +2632,12 @@ fn utility_model_cells(
             "smart_segment",
             JobType::ImageSegment,
             json!({ "sourceAssetId": "probe", "box": [0, 0, 1, 1] }),
+        )),
+        // sc-25682: the Iris-3B depth task export, probed with its production request shape.
+        "iris_3b_depth" => Some((
+            "image_depth",
+            JobType::ImageDepth,
+            json!({ "sourceAssetId": "probe", "resolution": { "mode": "capped", "maxSide": 1024 } }),
         )),
         "sam2_person_segment" => Some((
             "person_segment",
@@ -3224,6 +3236,13 @@ fn gpu_job_rows(
             JobType::ImageSegment,
             "sam3_person_segment",
             json!({ "sourceAssetId": "probe", "box": [0, 0, 1, 1] }),
+        ),
+        (
+            "image_depth",
+            "utility",
+            JobType::ImageDepth,
+            "iris_3b_depth",
+            json!({ "sourceAssetId": "probe", "resolution": { "mode": "capped", "maxSide": 1024 } }),
         ),
         (
             "video_upscale",

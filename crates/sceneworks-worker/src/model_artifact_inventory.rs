@@ -180,6 +180,14 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             entrypoint: TypedResolverEntrypoint::PinnedComponent,
         },
     },
+    // sc-25682: the Iris-3B depth task export (`depth/` of the pinned repo), resolved cache-only.
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/depth_jobs.rs"],
+        categories: &[Category::Image, Category::Primary],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
+        },
+    },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/person_jobs.rs"],
         categories: &[Category::CaptioningUtility, Category::OptionalComponent],
@@ -197,6 +205,15 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/voice_register.rs"],
         categories: &[Category::Audio, Category::CoRequisite],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
+        },
+    },
+    // sc-25683: the Iris-3B restoration task resolves its own `upscaler/` export from the pinned
+    // `iris_3b_restore` snapshot (cache-only), like the other upscaler weights.
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/iris_restore.rs"],
+        categories: &[Category::Image, Category::OptionalComponent],
         resolution: Resolution::SharedContract {
             entrypoint: TypedResolverEntrypoint::PinnedComponent,
         },

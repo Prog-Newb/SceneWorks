@@ -16,8 +16,9 @@ const project = { id: "project_1", name: "My Project" };
 const asset = { id: "asset_1", displayName: "shot.png" };
 
 describe("batch ops (sc-6112)", () => {
-  it("exposes the three ops + their endpoints", () => {
-    expect(BATCH_OPS.map((op) => op.key)).toEqual(["upscale", "detail", "edit"]);
+  it("exposes the ops + their endpoints", () => {
+    expect(BATCH_OPS.map((op) => op.key)).toEqual(["upscale", "detail", "edit", "depth"]);
+    expect(batchOpByKey("depth").endpoint).toBe("/api/v1/image/depth/jobs");
     expect(batchOpByKey("edit").endpoint).toBe("/api/v1/image/jobs");
     expect(batchOpByKey("upscale").endpoint).toBe("/api/v1/jobs");
     expect(batchOpByKey("nope")).toBeNull();
@@ -45,6 +46,24 @@ describe("batch ops (sc-6112)", () => {
 
     const seed = buildBatchJob({ op: "upscale", asset, params: { engine: "seedvr2", factor: 2, softness: 0.3 }, project, requestedGpu: "auto" });
     expect(seed.body.payload.softness).toBe(0.3);
+  });
+
+  it("builds one typed depth job per image with the explicit resolution choice (sc-25682)", () => {
+    const capped = buildBatchJob({ op: "depth", asset, params: { resolution: { mode: "capped", maxSide: 2048 } }, project, requestedGpu: "auto" });
+    expect(capped.endpoint).toBe("/api/v1/image/depth/jobs");
+    expect(capped.body).toEqual({
+      projectId: "project_1",
+      projectName: "My Project",
+      sourceAssetId: "asset_1",
+      resolution: { mode: "capped", maxSide: 2048 },
+      requestedGpu: "auto",
+      displayName: "shot.png",
+    });
+    const native = buildBatchJob({ op: "depth", asset, params: { resolution: { mode: "native" } }, project, requestedGpu: "0" });
+    expect(native.body.resolution).toEqual({ mode: "native" });
+    // No choice at all is the documented default cap, never an implicit native run.
+    const fallback = buildBatchJob({ op: "depth", asset, params: {}, project, requestedGpu: "auto" });
+    expect(fallback.body.resolution).toEqual({ mode: "capped", maxSide: 1024 });
   });
 
   it("builds a detail job with the recipe advanced params", () => {

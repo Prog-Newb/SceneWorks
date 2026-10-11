@@ -577,6 +577,29 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         },
     );
     features.insert(
+        // Iris-3B restoration (`engine=iris`, sc-25683, epic 25678): the `iris_3b_restore` transform
+        // is registered by BOTH native bundles (`mlx-gen-iris` on Mac, `candle-gen-iris` on
+        // Windows/Linux NVIDIA), so — exactly like SeedVR2 — the flag is platform-intrinsic: a
+        // backend exists on Mac/Windows/Linux regardless of the gating rollout flag. Whether the
+        // restoration task is INSTALLED is a separate, per-host fact the web reads from the model
+        // catalog (`iris_3b_restore.installState`); this flag only says a lane exists. Must agree with
+        // the routing oracle (mlx OR candle claims `engine=iris`; every other descriptor refuses it).
+        "imageUpscaleIris".to_owned(),
+        MacFeatureSupport {
+            supported: seedvr2_supported,
+            reason: if seedvr2_supported {
+                None
+            } else {
+                Some(UnsupportedReason::new(
+                    None,
+                    "image_upscale (Iris restoration)",
+                    "Iris restoration runs on Mac (native MLX) and Windows/Linux (the Candle CUDA/NVIDIA backend); this platform has no Iris backend.",
+                    Some("sc-25683"),
+                ))
+            },
+        },
+    );
+    features.insert(
         // DWPose pose detection is ported to the Rust worker (sc-3487): RTMW whole-body
         // via `ort`/CoreML on the macOS MLX worker, so the Pose Library "create from
         // photo" flow runs Python-free. This must agree with the PoseDetect arm of
@@ -616,6 +639,26 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
                     "image_segment (SAM3 smart-select)",
                     "smart-select segmentation requires the native MLX backend on macOS or the Candle backend on Windows/Linux.",
                     Some("sc-18480"),
+                ))
+            },
+        },
+    );
+    features.insert(
+        // Iris-3B monocular depth (sc-25682): the `iris_3b_depth` task export runs in-process on
+        // the native MLX worker on Mac and the Candle worker on Windows/Linux (same native-backend
+        // footprint as smart-select). Platform-intrinsic: whether the task export is INSTALLED is
+        // the model catalog's `installState`, not this flag.
+        "imageDepth".to_owned(),
+        MacFeatureSupport {
+            supported: image_segment_supported,
+            reason: if image_segment_supported {
+                None
+            } else {
+                Some(UnsupportedReason::new(
+                    None,
+                    "image_depth (Iris-3B depth)",
+                    "Iris-3B depth requires the native MLX backend on macOS or the Candle backend on Windows/Linux.",
+                    Some("sc-25682"),
                 ))
             },
         },

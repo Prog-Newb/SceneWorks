@@ -10734,6 +10734,7 @@ fn inline_upscaled_asset_links_back_to_base_for_library_fold() {
         "seedvr2",
         2,
         0.5,
+        None,
         project_path,
     )
     .unwrap();
@@ -10797,6 +10798,7 @@ fn write_upscaled_asset_confines_malicious_model_id() {
             "seedvr2",
             2,
             0.5,
+            None,
             project_path,
         )
         .unwrap();
@@ -28326,6 +28328,7 @@ fn write_upscaled_asset_reattaches_the_alpha_the_engine_could_not_see() {
         "real-esrgan",
         2,
         0.0,
+        None,
         project_path,
     )
     .unwrap();
@@ -28393,6 +28396,7 @@ fn write_upscaled_asset_without_a_plane_still_writes_rgb() {
         "real-esrgan",
         2,
         0.0,
+        None,
         project_path,
     )
     .unwrap();
@@ -29074,4 +29078,235 @@ fn an_over_envelope_qwen_image_2_1_request_is_refused_with_its_number() {
         refusal.contains("silently dropping references"),
         "{refusal}"
     );
+}
+
+/// sc-25682: the EXISTING depth-control path consumes a saved Iris depth asset as its control map —
+/// `advanced.controlImage` naming a `type: "depth"` asset yields the engine's near-bright control
+/// image from a decoded copy, without Iris weights or the depth job, and the raw `.npy` stays
+/// byte-identical. A depth map is refused as the control map of any other control kind.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn depth_control_reads_a_saved_depth_asset_without_touching_the_raw_map() {
+    let data = tempfile::tempdir().unwrap();
+    let store = ProjectStore::new(data.path().to_path_buf(), "producer");
+    let project = store.create_project("Depth control").unwrap();
+    let project_path = std::path::PathBuf::from(&project.path);
+    let npy_rel = "assets/depth/genset_x/map.npy";
+    std::fs::create_dir_all(project_path.join("assets/depth/genset_x")).unwrap();
+    let raw = sceneworks_core::depth_map::encode_npy_f32(2, 2, &[-1.0, 1.0, 0.0, 0.5]).unwrap();
+    std::fs::write(project_path.join(npy_rel), &raw).unwrap();
+    store
+        .persist_generated_asset(
+            &project.id,
+            "job-depth",
+            "genset_x",
+            &json!({
+                "assetId": "asset_depthx", "type": "depth", "mediaPath": npy_rel,
+                "displayName": "Map (depth)", "createdAt": "2026-10-11T00:00:00Z",
+                "mimeType": "application/x-npy", "width": 2, "height": 2,
+                "mode": "image_depth", "model": "iris_3b_depth",
+                "depth": { "valueConvention": "relative_log_depth" },
+            }),
+        )
+        .unwrap();
+    let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
+    settings.data_dir = data.path().to_path_buf();
+
+    let depth_job = request(json!({
+        "projectId": project.id, "model": "flux1_dev_control",
+        "advanced": { "controlMode": "depth", "controlImage": "asset_depthx" }
+    }));
+    let control = resolve_user_control_map(&depth_job, &settings, &project_path)
+        .unwrap()
+        .expect("the depth asset is the control map");
+    assert_eq!((control.width, control.height), (2, 2));
+    assert_eq!(
+        &control.pixels[..3],
+        &[255, 255, 255],
+        "nearest is brightest"
+    );
+    assert_eq!(&control.pixels[3..6], &[0, 0, 0], "farthest is darkest");
+    assert_eq!(std::fs::read(project_path.join(npy_rel)).unwrap(), raw);
+
+    let canny_job = request(json!({
+        "projectId": project.id, "model": "flux1_dev_control",
+        "advanced": { "controlMode": "canny", "controlImage": "asset_depthx" }
+    }));
+    let error = resolve_user_control_map(&canny_job, &settings, &project_path).unwrap_err();
+    assert!(error.to_string().contains("depth map"), "{error}");
+}
+
+/// sc-25683: the Image Studio inline post-processing pass with the Iris engine runs the REAL inline
+/// code (`apply_inline_iris_restore` → `restore_with_progress`) with a stub transform: every base
+/// image gets a NEW restored variant at the planned size, linked back to its base, carrying the
+/// applied Iris record (never a `factor`), with per-tile progress posted — and the base is untouched.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inline_iris_restore_appends_a_lineage_linked_restored_variant_per_base_image() {
+    use crate::iris_restore::tests as iris;
+    let _env = iris::isolate();
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    iris::stage_restore_install(
+        &data_dir,
+        iris::UPSCALER_CONFIG,
+        &crate::iris_restore::RESTORE_EXPORT_FILES,
+    );
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "Mist over hills",
+        "count": 1, "width": 320, "height": 256, "seed": 7,
+        "upscale": { "enabled": true, "engine": "iris", "scale": 1.5, "inputSizing": "original", "colorFix": false },
+        "modelManifestEntry": { "family": "z-image" }
+    }));
+    assert!(req.upscale.is_iris());
+    let plan = ImagePlan::new(&req);
+    let seed = resolve_seed(&req, 0);
+    let base_fact = write_image_asset(
+        &plan,
+        0,
+        seed,
+        req.width,
+        req.height,
+        stub_rgb8(req.width, req.height, seed),
+        STUB_ADAPTER,
+        stub_raw_settings(&req),
+        &project_path,
+    )
+    .unwrap();
+    let base_rel = base_fact["mediaPath"].as_str().unwrap().to_owned();
+    let base_bytes = std::fs::read(project_path.join(&base_rel)).unwrap();
+    let base_id = base_fact["assetId"].clone();
+
+    let job_value = iris::job_json("job-inline-iris", json!({ "projectId": "p" }));
+    let (api_url, posts) = iris::spawn_job_api(job_value.clone()).await;
+    let mut settings = Settings::for_test(data_dir);
+    settings.api_url = api_url;
+    let api = ApiClient::new(&settings);
+    let job: JobSnapshot = serde_json::from_value(job_value).unwrap();
+    let mut asset_writes = vec![Value::Object(base_fact)];
+    apply_inline_iris_restore(
+        &api,
+        &settings,
+        &job,
+        &plan,
+        &project_path,
+        "mlx",
+        &mut asset_writes,
+        iris::stub_loader,
+    )
+    .await
+    .expect("inline restore completes");
+
+    assert_eq!(asset_writes.len(), 2, "one restored variant per base image");
+    let restored = asset_writes[1].as_object().unwrap();
+    // 320x256 at 1.5x, original input → 480x384.
+    assert_eq!(restored["width"], json!(480));
+    assert_eq!(restored["height"], json!(384));
+    assert_eq!(restored["sourceAssetId"], base_id);
+    assert_eq!(restored["parents"], json!([base_id]));
+    assert_eq!(restored["extra"]["upscaledFromAssetId"], base_id);
+    assert_eq!(restored["extra"]["engine"], json!("iris"));
+    assert!(
+        restored["extra"].get("factor").is_none(),
+        "Iris has no factor"
+    );
+    let record = &restored["rawAdapterSettings"]["upscale"];
+    assert_eq!(record["engine"], json!("iris"));
+    assert_eq!(record["scale"], json!(1.5));
+    assert_eq!(record["inputSizing"], json!("original"));
+    assert_eq!(record["colorFix"], json!(false));
+    assert!(record.get("factor").is_none());
+    let media = restored["mediaPath"].as_str().unwrap();
+    assert!(media.ends_with("_iris1.5x.png"), "{media}");
+    let decoded = image::open(project_path.join(media)).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (480, 384));
+    assert_eq!(
+        std::fs::read(project_path.join(&base_rel)).unwrap(),
+        base_bytes
+    );
+    let posts = posts.lock().unwrap().clone();
+    assert!(
+        posts.iter().any(|post| post["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Restoring image 1/1 with Iris: tile 1/"))),
+        "{posts:#?}"
+    );
+}
+
+/// sc-25683: a cancel requested after the inline pass's last per-tile progress reply (no flag sees
+/// it) is caught by the re-check before the restored variant is written: the pass ends canceled with
+/// no restored variant appended and no new PNG on disk.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inline_iris_restore_canceled_after_the_last_tile_writes_no_variant() {
+    use crate::iris_restore::tests as iris;
+    let _env = iris::isolate();
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    iris::stage_restore_install(
+        &data_dir,
+        iris::UPSCALER_CONFIG,
+        &crate::iris_restore::RESTORE_EXPORT_FILES,
+    );
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "Mist over hills",
+        "count": 1, "width": 320, "height": 256, "seed": 7,
+        "upscale": { "enabled": true, "engine": "iris", "scale": 1.5, "inputSizing": "original", "colorFix": false },
+        "modelManifestEntry": { "family": "z-image" }
+    }));
+    let plan = ImagePlan::new(&req);
+    let seed = resolve_seed(&req, 0);
+    let base_fact = write_image_asset(
+        &plan,
+        0,
+        seed,
+        req.width,
+        req.height,
+        stub_rgb8(req.width, req.height, seed),
+        STUB_ADAPTER,
+        stub_raw_settings(&req),
+        &project_path,
+    )
+    .unwrap();
+
+    let job_value = iris::job_json("job-inline-iris-late-cancel", json!({ "projectId": "p" }));
+    let (api_url, posts) = iris::spawn_job_api_cancel_after_last_tile(job_value.clone()).await;
+    let mut settings = Settings::for_test(data_dir);
+    settings.api_url = api_url;
+    settings.heartbeat_seconds = 60;
+    let api = ApiClient::new(&settings);
+    let job: JobSnapshot = serde_json::from_value(job_value).unwrap();
+    let before = iris::png_files_under(&project_path.join("assets"));
+    let mut asset_writes = vec![Value::Object(base_fact)];
+    let error = apply_inline_iris_restore(
+        &api,
+        &settings,
+        &job,
+        &plan,
+        &project_path,
+        "mlx",
+        &mut asset_writes,
+        iris::stub_loader,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, WorkerError::Canceled(_)), "{error:?}");
+    let posts = posts.lock().unwrap().clone();
+    assert!(posts.iter().any(iris::reports_final_tile), "{posts:#?}");
+    assert!(posts.iter().any(|post| post["status"] == "canceled"));
+    assert_eq!(asset_writes.len(), 1, "no restored variant appended");
+    assert_eq!(iris::png_files_under(&project_path.join("assets")), before);
 }

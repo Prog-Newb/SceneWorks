@@ -72,6 +72,7 @@ pub const PROJECT_FOLDERS: &[&str] = &[
     "assets/documents",
     "assets/poses",
     "assets/keypoints",
+    "assets/depth",
     "characters",
     "generation-sets",
     "loras",
@@ -3228,6 +3229,15 @@ impl ProjectStore {
         if !is_safe_id(asset_id) {
             return Err(ProjectStoreError::BadRequest("Invalid asset id".to_owned()));
         }
+        // A preview path (vector / depth) is joined into the project path by every reader, so it
+        // gets the same traversal guard as mediaPath (sc-25682).
+        if let Some(preview_rel) = fact.pointer("/preview/path") {
+            if !preview_rel.as_str().is_some_and(is_safe_relative_path) {
+                return Err(ProjectStoreError::BadRequest(
+                    "Invalid preview path".to_owned(),
+                ));
+            }
+        }
         let asset = build_generated_asset_sidecar(project_id, job_id, generation_set_id, fact);
         let media_path = project_path.join(media_rel);
         let sidecar_path = media_path.with_extension("sceneworks.json");
@@ -4463,6 +4473,22 @@ impl ProjectStore {
                 "Asset media",
             )?)
         };
+        // A separately stored derived preview (vector PNG, depth preview — sc-25682) is part of the
+        // asset's footprint: soft delete leaves it in place for the trashed sidecar to keep
+        // rendering, and purge removes it with the media instead of orphaning it.
+        let preview_rel = asset
+            .pointer("/preview/path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let preview_path = if preview_rel.is_empty() || !is_safe_relative_path(preview_rel) {
+            None
+        } else {
+            Some(confined_deletion_target(
+                &project_path,
+                preview_rel,
+                "Asset preview",
+            )?)
+        };
         let project_root = fs::canonicalize(&project_path)?;
         let trash_dir = project_root.join("trash");
         let asset_trash_dir = sidecar_path
@@ -4476,7 +4502,7 @@ impl ProjectStore {
             // Move the asset's footprint to the OS trash rather than unlinking it. When
             // the asset already lives in `trash/<id>/`, trash that directory in one shot;
             // otherwise trash the media file and sidecar directly.
-            let targets: Vec<PathBuf> = if let Some(dir) = asset_trash_dir.clone() {
+            let mut targets: Vec<PathBuf> = if let Some(dir) = asset_trash_dir.clone() {
                 vec![dir]
             } else {
                 let mut targets = Vec::new();
@@ -4491,6 +4517,12 @@ impl ProjectStore {
                 }
                 targets
             };
+            if let Some(preview_path) = preview_path
+                .as_ref()
+                .filter(|path| path.exists() && path.is_file())
+            {
+                targets.push(preview_path.clone());
+            }
             let index_mutation = AssetIndexMutation::begin(&project_path)?;
             remove_sibling_poster_no_symlinks(&project_path, media_rel)?;
             if !targets.is_empty() && trash::delete_all(&targets).is_err() {
@@ -4517,6 +4549,9 @@ impl ProjectStore {
             .remove_asset_references(asset_id)?;
         if let Some(media_path) = media_path.filter(|path| path.exists() && path.is_file()) {
             fs::remove_file(media_path)?;
+        }
+        if let Some(preview_path) = preview_path.filter(|path| path.exists() && path.is_file()) {
+            fs::remove_file(preview_path)?;
         }
         remove_asset_sidecar(&sidecar_path)?;
         if let Some(parent) = asset_trash_dir {
@@ -6123,6 +6158,7 @@ fn build_generated_asset_sidecar(
         "audio" => build_audio_sidecar_parts(job_id, fact),
         "document" => build_document_sidecar_parts(job_id, fact),
         "vector" => build_vector_sidecar_parts(job_id, fact),
+        "depth" => build_depth_sidecar_parts(job_id, fact),
         _ => build_image_sidecar_parts(job_id, fact),
     };
     let mut asset = json!({
@@ -6189,14 +6225,72 @@ fn build_generated_asset_sidecar(
     // SVG is never a browser-previewable media type. The worker supplies a separately stored,
     // bounded PNG fact after sanitizing/rasterizing the SVG; keep it on the vector sidecar rather
     // than asking clients to infer a sibling filename or to fetch the active source document.
-    if media_type == "vector" {
+    //
+    // A depth map (sc-25682) has the same split: its `file` is the raw float32 `.npy`, never
+    // rewritten, and the `preview` is a separately stored PNG derived from it. Its `depth` block is
+    // the reload contract — value convention, layout, preprocessing and model/config identity — so a
+    // consumer can read the map without knowing which job or model produced it.
+    if media_type == "vector" || media_type == "depth" {
         if let Some(preview) = fact.get("preview") {
             if let Some(object) = asset.as_object_mut() {
                 object.insert("preview".to_owned(), preview.clone());
             }
         }
     }
+    if media_type == "depth" {
+        if let Some(depth) = fact.get("depth") {
+            if let Some(object) = asset.as_object_mut() {
+                object.insert("depth".to_owned(), depth.clone());
+            }
+        }
+    }
     asset
+}
+
+/// `(file, recipe, lineage)` for a depth-map asset (Iris-3B, sc-25682). The file is the raw `.npy`
+/// at the EXIF-corrected source size; the recipe records the job's own settings
+/// (`rawAdapterSettings.depth`) so the run is reopenable; lineage names the source image.
+fn build_depth_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value) {
+    let get = |key: &str| fact.get(key).cloned().unwrap_or(Value::Null);
+    let parents = fact
+        .get("parents")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| match fact.get("sourceAssetId").and_then(Value::as_str) {
+            Some(source) => vec![Value::String(source.to_owned())],
+            None => Vec::new(),
+        });
+    let file = json!({
+        "path": get("mediaPath"),
+        "mimeType": get("mimeType"),
+        "width": get("width"),
+        "height": get("height"),
+        "duration": Value::Null,
+        "fps": Value::Null,
+    });
+    let recipe = json!({
+        "mode": get("mode"),
+        "model": get("model"),
+        "adapter": get("adapter"),
+        "prompt": "",
+        "negativePrompt": "",
+        "seed": Value::Null,
+        "loras": [],
+        "stylePreset": Value::Null,
+        "normalizedSettings": {
+            "width": get("width"),
+            "height": get("height"),
+            "count": 1,
+        },
+        "rawAdapterSettings": fact.get("rawAdapterSettings").cloned().unwrap_or_else(|| json!({})),
+    });
+    let lineage = json!({
+        "parents": parents,
+        "sourceAssetId": get("sourceAssetId"),
+        "sourceTimestamp": Value::Null,
+        "jobId": job_id,
+    });
+    (file, recipe, lineage)
 }
 
 /// `(file, recipe, lineage)` for a generated image asset, matching the worker's
@@ -8496,6 +8590,101 @@ mod tests {
             .persist_generated_asset(&project.id, "job-1", "genset_x", &safe_fact)
             .expect("safe media path persists");
         assert_eq!(safe["id"], json!("asset_safe1"));
+    }
+
+    /// sc-25682: a depth asset persists its raw `.npy` as the `file`, keeps the derived preview
+    /// separate, carries the reload contract (`depth`) and reopenable settings, and is removed
+    /// whole — preview included — by purge.
+    #[test]
+    fn a_depth_asset_keeps_raw_npy_and_preview_apart_and_purges_both() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Depth").expect("project creates");
+        let project_path = std::path::PathBuf::from(&project.path);
+        let npy_rel = "assets/depth/genset_d/2026-10-11_depth_abcd.npy";
+        let preview_rel = "assets/depth/genset_d/2026-10-11_depth_abcd.preview.png";
+        std::fs::create_dir_all(project_path.join("assets/depth/genset_d")).unwrap();
+        std::fs::write(project_path.join(npy_rel), b"\x93NUMPY").unwrap();
+        std::fs::write(project_path.join(preview_rel), b"png").unwrap();
+        let depth_block = json!({
+            "valueConvention": "relative_log_depth",
+            "dtype": "float32",
+            "byteOrder": "little",
+            "shape": [3, 4],
+            "modelId": "iris_3b_depth",
+            "configSha256": "c".repeat(64),
+        });
+        let fact = |preview_path: &str| {
+            json!({
+                "assetId": "asset_depth1",
+                "type": "depth",
+                "mediaPath": npy_rel,
+                "mimeType": "application/x-npy",
+                "width": 4,
+                "height": 3,
+                "displayName": "Photo (depth)",
+                "createdAt": "2026-10-11T00:00:00Z",
+                "mode": "image_depth",
+                "model": "iris_3b_depth",
+                "adapter": "mlx",
+                "sourceAssetId": "asset_source",
+                "parents": ["asset_source"],
+                "rawAdapterSettings": { "depth": { "resolution": { "mode": "capped", "maxSide": 1024 } } },
+                "preview": { "path": preview_path, "mimeType": "image/png", "width": 4, "height": 3 },
+                "depth": depth_block,
+            })
+        };
+        for unsafe_preview in ["../../escape.png", "/etc/passwd"] {
+            assert!(
+                matches!(
+                    store.persist_generated_asset(
+                        &project.id,
+                        "job-d",
+                        "genset_d",
+                        &fact(unsafe_preview)
+                    ),
+                    Err(ProjectStoreError::BadRequest(_))
+                ),
+                "{unsafe_preview} must be refused"
+            );
+        }
+        store
+            .persist_generated_asset(&project.id, "job-d", "genset_d", &fact(preview_rel))
+            .expect("depth asset persists");
+        let asset = store
+            .get_asset(&project.id, "asset_depth1")
+            .expect("reloads");
+        assert_eq!(asset["type"], "depth");
+        assert_eq!(asset["file"]["path"], npy_rel);
+        assert_eq!(asset["file"]["mimeType"], "application/x-npy");
+        assert_eq!(asset["preview"]["path"], preview_rel);
+        assert_eq!(asset["depth"], depth_block);
+        assert_eq!(asset["lineage"]["sourceAssetId"], "asset_source");
+        assert_eq!(asset["lineage"]["parents"], json!(["asset_source"]));
+        assert_eq!(asset["lineage"]["jobId"], "job-d");
+        assert_eq!(
+            asset["recipe"]["rawAdapterSettings"]["depth"]["resolution"]["maxSide"],
+            1024
+        );
+
+        // An index rebuild re-reads sidecars from disk: the depth asset must survive it whole.
+        store.reindex_project(&project.id).expect("reindexes");
+        let reindexed = store
+            .get_asset(&project.id, "asset_depth1")
+            .expect("depth asset survives a reindex");
+        assert_eq!(reindexed["type"], "depth");
+        assert_eq!(reindexed["file"]["path"], npy_rel);
+        assert_eq!(reindexed["preview"]["path"], preview_rel);
+        assert_eq!(reindexed["depth"], depth_block);
+
+        store
+            .purge_asset(&project.id, "asset_depth1", true)
+            .expect("purges");
+        assert!(!project_path.join(npy_rel).exists(), "raw map removed");
+        assert!(
+            !project_path.join(preview_rel).exists(),
+            "derived preview removed, not orphaned"
+        );
     }
 
     /// sc-8871 (F-069): `save_timeline` derives the write path from the

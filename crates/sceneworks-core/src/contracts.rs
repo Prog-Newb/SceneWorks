@@ -261,6 +261,12 @@ string_enum! {
         // through MLX on macOS and Candle/CUDA off-Mac (zero-Python, the box-PVS path of
         // the sc-4926 SAM3 stack); GPU-required like generation.
         ImageSegment => "image_segment",
+        // Monocular depth of an existing image asset (Image Editor + Library, Iris-3B epic 25678 /
+        // sc-25682): the `iris_3b_depth` task export predicts a float32 HxW relative-log-depth map
+        // at the EXIF-corrected source size, persisted as a `depth` asset (raw `.npy` + a separate
+        // derived preview PNG). Native MLX on macOS and Candle/CUDA off-Mac; GPU-required like
+        // generation.
+        ImageDepth => "image_depth",
         // Standalone upscale of an existing VIDEO asset (Video Studio, epic 4811 /
         // sc-4816) — SceneWorks' first video upscaler. Native-MLX SeedVR2 one-step
         // super-resolution on the macOS Rust worker (zero-Python, epic 3482): decode
@@ -466,6 +472,10 @@ string_enum! {
         // SAM3 MLX worker on macOS and the native SAM3 Candle worker on CUDA hosts. See
         // jobs_store::job_requires_gpu and the backend routing predicates.
         ImageSegment => "image_segment",
+        // Iris-3B monocular depth (Image Editor + Library, sc-25682). Advertised by the native MLX
+        // worker on macOS and the Candle worker off-Mac when the Iris depth provider is linked.
+        // See jobs_store::job_requires_gpu.
+        ImageDepth => "image_depth",
         // Standalone VIDEO upscale (Video Studio, epic 4811 / sc-4816). Advertised by
         // the macOS Rust/MLX worker and the off-Mac candle/CUDA worker (native
         // SeedVR2, zero-Python). GPU-required. See jobs_store::worker_supports_job.
@@ -553,6 +563,11 @@ string_enum! {
         // points to the rendered skeleton preview; keypoints/hands/face + category live
         // in the sidecar's `pose` field. Stored under a reserved global poses project.
         Pose => "pose",
+        // A monocular depth map (Iris-3B, sc-25682). The asset's `file` is the RAW float32
+        // row-major `<f4` `.npy` (HxW relative log depth at the EXIF-corrected source size, never
+        // rewritten); `preview` points at a separately stored derived PNG; the sidecar's `depth`
+        // block carries the value convention, preprocessing and model/config identity.
+        Depth => "depth",
     }
 }
 
@@ -759,6 +774,29 @@ impl ImageUpscaleRequest {
             .and_then(Value::as_f64)
             .map(|value| value.clamp(0.0, 1.0) as f32)
             .unwrap_or(0.0)
+    }
+
+    /// Whether this block selects the Iris-3B restoration engine (sc-25683).
+    pub fn is_iris(&self) -> bool {
+        crate::image_restoration::is_iris_engine(&self.engine)
+    }
+
+    /// The Iris-only controls (`scale` / `inputSizing` / `colorFix`) carried in the flattened
+    /// extras, as a JSON object for [`crate::image_restoration`]'s shared parse.
+    pub fn iris_controls(&self) -> JsonObject {
+        crate::image_restoration::IRIS_ONLY_KEYS
+            .iter()
+            .filter_map(|key| {
+                self.extra
+                    .get(*key)
+                    .map(|value| ((*key).to_owned(), value.clone()))
+            })
+            .collect()
+    }
+
+    /// The parsed Iris restoration controls (a typed refusal for a malformed one).
+    pub fn iris_params(&self) -> Result<crate::image_restoration::IrisRestoreParams, String> {
+        crate::image_restoration::parse_iris_restore_params(&self.iris_controls())
     }
 }
 

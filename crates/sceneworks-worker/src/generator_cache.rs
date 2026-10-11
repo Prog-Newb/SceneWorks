@@ -1169,6 +1169,8 @@ where
         request_cancel,
         admission: cold_admission,
     } = cold_load;
+    // One resident engine across the generator and transform caches (sc-25683).
+    crate::transform_cache::evict_resident_transform().await?;
     let key = LoadIdentity::try_from_load_spec(engine_id, &spec).map_err(|error| {
         crate::classify_engine_error("Generator cache source validation failed", error)
     })?;
@@ -1328,6 +1330,10 @@ async fn with_cached_generator_for_request_after_cold_admission_using_on<R>(
 where
     R: Send + 'static,
 {
+    // One resident engine across the generator and transform caches (sc-25683): a resident
+    // restoration transform is dropped before a generator can load on top of it. A no-op when no
+    // transform was ever loaded.
+    crate::transform_cache::evict_resident_transform().await?;
     let key = LoadIdentity::try_from_load_spec(engine_id, &spec).map_err(|error| {
         crate::classify_engine_error("Generator cache source validation failed", error)
     })?;
@@ -1438,6 +1444,8 @@ where
     R: Send + 'static,
 {
     use crate::WorkerError;
+    // One resident engine across the generator and transform caches (sc-25683).
+    crate::transform_cache::evict_resident_transform().await?;
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<WorkerResult<R>>();
     let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1522,6 +1530,31 @@ where
 ))]
 pub(crate) async fn evict_cached_generator() -> WorkerResult<bool> {
     evict_cached_generator_on(generator_worker()).await
+}
+
+/// [`evict_cached_generator`] for a caller on a plain OS thread (the transform cache thread, sc-25683):
+/// enqueues the same eviction job and waits for the generator thread's reply synchronously. Never
+/// call it from the generator cache thread itself (it would wait on its own queue) or from inside a
+/// Tokio runtime worker (it blocks).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn evict_cached_generator_blocking() -> WorkerResult<bool> {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<bool>();
+    let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let evicted = cache.evict().is_some();
+        if evicted {
+            cache_thread::release_backend_cache_after_evict();
+        }
+        let _ = reply_tx.send(evicted);
+    });
+    generator_worker()
+        .send(job)
+        .map_err(|_| crate::WorkerError::Engine("MLX generator cache worker stopped".to_owned()))?;
+    reply_rx.blocking_recv().map_err(|_| {
+        crate::WorkerError::Engine("MLX generator cache worker dropped the job result".to_owned())
+    })
 }
 
 /// The bytes the cached generator's own cold load added (its `provider_resident_bytes`), or `None`
@@ -3014,6 +3047,42 @@ mod tests {
             descriptor,
             contract: Some(contract),
         }))
+    }
+
+    /// sc-25683: one resident engine across the generator and transform caches — a generator load
+    /// first drops a resident restoration transform (the transform side's cold load evicts the
+    /// generator; see `transform_cache`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_generator_load_evicts_a_resident_transform() {
+        // Serializes with every other test that touches the process-global transform cache.
+        let _env = crate::test_env::EnvVars::set(&[]);
+        let export = tempfile::tempdir().expect("export tempdir");
+        crate::transform_cache::load_stub_into_global_cache(export.path())
+            .await
+            .expect("stub transform loads");
+        assert!(crate::transform_cache::global_transform_resident().await);
+
+        let (tx, _capture, _worker) = start_capturing_cache_worker();
+        let weights = tempfile::tempdir().expect("weights tempdir");
+        with_cached_generator_for_request_using_on(
+            &tx,
+            "sc3724_stub",
+            LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf())),
+            "stub load",
+            |_id, spec| staging_stub_load(spec),
+            |_, _, _, warm_policy: crate::execution_planner::WarmPolicyProposal, _, _| {
+                warm_policy.decline(
+                    crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                );
+                Ok(())
+            },
+        )
+        .await
+        .expect("the generator loads");
+        assert!(
+            !crate::transform_cache::global_transform_resident().await,
+            "the generator load must evict the resident transform"
+        );
     }
 
     /// sc-18317: a warm hit whose request asks for a strictly tighter execution shape than the load

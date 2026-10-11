@@ -228,6 +228,15 @@ pub struct WorkflowUpscale {
     pub engine: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub softness: Option<f64>,
+    /// Iris restoration (sc-25683): the applied output scale (any positive factor; 1 = restore only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+    /// Iris restoration: `budgeted` or `original` input sizing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_sizing: Option<String>,
+    /// Iris restoration: whether the wavelet colour correction ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_fix: Option<bool>,
 }
 
 /// The portable, sanitized workflow of one generated image.
@@ -1049,6 +1058,16 @@ pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
         }]),
     },
     WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/image_jobs.rs",
+        function: "standalone_restore_workflow_share",
+        lane: "POST /api/v1/jobs type=image_upscale engine=iris — the standalone Iris restoration's \
+               own envelope (sc-25683)",
+        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
+            path: "apps/web/src/imageJobs.js",
+            function: "buildUpscaleJobBody",
+        }]),
+    },
+    WorkflowWriteSeam {
         path: "crates/sceneworks-worker/src/image_jobs/detail.rs",
         function: "run_image_detail_job",
         lane: "POST /api/v1/image/detail/jobs — writes the refined PNG (macOS-gated; the scan is \
@@ -1056,6 +1075,16 @@ pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
         disposition: SeamDisposition::Embeds(&[WebBuilderRef {
             path: "apps/web/src/imageJobs.js",
             function: "buildDetailJobBody",
+        }]),
+    },
+    WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/upscale_jobs.rs",
+        function: "run_iris_restore_job_using",
+        lane: "POST /api/v1/jobs type=image_upscale engine=iris — hands the standalone Iris \
+               restoration's envelope to the shared single-child writer (sc-25683)",
+        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
+            path: "apps/web/src/imageJobs.js",
+            function: "buildUpscaleJobBody",
         }]),
     },
     WorkflowWriteSeam {
@@ -2429,6 +2458,16 @@ fn sanitize_upscale(value: Option<&Value>) -> Option<WorkflowUpscale> {
             .and_then(Value::as_str)
             .and_then(shareable_label),
         softness: upscale.get("softness").and_then(Value::as_f64),
+        scale: upscale
+            .get("scale")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value > 0.0),
+        input_sizing: upscale
+            .get("inputSizing")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "budgeted" | "original"))
+            .map(str::to_owned),
+        color_fix: upscale.get("colorFix").and_then(Value::as_bool),
     })
 }
 
@@ -2749,6 +2788,13 @@ fn reduce_workflow_share(share: WorkflowShare) -> WorkflowShare {
             factor: upscale.factor,
             engine: upscale.engine.as_deref().and_then(shareable_label),
             softness: upscale.softness.filter(|value| value.is_finite()),
+            scale: upscale
+                .scale
+                .filter(|value| value.is_finite() && *value > 0.0),
+            input_sizing: upscale
+                .input_sizing
+                .filter(|value| matches!(value.as_str(), "budgeted" | "original")),
+            color_fix: upscale.color_fix,
         }),
         loras,
         inputs,

@@ -199,9 +199,12 @@ import { resolveJobResultAssets } from "../jobResultAssets.js";
 import {
   availableUpscaleEngines as upscaleEnginesForPlatform,
   upscaleEngineHasSoftness,
+  upscaleEngineIsRestoration,
   upscaleFactorsForEngine,
   useUpscaleEngineFallback,
 } from "../upscaleEngines.js";
+import { IRIS_RESTORE_DEFAULTS, irisControlsFromRecord, irisRestoreControls } from "../irisRestore.js";
+import { IrisRestoreControls } from "../components/IrisRestoreControls.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { STYLE_GROUPS, styleHintForId, styleTextForId } from "../data/styleCatalog.js";
@@ -334,6 +337,8 @@ export function ImageStudio() {
     gpuOptions,
     imageModels,
     models = [],
+    // API token for the Iris restoration plan preview (sc-25683).
+    token = "",
     modelCatalogStatus = "ready",
     jobs = [],
     importAsset,
@@ -656,6 +661,11 @@ export function ImageStudio() {
   const [upscaleEngine, setUpscaleEngine] = useState(saved.upscaleEngine ?? "real-esrgan");
   // SeedVR2 detail/softness knob (0..1, sc-4815) — only used by the seedvr2 engine.
   const [upscaleSoftness, setUpscaleSoftness] = useState(saved.upscaleSoftness ?? 0);
+  // Iris restoration controls (sc-25683) — only used by the `iris` engine, which is sized by `scale`.
+  const [upscaleRestore, setUpscaleRestore] = useState(() =>
+    irisRestoreControls(saved.upscaleRestore ?? IRIS_RESTORE_DEFAULTS),
+  );
+  const [restorePlanStatus, setRestorePlanStatus] = useState({ ready: false, blocked: false, error: null });
   const [hiresFixEnabled, setHiresFixEnabled] = useState(saved.hiresFixEnabled ?? false);
   const [hiresFixSteps, setHiresFixSteps] = useState(saved.hiresFixSteps ?? 0);
   const [hiresFixDenoisingStrength, setHiresFixDenoisingStrength] = useState(
@@ -679,6 +689,17 @@ export function ImageStudio() {
   const togglePromptTool = useCallback(
     (tool) => setPromptTool((current) => (current === tool ? null : tool)),
     [],
+  );
+  const depthControlAssets = useMemo(
+    () =>
+      assets.filter(
+        (asset) =>
+          asset.type === "depth" &&
+          asset.projectId === activeProject?.id &&
+          !asset.status?.trashed &&
+          !asset.status?.rejected,
+      ),
+    [assets, activeProject?.id],
   );
   const editImageAssets = useMemo(
     () =>
@@ -717,11 +738,14 @@ export function ImageStudio() {
   }, [upscaleFactor]);
 
   // Engines offered in the picker; AuraSR is dropped on every platform (sc-3668 / sc-5499).
-  const availableUpscaleEngines = upscaleEnginesForPlatform(macCapabilities);
+  // Iris restoration (sc-25683) is offered only once its own `iris_3b_restore` task is installed.
+  const availableUpscaleEngines = upscaleEnginesForPlatform(macCapabilities, models);
+  const irisUpscale = upscaleEnabled && upscaleEngineIsRestoration(upscaleEngine);
   // If a restored/saved engine is gated out (e.g. a stale saved AuraSR selection), fall back to the
   // default real-esrgan engine so the user never submits an aura-sr job the native workers refuse (sc-8853).
   useUpscaleEngineFallback({
     macCapabilities,
+    models,
     upscaleEngine,
     setUpscaleEngine,
     upscaleFactor,
@@ -987,10 +1011,16 @@ export function ImageStudio() {
       : [];
   const controlActive = showControlPanel && Boolean(activeControlMode);
   const controlIsImageMode = controlActive && activeControlMode !== "pose";
+  // A saved depth-map asset (Iris-3B, sc-25682) IS a depth control map: it is offered only in depth
+  // mode and always rides as the passthrough `advanced.controlImage` — the worker derives the
+  // near-bright control image from its raw map (it is never re-estimated as if it were a photo).
+  const controlAssetIsDepth =
+    activeControlMode === "depth" && depthControlAssets.some((asset) => asset.id === controlImageAssetId);
+  const effectiveControlPassthrough = controlImagePassthrough || controlAssetIsDepth;
   const controlPreprocessSourceId =
-    controlIsImageMode && !controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
+    controlIsImageMode && !effectiveControlPassthrough && controlImageAssetId ? controlImageAssetId : null;
   const controlPassthroughId =
-    controlIsImageMode && controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
+    controlIsImageMode && effectiveControlPassthrough && controlImageAssetId ? controlImageAssetId : null;
 
   // Images each resolved-prompt job emits: the pose count when poses are selected (they
   // replace `count` variations), else `count`. Total batch image count feeds the run label
@@ -1965,6 +1995,11 @@ export function ImageStudio() {
     if (typeof upscale?.softness === "number") {
       setUpscaleSoftness(upscale.softness);
     }
+    // Reopen an Iris restoration's applied controls (sc-25683).
+    const irisControls = irisControlsFromRecord(upscale);
+    if (irisControls) {
+      setUpscaleRestore(irisControls);
+    }
     const hiresFix = launchRequest.hiresFix ?? rawSettings.hiresFix ?? settings.hiresFix;
     setHiresFixEnabled(Boolean(hiresFix?.enabled));
     setHiresFixSteps(hiresFix?.steps ?? 0);
@@ -2159,6 +2194,7 @@ export function ImageStudio() {
       ["upscaleFactor", setUpscaleFactor],
       ["upscaleEngine", setUpscaleEngine],
       ["upscaleSoftness", setUpscaleSoftness],
+      ["upscaleRestore", (value) => setUpscaleRestore(irisRestoreControls(value))],
       ["hiresFixEnabled", setHiresFixEnabled],
       ["hiresFixSteps", setHiresFixSteps],
       ["hiresFixDenoisingStrength", setHiresFixDenoisingStrength],
@@ -2211,6 +2247,7 @@ export function ImageStudio() {
       upscaleFactor,
       upscaleEngine,
       upscaleSoftness,
+      upscaleRestore,
       hiresFixEnabled,
       hiresFixSteps,
       hiresFixDenoisingStrength,
@@ -2250,6 +2287,7 @@ export function ImageStudio() {
     upscaleFactor,
     upscaleEngine,
     upscaleSoftness,
+    upscaleRestore,
     hiresFixEnabled,
     hiresFixSteps,
     hiresFixDenoisingStrength,
@@ -2516,6 +2554,7 @@ export function ImageStudio() {
       upscaleFactor,
       upscaleEngine,
       upscaleSoftness,
+      upscaleRestore,
       hiresFixEnabled,
       hiresFixSteps,
       hiresFixDenoisingStrength,
@@ -2947,6 +2986,7 @@ export function ImageStudio() {
       // not only on click. null when the dimensions are valid.
       dimensionError,
       decoderCapabilitiesPending,
+      restorePlan: irisUpscale ? restorePlanStatus : null,
     }),
     [
       activeProject,
@@ -2969,6 +3009,8 @@ export function ImageStudio() {
       multiPhaseValidationIssues,
       dimensionError,
       decoderCapabilitiesPending,
+      irisUpscale,
+      restorePlanStatus,
     ],
   );
   const batchValidity = useValidation(imageBatchValidation, batchDraft, undefined);
@@ -3939,9 +3981,11 @@ export function ImageStudio() {
               poseBlockText={macPoseBlock ? macPoseBlock.text : null}
               controlImageAssetId={controlImageAssetId}
               onControlImageChange={setControlImageAssetId}
-              controlImagePassthrough={controlImagePassthrough}
+              controlImagePassthrough={effectiveControlPassthrough}
               onControlImagePassthroughChange={setControlImagePassthrough}
-              controlImageAssets={editImageAssets}
+              controlImageAssets={
+                activeControlMode === "depth" ? [...depthControlAssets, ...editImageAssets] : editImageAssets
+              }
               importAsset={importAsset}
               projectId={activeProject?.id}
               characters={characters}
@@ -4336,6 +4380,7 @@ export function ImageStudio() {
                 />
                 Upscale
               </label>
+              {upscaleEngineIsRestoration(upscaleEngine) ? null : (
               <label>
                 Scale
                 <select disabled={!upscaleEnabled || usePid} onChange={(event) => setUpscaleFactor(Number(event.target.value))} value={upscaleFactor}>
@@ -4346,6 +4391,7 @@ export function ImageStudio() {
                   ))}
                 </select>
               </label>
+              )}
               <label>
                 Engine
                 <select disabled={!upscaleEnabled || usePid} onChange={(event) => handleUpscaleEngineChange(event.target.value)} value={upscaleEngine}>
@@ -4356,6 +4402,19 @@ export function ImageStudio() {
                   ))}
                 </select>
               </label>
+              {upscaleEngineIsRestoration(upscaleEngine) && upscaleEnabled && !usePid ? (
+                // Iris restoration (sc-25683): scale / input sizing / colour fix, with the engine
+                // planner's processing + output dimensions for THIS generation's size shown before
+                // submission (a budgeted result is labelled as such).
+                <IrisRestoreControls
+                  idPrefix="studio-iris"
+                  onChange={(next) => setUpscaleRestore(irisRestoreControls(next))}
+                  onStatus={setRestorePlanStatus}
+                  planBody={width > 0 && height > 0 ? { width, height } : null}
+                  token={token}
+                  value={upscaleRestore}
+                />
+              ) : null}
               {upscaleEngineHasSoftness(upscaleEngine) ? (
                 <label title="Higher restores more detail from a degraded source; 0 keeps it faithful.">
                   Detail
