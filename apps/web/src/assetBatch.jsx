@@ -15,6 +15,7 @@ import { lazyInteraction } from "./components/LazyScreen.jsx";
 import { useAppContextOptional } from "./context/AppContext.js";
 import { detailCapableModels, editCapableModels, UPSCALE_ENGINES } from "./imageJobs.js";
 import { DEFAULT_MAC_CAPABILITIES, macUpscaleEngineBlocked } from "./macGating.js";
+import { depthAvailability as depthAvailabilityFor } from "./depthJobs.js";
 
 const BatchOperationsPanel = lazyInteraction(
   () => import("./components/BatchOperationsPanel.jsx"),
@@ -53,6 +54,7 @@ export function useAssetBatch() {
     assets = [],
     jobs = [],
     imageModels = [],
+    models = [],
     characters = [],
     deleteAsset,
     moveAssetToCharacter,
@@ -64,6 +66,9 @@ export function useAssetBatch() {
 
   const [selectedAssetIds, setSelectedAssetIds] = useState(() => new Set());
   const [batchOpen, setBatchOpen] = useState(false);
+  // The op the panel opens on (sc-25682: a single-asset "Estimate depth" action opens the panel on
+  // the depth op with just that asset selected). null = the panel's own default.
+  const [batchInitialOp, setBatchInitialOp] = useState(null);
   // While/after a batch runs: { op, items: [{ asset, jobId }], submitting }.
   const [batch, setBatch] = useState(null);
   const batchObservedJobsRef = useRef(new Map());
@@ -89,6 +94,8 @@ export function useAssetBatch() {
   const availableUpscaleEngines = UPSCALE_ENGINES.filter((engine) => !macUpscaleEngineBlocked(macCapabilities, engine.key));
   const editModels = editCapableModels(imageModels);
   const detailModels = detailCapableModels(imageModels);
+  // Iris-3B depth (sc-25682): offered only with a native lane AND a complete task install.
+  const depthAvailability = depthAvailabilityFor(models, macCapabilities);
   // Move targets a character's assets (true move, sc-10200) — NOT the character's
   // curated reference set — so only move-capable media counts.
   const availableCharacters = characters.filter((character) => !character?.archived);
@@ -204,8 +211,16 @@ export function useAssetBatch() {
     setBatch({ op, submitting: false, items });
   }
 
+  // Open the panel on `op` for exactly `ids` (a single-asset action from the detail panel).
+  function openBatchWith(ids, op) {
+    setSelectedAssetIds(new Set(ids));
+    setBatchInitialOp(op);
+    setBatchOpen(true);
+  }
+
   function closeBatch() {
     setBatchOpen(false);
+    setBatchInitialOp(null);
     // Closing after a run clears the spent selection + progress; cancelling the form keeps it.
     if (batch) {
       setBatch(null);
@@ -329,6 +344,8 @@ export function useAssetBatch() {
     availableCharacters,
     batchOpen,
     setBatchOpen,
+    batchInitialOp,
+    openBatchWith,
     batch,
     batchItems,
     batchProgress,
@@ -352,6 +369,7 @@ export function useAssetBatch() {
     editModels,
     detailModels,
     availableUpscaleEngines,
+    depthAvailability,
   };
 }
 
@@ -533,6 +551,8 @@ export function AssetBatchModal({ batch }) {
       editModels={batch.editModels}
       detailModels={batch.detailModels}
       upscaleEngines={batch.availableUpscaleEngines}
+      depthAvailability={batch.depthAvailability}
+      initialOp={batch.batchInitialOp ?? undefined}
       busy={Boolean(batch.batch?.submitting)}
       items={batch.batchItems}
       progress={batch.batchProgress}

@@ -62,6 +62,7 @@ describe("BatchOperationsPanel (sc-6112)", () => {
       "Upscale",
       "Detail enhance",
       "AI edit",
+      "Depth map",
     ]);
     // Default op is upscale → an Engine + Factor select.
     expect(document.body.querySelector(".batch-ops-params").textContent).toContain("Engine");
@@ -123,4 +124,36 @@ describe("BatchOperationsPanel (sc-6112)", () => {
       "Failed: Models service rejected the request",
     );
   });
+
+  it("offers depth with an explicit capped/native choice and states why it cannot run (sc-25682)", async () => {
+    const onRun = vi.fn();
+    await mount({ onRun, depthAvailability: { available: false, reason: "Install Iris 3B Depth in Models to estimate depth." } });
+    await act(async () => tab("Depth map").click());
+    expect(document.body.textContent).toContain("Install Iris 3B Depth in Models to estimate depth.");
+    expect(runButton().disabled).toBe(true);
+
+    await mount({ onRun, depthAvailability: { available: true, reason: null } });
+    const maxSide = document.body.querySelector('input[aria-label="Depth max side"]');
+    expect(maxSide.value).toBe("1024");
+    await act(async () => setValue(maxSide, "40"));
+    expect(document.body.textContent).toMatch(/between 64 and 8192/);
+    expect(runButton().disabled).toBe(true);
+    await act(async () => setValue(maxSide, "2048"));
+    expect(runButton().disabled).toBe(false);
+    await act(async () => runButton().click());
+    expect(onRun).toHaveBeenLastCalledWith("depth", { resolution: { mode: "capped", maxSide: 2048 } });
+
+    const native = [...document.body.querySelectorAll('input[type="radio"]')].find((input) =>
+      input.parentElement.textContent.startsWith("Native"),
+    );
+    await act(async () => native.click());
+    await act(async () => runButton().click());
+    expect(onRun).toHaveBeenLastCalledWith("depth", { resolution: { mode: "native" } });
+  });
+
+  it("opens directly on the depth op for a single-asset action", async () => {
+    await mount({ initialOp: "depth", depthAvailability: { available: true, reason: null } });
+    expect(tab("Depth map").getAttribute("aria-pressed")).toBe("true");
+  });
 });
+

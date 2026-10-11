@@ -129,6 +129,7 @@ import {
   ImageEditorToolPanel,
   useStableImageEditorToolPanelScope,
 } from "./imageEditor/ImageEditorToolPanel.jsx";
+import { EditorDepthPanel } from "./imageEditor/EditorDepthPanel.jsx";
 import { EditorLoraPanel } from "./imageEditor/EditorLoraPanel.jsx";
 import { editTransparencyFor, imageBytesCarryAlpha } from "../qwenAlpha.js";
 
@@ -216,7 +217,7 @@ export function readStoredEditorLayout() {
 }
 
 // Tool identity for the rail / accordion headers / inspector header (epic 10243).
-export const EDITOR_TOOL_ORDER = ["move", "transform", "crop", "upscale", "detail", "color", "cutout", "edit", "boxes"];
+export const EDITOR_TOOL_ORDER = ["move", "transform", "crop", "upscale", "detail", "color", "cutout", "edit", "boxes", "depth"];
 export const EDITOR_TOOL_META = {
   move: { label: "Move", desc: "Pan and inspect the canvas" },
   transform: { label: "Transform", desc: "Move, scale & rotate the layer" },
@@ -227,6 +228,7 @@ export const EDITOR_TOOL_META = {
   cutout: { label: "Cutout", desc: "Remove a color-keyed background" },
   edit: { label: "AI Edit", desc: "Prompt-driven edit & inpaint" },
   boxes: { label: "Boxes", desc: "Region layout & color-keyed edit" },
+  depth: { label: "Depth map", desc: "Estimate relative depth (Iris-3B)" },
 };
 
 // Inline stroke icons ported from the design handoff `ICONS` map (epic 10243).
@@ -270,6 +272,9 @@ export const EDITOR_TOOL_ICONS = {
   boxes: strokeSvg({ key: "boxes" }, [
     <rect key="a" height="7" rx="1" width="8" x="3" y="4" />, <rect key="b" height="12" rx="1" width="8" x="13" y="4" />,
     <rect key="c" height="6" rx="1" width="8" x="3" y="14" />,
+  ]),
+  depth: strokeSvg({ key: "depth" }, [
+    <path key="a" d="M3 20l6-9 4 5 3-4 5 8z" />, <path key="b" d="M3 20h18" />,
   ]),
 };
 const IeChevron = () => (
@@ -3402,6 +3407,7 @@ export function ImageEditor() {
       : (colorKeySeed ? "Adjust the key, then apply the alpha cutout" : "Click the background color to preview a cutout"),
     edit: maskMode ? "Paint or box-select the region to edit" : "Describe the edit on the right",
     boxes: "Drag to draw a region, then describe it",
+    depth: "Pick a processing resolution, then estimate depth",
   }[tool];
 
   // Short engine blurbs for the upscale radio cards (design copy). Keyed by the
@@ -3585,7 +3591,12 @@ export function ImageEditor() {
     working,
   };
   const stableToolPanelScope = useStableImageEditorToolPanelScope(toolPanelScope);
-  const renderToolPanel = (key) => <ImageEditorToolPanel panelKey={key} scope={stableToolPanelScope} />;
+  const renderToolPanel = (key) =>
+    key === "depth" ? (
+      <EditorDepthPanel dirty={dirty} working={working} />
+    ) : (
+      <ImageEditorToolPanel panelKey={key} scope={stableToolPanelScope} />
+    );
 
   const handleLayerOpacityInput = (id, raw) => {
     const start = !layerOpacityGestureRef.current;

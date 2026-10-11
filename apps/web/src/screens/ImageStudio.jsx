@@ -673,6 +673,17 @@ export function ImageStudio() {
     (tool) => setPromptTool((current) => (current === tool ? null : tool)),
     [],
   );
+  const depthControlAssets = useMemo(
+    () =>
+      assets.filter(
+        (asset) =>
+          asset.type === "depth" &&
+          asset.projectId === activeProject?.id &&
+          !asset.status?.trashed &&
+          !asset.status?.rejected,
+      ),
+    [assets, activeProject?.id],
+  );
   const editImageAssets = useMemo(
     () =>
       assets.filter(
@@ -980,10 +991,16 @@ export function ImageStudio() {
       : [];
   const controlActive = showControlPanel && Boolean(activeControlMode);
   const controlIsImageMode = controlActive && activeControlMode !== "pose";
+  // A saved depth-map asset (Iris-3B, sc-25682) IS a depth control map: it is offered only in depth
+  // mode and always rides as the passthrough `advanced.controlImage` — the worker derives the
+  // near-bright control image from its raw map (it is never re-estimated as if it were a photo).
+  const controlAssetIsDepth =
+    activeControlMode === "depth" && depthControlAssets.some((asset) => asset.id === controlImageAssetId);
+  const effectiveControlPassthrough = controlImagePassthrough || controlAssetIsDepth;
   const controlPreprocessSourceId =
-    controlIsImageMode && !controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
+    controlIsImageMode && !effectiveControlPassthrough && controlImageAssetId ? controlImageAssetId : null;
   const controlPassthroughId =
-    controlIsImageMode && controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
+    controlIsImageMode && effectiveControlPassthrough && controlImageAssetId ? controlImageAssetId : null;
 
   // Images each resolved-prompt job emits: the pose count when poses are selected (they
   // replace `count` variations), else `count`. Total batch image count feeds the run label
@@ -3847,9 +3864,11 @@ export function ImageStudio() {
               poseBlockText={macPoseBlock ? macPoseBlock.text : null}
               controlImageAssetId={controlImageAssetId}
               onControlImageChange={setControlImageAssetId}
-              controlImagePassthrough={controlImagePassthrough}
+              controlImagePassthrough={effectiveControlPassthrough}
               onControlImagePassthroughChange={setControlImagePassthrough}
-              controlImageAssets={editImageAssets}
+              controlImageAssets={
+                activeControlMode === "depth" ? [...depthControlAssets, ...editImageAssets] : editImageAssets
+              }
               importAsset={importAsset}
               projectId={activeProject?.id}
               characters={characters}
