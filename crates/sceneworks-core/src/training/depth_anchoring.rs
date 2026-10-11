@@ -377,9 +377,10 @@ pub fn depth_anchoring_settings(
     if min_t > max_t {
         return Err(field_error(
             DEPTH_ANCHORING_MAX_T_KEY,
-            format!(
-                "{DEPTH_ANCHORING_MAX_T_KEY} ({max_t}) must be at least \
-                 {DEPTH_ANCHORING_MIN_T_KEY} ({min_t})."
+            super::inverted_window_message(
+                advanced,
+                (DEPTH_ANCHORING_MIN_T_KEY, min_t),
+                (DEPTH_ANCHORING_MAX_T_KEY, max_t),
             ),
         ));
     }

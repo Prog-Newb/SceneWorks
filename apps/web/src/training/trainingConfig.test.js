@@ -56,7 +56,8 @@ import {
   bodyLosses,
   bodyLossCombinationRefusal,
   bodyLossEveryMax,
-  bodyLossMaxTDefault,
+  bodyProportionMaxTDefault,
+  bodySurfaceWindowDefault,
   bodyLossWeightMax,
   bodyLossWeightSuggested,
   targetSupportsBodyLoss,
@@ -1400,12 +1401,17 @@ describe("body losses (sc-24832)", () => {
     expect(issuesOn(on, "bodyShapeWeight")).toEqual([]);
     expect(issuesOn({ ...on, bodyShapeMinT: "-0.1" }, "bodyShapeMinT")).toHaveLength(1);
     expect(issuesOn({ ...on, bodyShapeMaxT: "1.5" }, "bodyShapeMaxT")).toHaveLength(1);
-    // The shape window defaults to [0, 0.5] (sc-2124): a lone max inside it is fine, a lone min
-    // above the default max is inverted (flagged on the max).
-    expect(issuesOn({ ...on, bodyShapeMaxT: "0.3" }, "bodyShapeMaxT")).toEqual([]);
-    expect(issuesOn({ ...on, bodyShapeMinT: "0.7" }, "bodyShapeMaxT")).toHaveLength(1);
-    expect(bodyLossMaxTDefault).toBe(0.5);
-    expect(bodyLosses.map((loss) => loss.window)).toEqual([[0, 0.5], [0, 0.5], [0, 0.5]]);
+    // The shape window keeps upstream's [0.4, 0.8]: a lone max below the default min is inverted.
+    expect(issuesOn({ ...on, bodyShapeMaxT: "0.3" }, "bodyShapeMaxT")).toHaveLength(1);
+    // sc-2124: proportion defaults to [0, 0.5]; shape/normal keep [0.4, 0.8].
+    expect(bodyProportionMaxTDefault).toBe(0.5);
+    expect(bodySurfaceWindowDefault).toEqual([0.4, 0.8]);
+    expect(bodyLosses.map((loss) => loss.window)).toEqual([[0, 0.5], [0.4, 0.8], [0.4, 0.8]]);
+    const prop = { bodyProportionWeight: "0.1" };
+    expect(issuesOn({ ...prop, bodyProportionMaxT: "0.3" }, "bodyProportionMaxT")).toEqual([]);
+    expect(issuesOn({ ...prop, bodyProportionMinT: "0.7" }, "bodyProportionMaxT").map((e) => e.message)).toEqual([
+      "Noise window max must be at least its min — it is empty and its default is now 0.5",
+    ]);
     expect(issuesOn({ ...on, bodyShapeMinCos: "1.5" }, "bodyShapeMinCos")).toHaveLength(1);
     for (const bad of ["0", "2.5", String(bodyLossEveryMax + 1)]) {
       expect(issuesOn({ ...on, bodyShapeEvery: bad }, "bodyShapeEvery")).toHaveLength(1);

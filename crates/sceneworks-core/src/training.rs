@@ -77,6 +77,25 @@ pub fn technique_value<'a>(advanced: &'a JsonObject, key: &str) -> Option<&'a Va
     advanced.get(key).filter(|value| !value.is_null())
 }
 
+/// The field-error message for an aux loss's inverted noise window (`min_t > max_t`). When
+/// `max_key` is unset the message says so and names its default `max_t` — sc-2124 lowered the
+/// decoded-x0 losses' default to `0.5`, so a carried-over `*MinT` above it is now refused with
+/// the reason spelled out instead of only the numbers.
+pub(crate) fn inverted_window_message(
+    advanced: &JsonObject,
+    (min_key, min_t): (&str, f64),
+    (max_key, max_t): (&str, f64),
+) -> String {
+    if technique_value(advanced, max_key).is_some() {
+        format!("{max_key} ({max_t}) must be at least {min_key} ({min_t}).")
+    } else {
+        format!(
+            "{max_key} must be at least {min_key} ({min_t}): {max_key} is unset and its default \
+             is now {max_t}. Set {max_key} explicitly or lower {min_key}."
+        )
+    }
+}
+
 /// Every epic 2123 technique key of `advanced` that [`technique_value`] governs.
 pub const TECHNIQUE_KEYS: [&str; 45] = [
     WEIGHT_NOISE_SIGMA_KEY,

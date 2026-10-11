@@ -1012,9 +1012,9 @@ describe("ConfigureJobPanel body losses", () => {
     expect(toggle("Body shape loss").checked).toBe(true);
     expect(field("Body shape weight").value).toBe("0.1");
     expect(field("Body shape weight").getAttribute("max")).toBe("1");
-    // sc-2124: the low-noise default window [0, 0.5].
-    expect(field("Body shape window min").getAttribute("placeholder")).toBe("0");
-    expect(field("Body shape window max").getAttribute("placeholder")).toBe("0.5");
+    // sc-2124: body shape keeps upstream's [0.4, 0.8].
+    expect(field("Body shape window min").getAttribute("placeholder")).toBe("0.4");
+    expect(field("Body shape window max").getAttribute("placeholder")).toBe("0.8");
     expect(field("Body shape every N steps").getAttribute("max")).toBe("16");
     expect(field("Body shape cosine gate")).toBeTruthy();
     expect(field("Surface normals weight").value).toBe("0.2");

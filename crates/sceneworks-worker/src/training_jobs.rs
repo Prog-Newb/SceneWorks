@@ -6286,7 +6286,7 @@ mod tests {
         );
         assert_eq!(
             (body.shape.weight, body.shape.t_min, body.shape.t_max),
-            (0.2, 0.0, 0.5)
+            (0.2, 0.4, 0.8)
         );
         assert_eq!(body.shape_min_cos, 0.5);
         assert_eq!(body.normal.weight, 0.3);

@@ -174,7 +174,7 @@ fn schedule(
     if min_t > max_t {
         return Err(field_error(
             max_key,
-            format!("{max_key} ({max_t}) must be at least {min_key} ({min_t})."),
+            super::inverted_window_message(advanced, (min_key, min_t), (max_key, max_t)),
         ));
     }
     let every = match technique_value(advanced, every_key) {

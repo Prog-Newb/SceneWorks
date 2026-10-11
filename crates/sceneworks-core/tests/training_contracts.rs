@@ -2771,7 +2771,7 @@ fn subject_mask_loss_is_refused_at_submit_on_targets_that_do_not_advertise_it() 
 }
 
 /// sc-24832 (epic 2123 E6): in-range body-loss values survive into the plan verbatim and parse
-/// into the per-loss schedules (with the low-noise default window `[0, 0.5]`, sc-2124); every out-of-range / wrong-type
+/// into the per-loss schedules (proportion `[0, 0.5]`, sc-2124; shape/normal upstream `[0.4, 0.8]`); every out-of-range / wrong-type
 /// value is a field-level error naming the offending key. Mutation: drop the `min_t > max_t` check
 /// in `body_losses::schedule` ⇒ the inverted-window case is accepted ⇒ red.
 #[test]
@@ -2797,12 +2797,12 @@ fn build_training_plan_validates_body_losses_as_field_errors() {
     let p = s.proportion.as_ref().expect("proportion on");
     assert_eq!(
         (p.min_t, p.max_t, p.every),
-        (0.0, BODY_LOSS_MAX_T_DEFAULT, 1)
+        (0.0, BODY_PROPORTION_MAX_T_DEFAULT, 1)
     );
     let sh = s.shape.as_ref().expect("shape on");
     assert_eq!(
         (sh.min_t, sh.max_t, sh.every),
-        (0.0, 0.5, BODY_LOSS_EVERY_DEFAULT)
+        (0.4, 0.8, BODY_LOSS_EVERY_DEFAULT)
     );
     assert_eq!(s.normal.as_ref().unwrap().every, BODY_LOSS_EVERY_MAX as u32);
     assert!(s.include_head && s.normal_restrict_to_subject);
@@ -2890,7 +2890,16 @@ fn web_body_loss_bounds_match_the_api_bounds() {
     assert_eq!(num("bodyLossWeightSuggested"), BODY_LOSS_WEIGHT_SUGGESTED);
     assert_eq!(num("bodyLossEveryMax"), BODY_LOSS_EVERY_MAX as f64);
     assert_eq!(num("bodyLossEveryDefault"), BODY_LOSS_EVERY_DEFAULT as f64);
-    assert_eq!(num("bodyLossMaxTDefault"), BODY_LOSS_MAX_T_DEFAULT);
+    assert_eq!(
+        num("bodyProportionMaxTDefault"),
+        BODY_PROPORTION_MAX_T_DEFAULT
+    );
+    let surface: Vec<f64> = serde_json::from_str(&web_training_const("bodySurfaceWindowDefault"))
+        .expect("bodySurfaceWindowDefault is a JSON number pair");
+    assert_eq!(
+        surface,
+        vec![BODY_SURFACE_WINDOW_DEFAULT.0, BODY_SURFACE_WINDOW_DEFAULT.1]
+    );
     assert_eq!(num("bodyShapeMinCosDefault"), BODY_SHAPE_MIN_COS_DEFAULT);
 }
 
@@ -3872,11 +3881,13 @@ fn training_adapters_are_cataloged_at_the_loaded_revision() {
     }
 }
 
-/// sc-2124: every decoded-x0 (pixel-space) aux loss — depth anchoring, the identity and landmark
-/// losses and the three body losses — defaults to the latent losses' low-noise window `[0, 0.5]`
-/// once given only a weight (near pure noise the decoded x0 is mush), keeps every-other-update
-/// alternation, and honours an explicit window unchanged. Mutation: restore any `1.0` / `(0.4,
-/// 0.8)` default ⇒ red.
+/// sc-2124: the decoded-x0 aux losses whose upstream window was `[0, 1]` — depth anchoring, the
+/// identity and landmark losses and body proportion — default to the latent losses' low-noise
+/// window `[0, 0.5]` once given only a weight (near pure noise the decoded x0 is mush); body shape
+/// and normal keep upstream's `[0.4, 0.8]`; all keep every-other-update alternation; an explicit
+/// window is honoured unchanged; and a carried-over min above the new default max is refused on
+/// the max field with the default spelled out. Mutation: restore any `1.0` default, or move shape /
+/// normal to `[0, 0.5]` ⇒ red.
 #[test]
 fn pixel_space_aux_losses_default_to_the_low_noise_window() {
     use sceneworks_core::training::body_losses::{body_loss_settings, BODY_LOSS_EVERY_DEFAULT};
@@ -3913,11 +3924,16 @@ fn pixel_space_aux_losses_default_to_the_low_noise_window() {
         );
     }
     let b = body_loss_settings(&weights_only).unwrap();
-    for s in [b.proportion, b.shape, b.normal] {
+    let p = b.proportion.expect("on");
+    assert_eq!(
+        (p.min_t, p.max_t, p.every),
+        (0.0, 0.5, BODY_LOSS_EVERY_DEFAULT)
+    );
+    for s in [b.shape, b.normal] {
         let s = s.expect("on");
         assert_eq!(
             (s.min_t, s.max_t, s.every),
-            (0.0, 0.5, BODY_LOSS_EVERY_DEFAULT)
+            (0.4, 0.8, BODY_LOSS_EVERY_DEFAULT)
         );
     }
     assert_eq!(LATENT_LOSS_MAX_T_DEFAULT, 0.5);
@@ -3936,4 +3952,36 @@ fn pixel_space_aux_losses_default_to_the_low_noise_window() {
     assert_eq!((lm.min_t, lm.max_t), (0.6, 1.0));
     let sh = body_loss_settings(&explicit).unwrap().shape.unwrap();
     assert_eq!((sh.min_t, sh.max_t), (0.4, 0.8));
+
+    // A carried-over min above the new default max: refused on the max field, naming the default.
+    for (min_key, max_key, parse) in [
+        (
+            "depthAnchoringMinT",
+            "depthAnchoringMaxT",
+            (|a: &serde_json::Map<String, Value>| depth_anchoring_settings(a).map(|_| ()))
+                as fn(&serde_json::Map<String, Value>) -> Result<(), TrainingPlanError>,
+        ),
+        ("identityLossMinT", "identityLossMaxT", |a| {
+            identity_loss_settings(a).map(|_| ())
+        }),
+        ("faceLandmarkLossMinT", "faceLandmarkLossMaxT", |a| {
+            face_landmark_loss_settings(a).map(|_| ())
+        }),
+        ("bodyProportionMinT", "bodyProportionMaxT", |a| {
+            body_loss_settings(a).map(|_| ())
+        }),
+    ] {
+        let weight_key = min_key.replace("MinT", "Weight");
+        let carried = bag(json!({ weight_key: 0.1, min_key: 0.7 }));
+        match parse(&carried) {
+            Err(TrainingPlanError::InvalidField { field, message }) => {
+                assert_eq!(field, max_key);
+                assert!(
+                    message.contains(max_key) && message.contains("default is now 0.5"),
+                    "{message}"
+                );
+            }
+            other => panic!("{min_key}: expected a {max_key} field error, got {other:?}"),
+        }
+    }
 }

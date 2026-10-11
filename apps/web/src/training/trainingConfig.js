@@ -115,15 +115,17 @@ export const bodyLossWeightMax = 1;
 export const bodyLossWeightSuggested = 0.1;
 export const bodyLossEveryMax = 16;
 export const bodyLossEveryDefault = 2;
-// Default noise window [0, 0.5] for every body loss (sc-2124).
-export const bodyLossMaxTDefault = 0.5;
+// Default noise windows (sc-2124): body proportion [0, 0.5] (upstream [0, 1]); shape and normal
+// keep upstream's [0.4, 0.8], which already excludes the top of the noise range.
+export const bodyProportionMaxTDefault = 0.5;
+export const bodySurfaceWindowDefault = [0.4, 0.8];
 export const bodyShapeMinCosDefault = 0.2;
 // The three losses: the `advanced` key prefix, the target support flag, the default noise window
-// ([0, bodyLossMaxTDefault] for all three, sc-2124) and the UI label.
+// (proportion [0, bodyProportionMaxTDefault], shape/normal bodySurfaceWindowDefault) and the UI label.
 export const bodyLosses = [
-  { prefix: "bodyProportion", limit: "supportsBodyProportionLoss", window: [0, bodyLossMaxTDefault], label: "Body proportion" },
-  { prefix: "bodyShape", limit: "supportsBodyShapeLoss", window: [0, bodyLossMaxTDefault], label: "Body shape" },
-  { prefix: "normal", limit: "supportsNormalLoss", window: [0, bodyLossMaxTDefault], label: "Surface normals" },
+  { prefix: "bodyProportion", limit: "supportsBodyProportionLoss", window: [0, bodyProportionMaxTDefault], label: "Body proportion" },
+  { prefix: "bodyShape", limit: "supportsBodyShapeLoss", window: bodySurfaceWindowDefault, label: "Body shape" },
+  { prefix: "normal", limit: "supportsNormalLoss", window: bodySurfaceWindowDefault, label: "Surface normals" },
 ];
 
 // Face losses (epic 2123, sc-24831): the ArcFace identity loss pulls the decoded prediction's face
@@ -1390,7 +1392,12 @@ function auxLossIssues(configDraft, selectedTarget, spec) {
     }
   }
   if ((bounds.MinT ?? spec.window[0]) > (bounds.MaxT ?? spec.window[1])) {
-    issues.push([key("MaxT"), "Noise window max must be at least its min"]);
+    issues.push([
+      key("MaxT"),
+      bounds.MaxT === undefined
+        ? `Noise window max must be at least its min — it is empty and its default is now ${spec.window[1]}`
+        : "Noise window max must be at least its min",
+    ]);
   }
   if (String(configDraft[key("Every")] ?? "").trim()) {
     const every = numberFromDraft(configDraft[key("Every")]);
