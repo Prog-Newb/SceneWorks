@@ -260,7 +260,13 @@ async fn iris_training_gpu_smoke() {
         settings.gpu_id = "mlx".to_owned();
         settings.backend_mlx_enabled = true;
     } else {
-        settings.gpu_id = "cuda".to_owned();
+        // The worker's gpu id is the nvidia-smi index the Iris memory floor is read from: the
+        // (physical) card CUDA_VISIBLE_DEVICES selects, as the production candle worker is launched.
+        settings.gpu_id = std::env::var("CUDA_VISIBLE_DEVICES")
+            .ok()
+            .and_then(|devices| devices.split(',').next().map(|id| id.trim().to_owned()))
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| "0".to_owned());
         settings.backend_candle_enabled = true;
     }
     let backbone = crate::model_jobs::huggingface_snapshot_dir(&data_dir, BACKBONE_REPO)
