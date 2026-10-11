@@ -464,18 +464,22 @@ fn a_complete_install_resolves_with_its_own_tile_geometry() {
     );
 }
 
-/// The linked engine's descriptor matches what the UI and admission assume (macOS links MLX).
-#[cfg(target_os = "macos")]
+/// The linked engine's descriptor matches what the UI and admission assume, on both native lanes
+/// (MLX declares `mac_only`, Candle does not).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn the_linked_restore_transform_declares_the_planned_capabilities() {
     let descriptor = crate::inference_runtime::transform_descriptor(IRIS_RESTORE_MODEL_ID)
-        .expect("iris_3b_restore is registered on macOS");
+        .expect("iris_3b_restore is registered by the native bundle");
     let caps = &descriptor.capabilities;
     assert_eq!(caps.default_scale, 4.0);
     let budget = caps.input_budget.expect("a declared input budget");
     assert_eq!((budget.short_side, budget.long_side), (512, 1024));
     assert!(caps.supports_color_fix);
-    assert!(caps.mac_only);
+    assert_eq!(caps.mac_only, cfg!(target_os = "macos"));
     assert!(!caps.is_diffusion && !caps.supports_strength);
 }
 

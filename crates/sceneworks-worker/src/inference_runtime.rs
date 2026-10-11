@@ -438,7 +438,13 @@ pub(crate) fn load_transform(
 }
 
 /// The registered descriptor of a media transform, if this build links one.
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
 pub(crate) fn transform_descriptor(id: &str) -> Option<gen_core::TransformDescriptor> {
     media()
         .transforms()
