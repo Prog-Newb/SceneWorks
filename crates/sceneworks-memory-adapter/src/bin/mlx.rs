@@ -26967,6 +26967,22 @@ mod ltx_tests {
         request
     }
 
+    /// Presents one attestation line the adapter must refuse before its ACK and returns the
+    /// refusal. The watchdog end stays open until the refusal returns: on macOS `setsockopt`
+    /// fails with EINVAL once the peer has closed, so a peer thread that wrote and hung up before
+    /// the adapter configured its socket timeouts turned the refusal under test into a
+    /// timing-dependent "configure LTX watchdog read timeout: Invalid argument" (sc-25690).
+    fn refuse_ltx_watchdog_attestation(request: &Value, payload: &Value, why: &str) -> String {
+        let (mut watchdog, adapter) = UnixStream::pair().unwrap();
+        watchdog
+            .write_all(format!("{payload}\n").as_bytes())
+            .unwrap();
+        let error =
+            consume_ltx_canary_watchdog_attestation_stream(request, adapter).expect_err(why);
+        drop(watchdog);
+        error
+    }
+
     fn ltx_campaign_entry_request_json() -> Value {
         let mut request = ltx_request_json(
             LTX_CAMPAIGN_ENTRY_WIDTH,
@@ -27394,16 +27410,15 @@ mod ltx_tests {
             "minInitialMemoryFreeBytes": 2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
             "minMemoryFreeBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
         });
-        let (mut missing_watchdog, missing_adapter) = UnixStream::pair().unwrap();
-        let missing_thread = std::thread::spawn(move || {
-            missing_watchdog
-                .write_all(format!("{base}\n").as_bytes())
-                .unwrap();
-        });
-        let error = consume_ltx_canary_watchdog_attestation_stream(&request, missing_adapter)
-            .expect_err("campaign entry must require authenticated phases");
-        missing_thread.join().unwrap();
-        assert!(error.contains("action-bound authenticated provider phase contract"));
+        let error = refuse_ltx_watchdog_attestation(
+            &request,
+            &base,
+            "campaign entry must require authenticated phases",
+        );
+        assert!(
+            error.contains("action-bound authenticated provider phase contract"),
+            "{error}"
+        );
 
         let (adapter, mut watchdog) = UnixStream::pair().unwrap();
         let mut attestation = LtxCanaryWatchdogAttestation {
@@ -27594,15 +27609,11 @@ mod ltx_tests {
                 "providerPhases": LTX_BOUNDED_CARRIER_PHASE_NAMES,
             });
             mutate(&mut mutated);
-            let (mut bad_watchdog, bad_adapter) = UnixStream::pair().unwrap();
-            let bad_peer = std::thread::spawn(move || {
-                bad_watchdog
-                    .write_all(format!("{mutated}\n").as_bytes())
-                    .unwrap();
-            });
-            let error = consume_ltx_canary_watchdog_attestation_stream(&request, bad_adapter)
-                .expect_err("profile, list and order mutations must fail closed");
-            bad_peer.join().unwrap();
+            let error = refuse_ltx_watchdog_attestation(
+                &request,
+                &mutated,
+                "profile, list and order mutations must fail closed",
+            );
             assert!(
                 error.contains("action-bound authenticated provider phase contract"),
                 "{error}"
@@ -27695,15 +27706,11 @@ mod ltx_tests {
         ] {
             let mut changed = payload.clone();
             mutate(&mut changed);
-            let (mut bad_watchdog, bad_adapter) = UnixStream::pair().unwrap();
-            let bad_peer = std::thread::spawn(move || {
-                bad_watchdog
-                    .write_all(format!("{changed}\n").as_bytes())
-                    .unwrap();
-            });
-            let error = consume_ltx_canary_watchdog_attestation_stream(&request, bad_adapter)
-                .expect_err("SC-20318 phase profile/list/order mutations must fail");
-            bad_peer.join().unwrap();
+            let error = refuse_ltx_watchdog_attestation(
+                &request,
+                &changed,
+                "SC-20318 phase profile/list/order mutations must fail",
+            );
             assert!(
                 error.contains("action-bound authenticated provider phase contract"),
                 "{error}"
@@ -28002,46 +28009,31 @@ mod ltx_tests {
 
         let mut swap_gated = payload.clone();
         swap_gated["minSwapFreeBytes"] = json!(1024_u64 * 1024 * 1024);
-        let (mut fake_watchdog, fake_adapter) =
-            UnixStream::pair().expect("swap-gated watchdog socket pair");
-        let fake_thread = std::thread::spawn(move || {
-            fake_watchdog
-                .write_all(format!("{swap_gated}\n").as_bytes())
-                .expect("send swap-gated attestation");
-        });
-        let error = consume_ltx_canary_watchdog_attestation_stream(&request, fake_adapter)
-            .expect_err("an arbitrary swap reserve must not enter the reviewed canary bounds");
-        fake_thread.join().expect("fake watchdog thread");
-        assert!(error.contains("exact reviewed bounds"));
+        let error = refuse_ltx_watchdog_attestation(
+            &request,
+            &swap_gated,
+            "an arbitrary swap reserve must not enter the reviewed canary bounds",
+        );
+        assert!(error.contains("exact reviewed bounds"), "{error}");
 
         let mut percent_gated = payload.clone();
         percent_gated["minInitialMemoryFreePercent"] = json!(70);
-        let (mut fake_watchdog, fake_adapter) =
-            UnixStream::pair().expect("percent-gated watchdog socket pair");
-        let fake_thread = std::thread::spawn(move || {
-            fake_watchdog
-                .write_all(format!("{percent_gated}\n").as_bytes())
-                .expect("send percent-gated attestation");
-        });
-        let error = consume_ltx_canary_watchdog_attestation_stream(&request, fake_adapter)
-            .expect_err("a redundant percentage floor must not enter the reviewed canary bounds");
-        fake_thread.join().expect("fake watchdog thread");
-        assert!(error.contains("exact reviewed bounds"));
+        let error = refuse_ltx_watchdog_attestation(
+            &request,
+            &percent_gated,
+            "a redundant percentage floor must not enter the reviewed canary bounds",
+        );
+        assert!(error.contains("exact reviewed bounds"), "{error}");
 
         let mut weakened = payload;
         weakened["minInitialMemoryFreeBytes"] =
             json!(2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100) - 1);
-        let (mut fake_watchdog, fake_adapter) =
-            UnixStream::pair().expect("weakened watchdog socket pair");
-        let fake_thread = std::thread::spawn(move || {
-            fake_watchdog
-                .write_all(format!("{weakened}\n").as_bytes())
-                .expect("send weakened attestation");
-        });
-        let error = consume_ltx_canary_watchdog_attestation_stream(&request, fake_adapter)
-            .expect_err("weakened runtime floor must not attest");
-        fake_thread.join().expect("fake watchdog thread");
-        assert!(error.contains("exact reviewed bounds"));
+        let error = refuse_ltx_watchdog_attestation(
+            &request,
+            &weakened,
+            "weakened runtime floor must not attest",
+        );
+        assert!(error.contains("exact reviewed bounds"), "{error}");
     }
 
     #[test]
