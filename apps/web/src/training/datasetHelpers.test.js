@@ -197,7 +197,7 @@ describe("edit-pair dataset helpers (sc-24161)", () => {
       ],
     };
     const catalog = [{ id: "target" }, { id: "ref-a" }, { id: "ref-c" }];
-    const drafts = referenceDraftsFromDataset(dataset, catalog);
+    const drafts = referenceDraftsFromDataset(dataset);
     expect(drafts).toEqual({ target: ["ref-c", "dataset-ref:ds1:item_0001:1", "ref-a"] });
     const owned = datasetReferenceAssets(dataset, "p1", catalog);
     expect(owned).toHaveLength(1);
