@@ -75,7 +75,11 @@ async fn ensure_depth_source_is_an_image(
     if !is_image {
         return Err(ApiError::bad_request(format!(
             "Depth is estimated from an image; source asset {source_asset_id} is a {}.",
-            if asset_type.is_empty() { "non-image asset" } else { asset_type }
+            if asset_type.is_empty() {
+                "non-image asset"
+            } else {
+                asset_type
+            }
         )));
     }
     Ok(())

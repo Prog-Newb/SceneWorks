@@ -96,7 +96,11 @@ fn exif_orientation(orientation: u16) -> Vec<u8> {
 async fn iris_worker_gpu_smoke_depth() {
     use image::ImageEncoder;
     let hub = PathBuf::from(std::env::var("HF_HUB_CACHE").expect("set HF_HUB_CACHE"));
-    assert!(hub.is_dir(), "HF_HUB_CACHE is not a directory: {}", hub.display());
+    assert!(
+        hub.is_dir(),
+        "HF_HUB_CACHE is not a directory: {}",
+        hub.display()
+    );
     let temp = tempfile::tempdir().unwrap();
     let (api_url, posts) = spawn_api().await;
     let mut settings = Settings::for_test(temp.path().join("data"));
@@ -173,8 +177,17 @@ async fn iris_worker_gpu_smoke_depth() {
         .expect("a completed result");
     let depth = &fact["depth"];
     assert_eq!(depth["source"]["exifOrientation"], 6);
-    assert_eq!((fact["width"].as_u64(), fact["height"].as_u64()), (Some(768), Some(1024)));
-    assert_eq!((depth["preprocessing"]["modelWidth"].as_u64(), depth["preprocessing"]["modelHeight"].as_u64()), (Some(768), Some(1024)));
+    assert_eq!(
+        (fact["width"].as_u64(), fact["height"].as_u64()),
+        (Some(768), Some(1024))
+    );
+    assert_eq!(
+        (
+            depth["preprocessing"]["modelWidth"].as_u64(),
+            depth["preprocessing"]["modelHeight"].as_u64()
+        ),
+        (Some(768), Some(1024))
+    );
 
     let npy_path = project_path.join(fact["mediaPath"].as_str().unwrap());
     let map = decode_npy_f32(&std::fs::read(&npy_path).unwrap()).unwrap();
@@ -185,7 +198,8 @@ async fn iris_worker_gpu_smoke_depth() {
         .iter()
         .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
     assert!(max - min > 0.1, "a non-constant depth map: [{min}, {max}]");
-    let preview = image::open(project_path.join(fact["preview"]["path"].as_str().unwrap())).unwrap();
+    let preview =
+        image::open(project_path.join(fact["preview"]["path"].as_str().unwrap())).unwrap();
     assert_eq!((preview.width(), preview.height()), (768, 1024));
 
     // The subject (face, upright centre) is nearer than the backdrop (top corners).

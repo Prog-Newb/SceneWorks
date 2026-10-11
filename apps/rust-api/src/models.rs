@@ -7088,7 +7088,10 @@ mod download_receipt_tests {
                 std::fs::write(snapshot.join(file), b"weights").unwrap();
             }
             let torn = install_state_for(Some(context.clone()), &model, data_dir);
-            assert!(!torn.installed, "{os}: two of three export files is not installed");
+            assert!(
+                !torn.installed,
+                "{os}: two of three export files is not installed"
+            );
             std::fs::write(snapshot.join(&context.files[2]), b"weights").unwrap();
             let installed = install_state_for(Some(context), &model, data_dir);
             assert!(

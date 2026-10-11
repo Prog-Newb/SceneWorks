@@ -201,8 +201,8 @@ pub fn decode_npy_f32(bytes: &[u8]) -> Result<DepthArray, String> {
             "depth maps are little-endian float32 ('<f4'); this file is {descr}"
         ));
     }
-    let fortran =
-        dict_value(header, "fortran_order").ok_or_else(|| "NPY header has no fortran_order")?;
+    let fortran = dict_value(header, "fortran_order")
+        .ok_or_else(|| "NPY header has no fortran_order".to_owned())?;
     if fortran != "False" {
         return Err("depth maps are row-major (fortran_order False)".to_owned());
     }
@@ -312,15 +312,26 @@ mod tests {
         let swap = |from: &str, to: &str| {
             assert_eq!(from.len(), to.len());
             let header_end = 10 + u16::from_le_bytes([good[8], good[9]]) as usize;
-            let header = std::str::from_utf8(&good[10..header_end]).unwrap().replace(from, to);
+            let header = std::str::from_utf8(&good[10..header_end])
+                .unwrap()
+                .replace(from, to);
             let mut bytes = good.clone();
             bytes[10..header_end].copy_from_slice(header.as_bytes());
             bytes
         };
-        assert!(decode_npy_f32(&swap("'<f4'", "'>f4'")).is_err(), "big-endian");
+        assert!(
+            decode_npy_f32(&swap("'<f4'", "'>f4'")).is_err(),
+            "big-endian"
+        );
         assert!(decode_npy_f32(&swap("'<f4'", "'<f8'")).is_err(), "float64");
-        assert!(decode_npy_f32(&swap("False", "True ")).is_err(), "fortran order");
-        assert!(decode_npy_f32(&good[..good.len() - 1]).is_err(), "truncated");
+        assert!(
+            decode_npy_f32(&swap("False", "True ")).is_err(),
+            "fortran order"
+        );
+        assert!(
+            decode_npy_f32(&good[..good.len() - 1]).is_err(),
+            "truncated"
+        );
         let mut extra = good.clone();
         extra.extend_from_slice(&[0, 0, 0, 0]);
         assert!(decode_npy_f32(&extra).is_err(), "trailing data");

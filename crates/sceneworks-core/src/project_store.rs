@@ -8636,7 +8636,12 @@ mod tests {
         for unsafe_preview in ["../../escape.png", "/etc/passwd"] {
             assert!(
                 matches!(
-                    store.persist_generated_asset(&project.id, "job-d", "genset_d", &fact(unsafe_preview)),
+                    store.persist_generated_asset(
+                        &project.id,
+                        "job-d",
+                        "genset_d",
+                        &fact(unsafe_preview)
+                    ),
                     Err(ProjectStoreError::BadRequest(_))
                 ),
                 "{unsafe_preview} must be refused"
@@ -8645,7 +8650,9 @@ mod tests {
         store
             .persist_generated_asset(&project.id, "job-d", "genset_d", &fact(preview_rel))
             .expect("depth asset persists");
-        let asset = store.get_asset(&project.id, "asset_depth1").expect("reloads");
+        let asset = store
+            .get_asset(&project.id, "asset_depth1")
+            .expect("reloads");
         assert_eq!(asset["type"], "depth");
         assert_eq!(asset["file"]["path"], npy_rel);
         assert_eq!(asset["file"]["mimeType"], "application/x-npy");
@@ -8663,7 +8670,10 @@ mod tests {
             .purge_asset(&project.id, "asset_depth1", true)
             .expect("purges");
         assert!(!project_path.join(npy_rel).exists(), "raw map removed");
-        assert!(!project_path.join(preview_rel).exists(), "derived preview removed, not orphaned");
+        assert!(
+            !project_path.join(preview_rel).exists(),
+            "derived preview removed, not orphaned"
+        );
     }
 
     /// sc-8871 (F-069): `save_timeline` derives the write path from the

@@ -49,9 +49,8 @@ pub(crate) fn read_depth_asset_map(asset: &Value, project_path: &Path) -> Worker
             path.display()
         ))
     })?;
-    let array = decode_npy_f32(&bytes).map_err(|error| {
-        WorkerError::InvalidPayload(format!("depth asset {asset_id}: {error}"))
-    })?;
+    let array = decode_npy_f32(&bytes)
+        .map_err(|error| WorkerError::InvalidPayload(format!("depth asset {asset_id}: {error}")))?;
     Ok(DepthMap {
         width: array.width,
         height: array.height,

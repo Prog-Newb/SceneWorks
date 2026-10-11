@@ -2,33 +2,33 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 109,
+    "modelCount": 110,
     "importedFamilyCount": 4,
-    "cellCount": 1014,
-    "mlxOnlyCellCount": 44,
+    "cellCount": 1017,
+    "mlxOnlyCellCount": 46,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "1848ca4795724bc33f89ff524102bbe89140f0e73f7213e9c46fd4e2416b8285",
+    "apiContractEntry": "2553f3cee9f8dc9b41b665111f3b1b6c9e04b7323c009e0ed6e5080672e2db95",
     "apiDto": "50f37331e5f3f398c803c15afee3a5f54cbbcab265e233d02098377ad78d9ac9",
     "apiGeneration": "75e502e31d13ac2018e9bfdc17e6bc939f24704fc04fd4a93008eb9c5cdffa12",
-    "apiValidation": "5338e6006c15973d3f0958322712df20315d6acfe55ebc4b79ce8af946429fee",
+    "apiValidation": "07d4456e795e330c6d309a0515dd26020f1b81415ac58eb4b66e51be9f3189ee",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
     "descriptorAudioFacts": "701d4120bef0920a05178ace2ec320cdd87cf5f3b7a318cde3625a86c47ed62c",
     "descriptorCandleFacts": "af21a3a949f0db398eb05d39e7ff28e660450eb907e041d53dd2d21642f6239a",
     "descriptorCandleRuntime": "029c15a82e7ddaa017839b19407fdea25c2608fab4d3201c09c4bf9e6216e369",
     "descriptorMlxFacts": "08ceb97ce2f0a45ae3978423fbf894160a425d74ca0af4303e2bbd3b99c98232",
-    "descriptorMlxRuntime": "a9d5c24276d1c61e2e44e2f903b79235888c347e155ce3c3631621b4c06bb04e",
-    "descriptorPreviewFacts": "94529de3e0388ae8d0b196012b9a68585e327574c619bf6628bbc5e866eb991e",
+    "descriptorMlxRuntime": "d4c2dd3ee80094edb564f1c3c3d01ae404b6a219a4d084a35e31f9514f510a38",
+    "descriptorPreviewFacts": "fa8a482398c5c6d8b6979905444655a645e2a7f9c6fc609cb6e247904017601f",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "dff7b8d69892942d8bd5dca140060846522e3038cb6885378c2ed8416f669d5f",
+    "manifest": "ca6bdcab6202e717ff599192bdb8e3f5fd8fd6727d0f4d3f42d2c36d3c47f972",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
     "routerCandle": "2799481c1aae4731b0ccabfce7fcefb762356aaf765ac57c44f30a299a7c908b",
-    "routerCatalog": "784a845221ef24ba4297c9b088647f5561320a5e8dc86c6afd8a5b8aad1fdb58",
-    "routerGaps": "22183cc9b0753640b97ed2ed08d1d5a499b173b593b13f57e111ffebb1cfab44",
+    "routerCatalog": "a9ea603ae9a0c48c45a0e755a2c58fb3c3ee564f1e2413df7170b4a8f7fd2b4f",
+    "routerGaps": "27a59308ea6862b281befae9c4f6caaae6a6ac62992da9ba4086be728ec1d90d",
     "routerMlx": "a071e2c63c90f76750aa85aaf431ca351324f23c63ea5e9591410fef8ef677c1",
-    "scheduler": "458818bae4c621c331978dc7000adfef7b6f18c0c81862334ae1880abf883782",
+    "scheduler": "6af81b64a988d199625a8d738e4f018370605b076afeee64216254796d41a7a6",
     "trainingCatalog": "1c78847209ffbc12498b189761963043ba4e5d01ae69e6e031a709d9f0e523de",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
@@ -45,9 +45,9 @@
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
-    "workerDispatch": "0bf6b1b0d427f1dee12ef1d8bfa01fd8ca4e505451032ea991198f2f2d36bd51",
+    "workerDispatch": "a6f3b9c1113255363fb57ae32a189402f72057d51d5c4c7b50e84375cb02479e",
     "workerEngineTable": "85d32676e6f2ea02fb6ff94a5bf21aa80275c032574219a9c7c7fa6f4a32ebb4",
-    "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
+    "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
     "workerImageDispatch": "7515fad6feabcdc8209ef401bbe77f2fdbbfe820ee23ec140634116f9434dbab",
     "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
     "workerImageMageFinetuned": "e00a6ccd9b811cda73073e0bd8270e58ab60c4a8a8e647f18f3fdec9c30a0935",
@@ -2089,6 +2089,33 @@
         "capability": "live_preview",
         "mlx": true,
         "candle": true
+      }
+    },
+    {
+      "id": "iris_3b_depth",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "image_depth",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18480",
+            "url": "https://app.shortcut.com/trefry/story/18480"
+          }
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
       }
     },
     {
@@ -7485,6 +7512,21 @@
           "capability": "representative_request",
           "mlx": false,
           "candle": false
+        }
+      ]
+    },
+    {
+      "jobType": "image_depth",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18480",
+            "url": "https://app.shortcut.com/trefry/story/18480"
+          }
         }
       ]
     },

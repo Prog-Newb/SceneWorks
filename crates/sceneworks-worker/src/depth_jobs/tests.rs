@@ -14,9 +14,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use gen_core::iris::depth::{DepthMap, DepthOutput};
 use gen_core::Progress;
+use image::GenericImageView;
 use sceneworks_core::depth_map::decode_npy_f32;
 use std::sync::{Arc, Mutex};
-use image::GenericImageView;
 use std::time::Duration;
 
 /// The inference repo's tiny depth-export config (`mlx-gen-iris/tests/fixtures/tiny-depth`): a
@@ -243,7 +243,10 @@ fn every_exif_orientation_is_applied_before_estimation() {
         );
         assert_eq!(decoded.geometry.exif_orientation, orientation as u8);
         assert_eq!(
-            (decoded.geometry.stored_width, decoded.geometry.stored_height),
+            (
+                decoded.geometry.stored_width,
+                decoded.geometry.stored_height
+            ),
             (3, 2)
         );
         assert_eq!(
@@ -268,7 +271,9 @@ fn a_rotated_jpeg_is_estimated_upright() {
     let stored = image::RgbImage::from_pixel(8, 4, image::Rgb([120, 80, 40]));
     let mut bytes = Vec::new();
     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 95);
-    encoder.set_exif_metadata(exif_orientation_block(6)).unwrap();
+    encoder
+        .set_exif_metadata(exif_orientation_block(6))
+        .unwrap();
     encoder
         .write_image(stored.as_raw(), 8, 4, image::ExtendedColorType::Rgb8)
         .unwrap();
@@ -287,7 +292,10 @@ fn the_export_resolves_only_from_its_own_complete_depth_closure() {
     let settings = settings_at(data.path());
 
     let error = resolve_depth_export(&settings).err().unwrap();
-    assert!(error.to_string().starts_with("[iris_depth_not_installed]"), "{error}");
+    assert!(
+        error.to_string().starts_with("[iris_depth_not_installed]"),
+        "{error}"
+    );
 
     // The GENERATION backbone's root files are not a depth install.
     let root = export_dir(data.path()).parent().unwrap().to_path_buf();
@@ -295,7 +303,10 @@ fn the_export_resolves_only_from_its_own_complete_depth_closure() {
     std::fs::write(root.join("config.yaml"), "model: {}\n").unwrap();
     std::fs::write(root.join("model.safetensors"), b"x").unwrap();
     let error = resolve_depth_export(&settings).err().unwrap();
-    assert!(error.to_string().starts_with("[iris_depth_not_installed]"), "{error}");
+    assert!(
+        error.to_string().starts_with("[iris_depth_not_installed]"),
+        "{error}"
+    );
 
     stage_export(
         data.path(),
@@ -304,7 +315,10 @@ fn the_export_resolves_only_from_its_own_complete_depth_closure() {
     );
     let error = resolve_depth_export(&settings).err().unwrap();
     let text = error.to_string();
-    assert!(text.starts_with("[iris_depth_incomplete_install]"), "{text}");
+    assert!(
+        text.starts_with("[iris_depth_incomplete_install]"),
+        "{text}"
+    );
     assert!(text.contains("empty_prompt.safetensors"), "{text}");
 
     stage_export(data.path(), &DEPTH_EXPORT_FILES, TINY_DEPTH_CONFIG);
@@ -325,7 +339,10 @@ fn the_export_resolves_only_from_its_own_complete_depth_closure() {
         &TINY_DEPTH_CONFIG.replace("name: depth", "name: restoration"),
     );
     let error = resolve_depth_export(&settings).err().unwrap();
-    assert!(error.to_string().starts_with("[iris_depth_wrong_task]"), "{error}");
+    assert!(
+        error.to_string().starts_with("[iris_depth_wrong_task]"),
+        "{error}"
+    );
 }
 
 // ---- admission -----------------------------------------------------------------------------------
@@ -342,7 +359,10 @@ fn admission_scales_with_the_model_input_and_refuses_over_budget() {
         // At the reference area the prediction is the recorded peak.
         let reference = declaration.reference_model_pixels as u64;
         let at_reference = declaration.predicted_peak_gb(reference);
-        assert!((at_reference - declaration.reference_peak_gb).abs() < 1e-9, "{lane}");
+        assert!(
+            (at_reference - declaration.reference_peak_gb).abs() < 1e-9,
+            "{lane}"
+        );
         // It grows with the pixel count and is padded above the reference.
         let quadruple = declaration.predicted_peak_gb(reference * 4);
         let linear = declaration.resident_gb
@@ -648,7 +668,10 @@ fn a_depth_job_publishes_a_raw_npy_and_a_separate_preview_at_the_upright_size() 
     let fact = run.completed_fact();
     assert_eq!(fact["type"], "depth");
     assert_eq!(fact["mimeType"], "application/x-npy");
-    assert_eq!((fact["width"].as_u64(), fact["height"].as_u64()), (Some(4), Some(6)));
+    assert_eq!(
+        (fact["width"].as_u64(), fact["height"].as_u64()),
+        (Some(4), Some(6))
+    );
     assert_eq!(fact["sourceAssetId"], "asset_source1");
     assert_eq!(fact["parents"], json!(["asset_source1"]));
     assert_eq!(fact["displayName"], "Harbor (depth)");
@@ -665,7 +688,10 @@ fn a_depth_job_publishes_a_raw_npy_and_a_separate_preview_at_the_upright_size() 
     assert_eq!(depth["source"]["exifOrientation"], 6);
     assert_eq!(depth["source"]["exifOrientationApplied"], true);
     assert_eq!(
-        (depth["source"]["storedWidth"].as_u64(), depth["source"]["storedHeight"].as_u64()),
+        (
+            depth["source"]["storedWidth"].as_u64(),
+            depth["source"]["storedHeight"].as_u64()
+        ),
         (Some(6), Some(4))
     );
     assert_eq!(depth["preprocessing"]["maxSide"], 1024);
@@ -729,7 +755,10 @@ fn native_processing_is_passed_through_explicitly() {
     run.outcome.as_ref().unwrap();
     assert_eq!(run.seen, Some((6, 4, DepthResolution::Native)));
     let depth = &run.completed_fact()["depth"];
-    assert_eq!(depth["preprocessing"]["resolution"], json!({ "mode": "native" }));
+    assert_eq!(
+        depth["preprocessing"]["resolution"],
+        json!({ "mode": "native" })
+    );
     assert_eq!(depth["preprocessing"]["maxSide"], 0);
     assert_eq!(depth["source"]["exifOrientation"], 1);
 }
@@ -771,7 +800,10 @@ fn a_cancel_after_the_files_were_staged_still_leaves_nothing() {
     assert!(run.posts.iter().any(|post| post["status"] == "canceled"));
     assert!(run.depth_files().is_empty(), "{:?}", run.depth_files());
     assert!(
-        !run.project_path.join("assets/depth").read_dir().is_ok_and(|mut d| d.next().is_some()),
+        !run.project_path
+            .join("assets/depth")
+            .read_dir()
+            .is_ok_and(|mut d| d.next().is_some()),
         "no empty set directory is left either"
     );
 }

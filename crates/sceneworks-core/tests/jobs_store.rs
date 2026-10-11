@@ -5992,7 +5992,10 @@ fn mac_capabilities_master_switch_and_infra_features() {
     let other = mac_capabilities("freebsd", false);
     assert!(!other.features["imageDepth"].supported);
     assert_eq!(
-        other.features["imageDepth"].reason.as_ref().and_then(|r| r.suggested_epic.clone()),
+        other.features["imageDepth"]
+            .reason
+            .as_ref()
+            .and_then(|r| r.suggested_epic.clone()),
         Some("sc-25682".to_owned())
     );
     // AuraSR is dropped as an offered engine off-Mac too (sc-5499): unsupported on Windows (and Linux),

@@ -1023,7 +1023,11 @@ impl SceneWorksMcp {
                         encode_media_path(preview_path)
                     );
                     let url = format!("{link_base}{relative}");
-                    let name = preview_path.rsplit('/').next().unwrap_or(preview_path).to_owned();
+                    let name = preview_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(preview_path)
+                        .to_owned();
                     blocks.push(ContentBlock::resource_link(
                         Resource::new(&url, name)
                             .with_description(format!(

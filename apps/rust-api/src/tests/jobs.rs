@@ -15840,7 +15840,10 @@ async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job
 fn depth_source_png() -> Vec<u8> {
     let mut bytes = Vec::new();
     image::RgbImage::from_pixel(2, 2, image::Rgb([10, 20, 30]))
-        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
         .expect("png encodes");
     bytes
 }
@@ -15875,7 +15878,8 @@ async fn image_depth_route_queues_a_typed_job_and_publishes_a_depth_asset() {
         let app = app.clone();
         async move { request(app, "POST", "/api/v1/image/depth/jobs", body).await }
     };
-    let (status, job) = post_depth(json!({ "projectId": project_id, "sourceAssetId": source_id })).await;
+    let (status, job) =
+        post_depth(json!({ "projectId": project_id, "sourceAssetId": source_id })).await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
     assert_eq!(job["type"], "image_depth");
     let job_id = job["id"].as_str().expect("job id").to_owned();
@@ -15914,7 +15918,10 @@ async fn image_depth_route_queues_a_typed_job_and_publishes_a_depth_asset() {
     ] {
         let (status, body) = post_depth(bad.clone()).await;
         assert!(
-            matches!(status, StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY),
+            matches!(
+                status,
+                StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+            ),
             "{bad} -> {status} {body}"
         );
     }
@@ -15981,7 +15988,13 @@ async fn image_depth_route_queues_a_typed_job_and_publishes_a_depth_asset() {
     assert_eq!(asset["lineage"]["sourceAssetId"], json!(source_id));
 
     // A depth map is not a depth SOURCE.
-    let (status, body) = post_depth(json!({ "projectId": project_id, "sourceAssetId": "asset_depthapi" })).await;
+    let (status, body) =
+        post_depth(json!({ "projectId": project_id, "sourceAssetId": "asset_depthapi" })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(body["detail"].as_str().is_some_and(|d| d.contains("already a depth map")), "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("already a depth map")),
+        "{body}"
+    );
 }

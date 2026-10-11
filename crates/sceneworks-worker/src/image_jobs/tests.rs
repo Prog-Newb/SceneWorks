@@ -29118,7 +29118,11 @@ fn depth_control_reads_a_saved_depth_asset_without_touching_the_raw_map() {
         .unwrap()
         .expect("the depth asset is the control map");
     assert_eq!((control.width, control.height), (2, 2));
-    assert_eq!(&control.pixels[..3], &[255, 255, 255], "nearest is brightest");
+    assert_eq!(
+        &control.pixels[..3],
+        &[255, 255, 255],
+        "nearest is brightest"
+    );
     assert_eq!(&control.pixels[3..6], &[0, 0, 0], "farthest is darkest");
     assert_eq!(std::fs::read(project_path.join(npy_rel)).unwrap(), raw);
 

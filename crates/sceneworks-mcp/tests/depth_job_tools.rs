@@ -61,28 +61,36 @@ async fn estimate_depth_submits_the_typed_request_and_links_the_raw_map_and_prev
 
     let result = client
         .call_tool(
-            CallToolRequestParams::new("estimate_depth")
-                .with_arguments(call_args(json!({ "projectId": "p1", "sourceAssetId": "img_1" }))),
+            CallToolRequestParams::new("estimate_depth").with_arguments(call_args(
+                json!({ "projectId": "p1", "sourceAssetId": "img_1" }),
+            )),
         )
         .await
         .expect("estimate_depth succeeds");
     assert_ne!(result.is_error, Some(true), "{result:?}");
     assert_eq!(result_json(&result)["jobId"], "job_d1");
     client
-        .call_tool(CallToolRequestParams::new("estimate_depth").with_arguments(call_args(json!({
-            "projectId": "p1", "sourceAssetId": "img_1", "resolutionMode": "native"
-        }))))
+        .call_tool(
+            CallToolRequestParams::new("estimate_depth").with_arguments(call_args(json!({
+                "projectId": "p1", "sourceAssetId": "img_1", "resolutionMode": "native"
+            }))),
+        )
         .await
         .expect("native succeeds");
     let bodies = submitted.lock().unwrap().clone();
-    assert_eq!(bodies[0]["resolution"], json!({ "mode": "capped", "maxSide": 1024 }));
+    assert_eq!(
+        bodies[0]["resolution"],
+        json!({ "mode": "capped", "maxSide": 1024 })
+    );
     assert_eq!(bodies[1]["resolution"], json!({ "mode": "native" }));
 
     // An unknown mode is refused before anything is submitted.
     let refused = client
-        .call_tool(CallToolRequestParams::new("estimate_depth").with_arguments(call_args(json!({
-            "projectId": "p1", "sourceAssetId": "img_1", "resolutionMode": "metric"
-        }))))
+        .call_tool(
+            CallToolRequestParams::new("estimate_depth").with_arguments(call_args(json!({
+                "projectId": "p1", "sourceAssetId": "img_1", "resolutionMode": "metric"
+            }))),
+        )
         .await;
     match refused {
         Err(_) => {}
@@ -104,7 +112,10 @@ async fn estimate_depth_submits_the_typed_request_and_links_the_raw_map_and_prev
         .map(|link| link.uri.clone())
         .collect();
     assert!(uris.iter().any(|uri| uri.contains("map.npy")), "{uris:?}");
-    assert!(uris.iter().any(|uri| uri.contains("map.preview.png")), "{uris:?}");
+    assert!(
+        uris.iter().any(|uri| uri.contains("map.preview.png")),
+        "{uris:?}"
+    );
     let summary = result_json(&links);
     assert_eq!(summary["assets"][0]["mimeType"], "application/x-npy");
     assert!(summary["assets"][0]["previewUrl"]

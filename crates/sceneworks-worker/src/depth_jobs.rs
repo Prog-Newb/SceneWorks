@@ -35,8 +35,8 @@ use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageReader};
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::depth_map::{
-    encode_npy_f32, DepthResolutionRequest, ImageDepthJobPayload, DEPTH_ASSET_TYPE,
-    DEPTH_MODEL_ID, NPY_MIME_TYPE,
+    encode_npy_f32, DepthResolutionRequest, ImageDepthJobPayload, DEPTH_ASSET_TYPE, DEPTH_MODEL_ID,
+    NPY_MIME_TYPE,
 };
 use sceneworks_core::project_store::ProjectStore;
 use serde_json::{json, Value};
@@ -49,8 +49,11 @@ use crate::{
 /// The export's folder inside the weights repo.
 pub(crate) const DEPTH_EXPORT_SUBDIR: &str = "depth";
 /// Every file of the depth task's resource closure.
-pub(crate) const DEPTH_EXPORT_FILES: [&str; 3] =
-    [BACKBONE_CONFIG_FILE, BACKBONE_WEIGHTS_FILE, EMPTY_PROMPT_FILE];
+pub(crate) const DEPTH_EXPORT_FILES: [&str; 3] = [
+    BACKBONE_CONFIG_FILE,
+    BACKBONE_WEIGHTS_FILE,
+    EMPTY_PROMPT_FILE,
+];
 
 /// Typed failure codes, prefixed on the job error as `[code]` (the external-library convention).
 pub(crate) const NOT_INSTALLED: &str = "iris_depth_not_installed";
@@ -374,7 +377,10 @@ fn ensure_image_source(asset: &Value, asset_id: &str) -> WorkerResult<()> {
             format!("{asset_id} is already a depth map; depth is estimated from an image"),
         ));
     }
-    if asset_type == "vector" || mime == "image/svg+xml" || !(asset_type == "image" || mime.starts_with("image/")) {
+    if asset_type == "vector"
+        || mime == "image/svg+xml"
+        || !(asset_type == "image" || mime.starts_with("image/"))
+    {
         return Err(typed(
             INVALID_SOURCE,
             format!("{asset_id} is not a raster image (type {asset_type:?}, mime {mime:?})"),
@@ -726,7 +732,11 @@ fn depth_asset_fact(inputs: DepthFactInputs<'_>) -> WorkerResult<Value> {
     }))
 }
 
-fn depth_job_result(outputs: &DepthOutputPaths, metadata: &DepthMetadata, fact: Value) -> JsonObject {
+fn depth_job_result(
+    outputs: &DepthOutputPaths,
+    metadata: &DepthMetadata,
+    fact: Value,
+) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert(
         "generationSetId".to_owned(),
