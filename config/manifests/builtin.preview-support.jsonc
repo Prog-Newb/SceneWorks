@@ -7,10 +7,10 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "8f986217ad31475b288f452d78a30ef05a4d7268"
+      "inferenceRevision": "c9e76d0ddedc4937f89f1de6d587a78d1cc4b2d3"
     },
     "mlx": {
-      "inferenceRevision": "1544a2889e53cc1f7adba1d49e8761b8acf03a63"
+      "inferenceRevision": "c9e76d0ddedc4937f89f1de6d587a78d1cc4b2d3"
     }
   },
   "models": {
@@ -101,7 +101,8 @@
       "mlx": true
     },
     "iris_3b": {
-      "mlx": false
+      "candle": true,
+      "mlx": true
     },
     "kokoro_82m": {
       "candle": false

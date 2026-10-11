@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "1544a2889e53cc1f7adba1d49e8761b8acf03a63",
+    "inferenceRevision": "c9e76d0ddedc4937f89f1de6d587a78d1cc4b2d3",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -416,6 +416,7 @@
       "flux2_dev",
       "ideogram_4",
       "ideogram_4_turbo",
+      "iris_3b",
       "kolors",
       "krea_2_turbo",
       "krea_2_raw",
@@ -1039,6 +1040,24 @@
         "schedulers": [
           "flow_match_euler"
         ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "iris_3b",
+        "family": "iris",
+        "backend": "candle",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "dpmpp_2m",
+          "euler"
+        ],
+        "schedulers": [],
         "supported_guidance_methods": []
       },
       {
@@ -2218,7 +2237,9 @@
         "supported_guidance_methods": []
       }
     ],
-    "transform_ids": [],
+    "transform_ids": [
+      "iris_3b_restore"
+    ],
     "trainer_ids": [
       "anima_base",
       "kolors",

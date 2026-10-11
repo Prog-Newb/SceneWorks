@@ -15,11 +15,11 @@
     "apiGeneration": "75e502e31d13ac2018e9bfdc17e6bc939f24704fc04fd4a93008eb9c5cdffa12",
     "apiValidation": "5338e6006c15973d3f0958322712df20315d6acfe55ebc4b79ce8af946429fee",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "2b3f3f3b6c83f78454e3103b5524534e5cf827612425327022625a380a2baab3",
-    "descriptorCandleFacts": "19295c7ec6736bf763b2384c53374827fb254d78b8149296bee4d0644a70b0ed",
-    "descriptorCandleRuntime": "2b19105888069b677373fe2cedb941d1dcb706f04c8c7623a2ec597cfb6fca4b",
-    "descriptorMlxFacts": "348ea493ffd1214ec7f79ad6f5507faeca68ea5402862790eeb24003f731bc78",
-    "descriptorMlxRuntime": "01f096ba055b5cd22463d1ee59ff6de985138fea420f15faa3ad5a2bc48a2ace",
+    "descriptorAudioFacts": "bfe331f6f2db5d6b5967d2d76163b01295b234795f5e3e7a7244c7a804f418a2",
+    "descriptorCandleFacts": "c0447eef14d599ce5d2e6d23ba76b13c5fcebb811ac9384e0da9a1a327b8ac41",
+    "descriptorCandleRuntime": "9354e7e9c7ba5c3533ff54e14e8828d353c3e7a18a281b3cd20c039451fd8d65",
+    "descriptorMlxFacts": "c0fb2b2b641738ade4ddb9a5e3b508acaa0f21fb97ce70f726ed89392c30a38d",
+    "descriptorMlxRuntime": "49d9480b002122246aed1a814a1690a097a0957ad1a6c04cc8b65d26a6e1f29d",
     "descriptorPreviewFacts": "c5aac1fbe97f63e87c32317d9fa5eba353297e2774517ee423d4e541b427f8aa",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
     "manifest": "d460f57bf9ec897e1e7b927abff43385f73201739a8e47f825b6f50c39cc7987",
@@ -46,9 +46,9 @@
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
     "workerDispatch": "e2cd68fce583d5e39e2051ea2cf6cc33919dd4b538726849d38c20ada459f353",
-    "workerEngineTable": "64195a489e2a6e8e0de57bfe8d15c10a6870145b8fe85ad6711d7bd4fc161abe",
+    "workerEngineTable": "85d32676e6f2ea02fb6ff94a5bf21aa80275c032574219a9c7c7fa6f4a32ebb4",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "a92cd208405f92c0d2751b4dac520926f3d8743aea64c55f7839ea5c8c98a3fa",
+    "workerImageDispatch": "246cecf217b263afdf5af76132afb159ae7b9c8da82fce8ab55beb43390dc2a9",
     "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
     "workerImageMageFinetuned": "e00a6ccd9b811cda73073e0bd8270e58ab60c4a8a8e647f18f3fdec9c30a0935",
     "workerImagePulid": "992ac547e891d30ae485411506bb9088961224653a5a89c2699fa2cd879a985f",
@@ -2096,8 +2096,8 @@
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",
-        "mlx": false,
-        "candle": null
+        "mlx": true,
+        "candle": true
       }
     },
     {
