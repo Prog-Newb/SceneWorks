@@ -604,6 +604,35 @@ mod job_tests {
         job: Value,
         cancel_on_progress: bool,
     ) -> (String, Posts) {
+        spawn_job_api_inner(job, cancel_on_progress, false).await
+    }
+
+    /// A user cancel landing AFTER the last per-tile progress reply: every progress post answers
+    /// `cancelRequested: false`, and the job GET answers `true` only once a post reporting the final
+    /// tile (`tile N/N`) has been recorded — so only a re-check after the restore can see it.
+    pub(crate) async fn spawn_job_api_cancel_after_last_tile(job: Value) -> (String, Posts) {
+        spawn_job_api_inner(job, false, true).await
+    }
+
+    pub(crate) fn reports_final_tile(post: &Value) -> bool {
+        let Some(message) = post["message"].as_str() else {
+            return false;
+        };
+        let Some(rest) = message.split("tile ").nth(1) else {
+            return false;
+        };
+        let counts: Vec<&str> = rest
+            .trim_end_matches(|c: char| !c.is_ascii_digit())
+            .split('/')
+            .collect();
+        counts.len() == 2 && counts[0] == counts[1]
+    }
+
+    async fn spawn_job_api_inner(
+        job: Value,
+        cancel_on_progress: bool,
+        cancel_get_after_last_tile: bool,
+    ) -> (String, Posts) {
         use axum::extract::{Path as AxumPath, State};
         use axum::routing::{get, post};
         use axum::{Json, Router};
@@ -612,17 +641,27 @@ mod job_tests {
             job: Value,
             posts: Posts,
             cancel_on_progress: bool,
+            cancel_get_after_last_tile: bool,
         }
         let posts: Posts = Default::default();
         let stub = Stub {
             job,
             posts: posts.clone(),
             cancel_on_progress,
+            cancel_get_after_last_tile,
         };
         let app = Router::new()
             .route(
                 "/api/v1/jobs/:job_id",
-                get(|State(stub): State<Stub>| async move { Json(stub.job.clone()) }),
+                get(|State(stub): State<Stub>| async move {
+                    let mut job = stub.job.clone();
+                    if stub.cancel_get_after_last_tile
+                        && stub.posts.lock().unwrap().iter().any(reports_final_tile)
+                    {
+                        job["cancelRequested"] = json!(true);
+                    }
+                    Json(job)
+                }),
             )
             .route(
                 "/api/v1/jobs/:job_id/progress",
@@ -930,6 +969,40 @@ mod job_tests {
             png_files_under(&fixture.project_path.join("assets")),
             before
         );
+    }
+
+    /// A cancel requested after the last per-tile progress reply (no flag sees it, the heartbeat poll
+    /// is over) is caught by the re-check before the asset write: the job ends canceled, never
+    /// completed, and no new PNG lands in the project.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancel_after_the_last_tile_publishes_no_asset() {
+        let _env = isolate();
+        let fixture = job_fixture(image::RgbImage::from_pixel(512, 384, image::Rgb([4, 5, 6])));
+        let job_value = job_json(
+            "job-iris-late-cancel",
+            json!({ "projectId": fixture.project_id, "sourceAssetId": fixture.source_id, "engine": "iris" }),
+        );
+        let (api_url, posts) = spawn_job_api_cancel_after_last_tile(job_value.clone()).await;
+        let mut settings = fixture.settings.clone();
+        settings.api_url = api_url;
+        settings.heartbeat_seconds = 60;
+        let api = crate::ApiClient::new(&settings);
+        let job: sceneworks_core::contracts::JobSnapshot =
+            serde_json::from_value(job_value).unwrap();
+        let before = png_files_under(&fixture.project_path.join("assets"));
+        let error =
+            crate::upscale_jobs::run_iris_restore_job_using(&api, &settings, &job, stub_loader)
+                .await
+                .unwrap_err();
+        assert!(matches!(error, WorkerError::Canceled(_)), "{error:?}");
+        let posts = posts.lock().unwrap().clone();
+        assert!(posts.iter().any(reports_final_tile), "{posts:#?}");
+        assert!(!posts.iter().any(|post| post["status"] == "completed"));
+        assert_eq!(
+            png_files_under(&fixture.project_path.join("assets")),
+            before
+        );
+        assert_eq!(source_file_bytes(&fixture), fixture.source_bytes);
     }
 
     /// Controls that are not Iris's are refused by name, never ignored; a missing install is the typed

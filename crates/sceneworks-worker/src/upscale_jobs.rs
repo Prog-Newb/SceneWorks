@@ -1405,8 +1405,10 @@ pub(crate) async fn restore_with_progress(
     // The tile sender lives in the finished (or abandoned) transform job; once it is dropped the
     // forwarder drains and exits. Bound the wait so an abandoned job can never hang the worker.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), forwarder).await;
-    // A cancel observed after the engine's last checkpoint still means the user canceled: never
-    // publish the result (no partial or unwanted asset).
+    // A cancel the engine's flag recorded after its last checkpoint still means the user canceled:
+    // return no image. A cancel recorded on the job AFTER the last per-tile reply never reaches this
+    // flag (the heartbeat poll has ended too) — each caller re-checks the job right before it writes
+    // its asset, which closes that window.
     if outcome.is_ok() && observed_cancel.is_cancelled() {
         crate::progress::mark_job_canceled(api, job_id, IRIS_CANCEL_MESSAGE).await?;
         return Err(WorkerError::Canceled(IRIS_CANCEL_MESSAGE.to_owned()));
@@ -1554,6 +1556,9 @@ pub(crate) async fn run_iris_restore_job_using(
         crate::iris_restore::display_suffix(&plan)
     );
     let plan_view = crate::iris_restore::RestorePlanView::from_plan(&plan);
+    // A cancel requested after the last per-tile reply is seen by no flag; re-check the job before
+    // publishing so a canceled restore never writes (and then completes with) an asset.
+    crate::progress::check_cancel(api, &job.id, IRIS_CANCEL_MESSAGE).await?;
     let result = write_single_child_asset(
         &project_path,
         written,

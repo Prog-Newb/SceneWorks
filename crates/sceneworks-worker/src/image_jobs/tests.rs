@@ -29180,3 +29180,73 @@ async fn inline_iris_restore_appends_a_lineage_linked_restored_variant_per_base_
         "{posts:#?}"
     );
 }
+
+/// sc-25683: a cancel requested after the inline pass's last per-tile progress reply (no flag sees
+/// it) is caught by the re-check before the restored variant is written: the pass ends canceled with
+/// no restored variant appended and no new PNG on disk.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inline_iris_restore_canceled_after_the_last_tile_writes_no_variant() {
+    use crate::iris_restore::tests as iris;
+    let _env = iris::isolate();
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    iris::stage_restore_install(
+        &data_dir,
+        iris::UPSCALER_CONFIG,
+        &crate::iris_restore::RESTORE_EXPORT_FILES,
+    );
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "Mist over hills",
+        "count": 1, "width": 320, "height": 256, "seed": 7,
+        "upscale": { "enabled": true, "engine": "iris", "scale": 1.5, "inputSizing": "original", "colorFix": false },
+        "modelManifestEntry": { "family": "z-image" }
+    }));
+    let plan = ImagePlan::new(&req);
+    let seed = resolve_seed(&req, 0);
+    let base_fact = write_image_asset(
+        &plan,
+        0,
+        seed,
+        req.width,
+        req.height,
+        stub_rgb8(req.width, req.height, seed),
+        STUB_ADAPTER,
+        stub_raw_settings(&req),
+        &project_path,
+    )
+    .unwrap();
+
+    let job_value = iris::job_json("job-inline-iris-late-cancel", json!({ "projectId": "p" }));
+    let (api_url, posts) = iris::spawn_job_api_cancel_after_last_tile(job_value.clone()).await;
+    let mut settings = Settings::for_test(data_dir);
+    settings.api_url = api_url;
+    settings.heartbeat_seconds = 60;
+    let api = ApiClient::new(&settings);
+    let job: JobSnapshot = serde_json::from_value(job_value).unwrap();
+    let before = iris::png_files_under(&project_path.join("assets"));
+    let mut asset_writes = vec![Value::Object(base_fact)];
+    let error = apply_inline_iris_restore(
+        &api,
+        &settings,
+        &job,
+        &plan,
+        &project_path,
+        "mlx",
+        &mut asset_writes,
+        iris::stub_loader,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, WorkerError::Canceled(_)), "{error:?}");
+    let posts = posts.lock().unwrap().clone();
+    assert!(posts.iter().any(iris::reports_final_tile), "{posts:#?}");
+    assert!(posts.iter().any(|post| post["status"] == "canceled"));
+    assert_eq!(asset_writes.len(), 1, "no restored variant appended");
+    assert_eq!(iris::png_files_under(&project_path.join("assets")), before);
+}

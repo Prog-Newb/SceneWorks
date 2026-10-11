@@ -3181,6 +3181,9 @@ pub(crate) async fn apply_inline_iris_restore(
             },
         )
         .await?;
+        // A cancel requested after the last per-tile reply trips no flag; re-check the job before
+        // writing the restored variant so a canceled pass publishes nothing new.
+        check_cancel(api, &job.id, "Iris restoration canceled by user.").await?;
 
         let plan_for_task = plan.clone();
         let base_fact_for_task = base_fact.clone();
