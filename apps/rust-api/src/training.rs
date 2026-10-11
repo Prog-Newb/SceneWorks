@@ -647,6 +647,26 @@ fn validate_parquet_import_request(
             )));
         }
     }
+    // Named caption columns become item caption FIELD names, so they follow the store's field-name
+    // rule (non-empty, no surrounding whitespace, at most 64 characters) and must be distinct.
+    if payload.caption_field_columns.len() > 16 {
+        return Err(ApiError::bad_request(
+            "Parquet captionFieldColumns accepts at most 16 columns.",
+        ));
+    }
+    let mut seen_columns = std::collections::BTreeSet::new();
+    for column in &payload.caption_field_columns {
+        if column.trim().is_empty()
+            || column.trim() != column
+            || column.chars().count() > 64
+            || !seen_columns.insert(column.as_str())
+        {
+            return Err(ApiError::bad_request(format!(
+                "Parquet captionFieldColumns entries must be distinct column names of 1 to 64 \
+                 characters with no surrounding whitespace (got {column:?})."
+            )));
+        }
+    }
     let source = std::path::PathBuf::from(payload.source_path.trim());
     if !source.is_absolute() {
         return Err(ApiError::bad_request(
@@ -716,6 +736,7 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
         "concurrency": payload.concurrency,
         "captionIncludes": payload.caption_includes.iter().map(|term| term.trim()).collect::<Vec<_>>(),
         "captionExcludes": payload.caption_excludes.iter().map(|term| term.trim()).collect::<Vec<_>>(),
+        "captionFieldColumns": payload.caption_field_columns,
     }) {
         Value::Object(map) => map,
         _ => {
@@ -1669,7 +1690,10 @@ pub(crate) async fn create_training_job(
     // every submit, including the offline dry-run path — makes no network calls.
     let normalized_family = normalize_lora_family(&target.family);
     let known_families = known_lora_families_from_manifests(&state).await?;
-    if !known_families.is_empty()
+    // A full base fine-tune produces a MODEL, not a LoRA, so "an installed model must accept this
+    // LoRA family" is not its guardrail (sc-25685: an Iris full export registers as a model).
+    if !is_base_checkpoint
+        && !known_families.is_empty()
         && !known_families
             .iter()
             .any(|family| family == &normalized_family)
@@ -1702,7 +1726,23 @@ pub(crate) async fn create_training_job(
         // platform-aware, with an actionable message. Only the full path needs this; a LoRA/LoKr run
         // rides the base-installed check above. Inert for non-full runs and for non-MLX platforms
         // (the worker probe returns no budget), and a no-op when the base isn't installed.
-        if training_is_full_finetune(&payload.config) {
+        // Iris-3B (sc-25685/sc-25686): a routed training lane is never admitted unbounded. On the
+        // co-located macOS API the declared unified-memory floor refuses an undersized Mac here,
+        // before a job exists; the worker repeats the gate on every lane (VRAM on Candle).
+        if sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel) {
+            let network_type = payload
+                .config
+                .advanced
+                .get("networkType")
+                .and_then(Value::as_str)
+                .unwrap_or("lora");
+            if let Some(message) = sceneworks_worker::iris_training_memory_error(
+                network_type,
+                payload.config.resolution,
+            ) {
+                return Err(ApiError::bad_request(message));
+            }
+        } else if training_is_full_finetune(&payload.config) {
             let base_model_dir = resolve_base_model_path(target, &data_dir);
             if let Some(message) = sceneworks_worker::full_finetune_memory_error(
                 FsPath::new(&base_model_dir),
@@ -1722,7 +1762,7 @@ pub(crate) async fn create_training_job(
     }
 
     // Rust resolves and validates the normalized plan before any job is queued.
-    let plan = build_training_plan(BuildTrainingPlan {
+    let mut plan = build_training_plan(BuildTrainingPlan {
         job_id: &job_id,
         target,
         dataset: &dataset,
@@ -1736,6 +1776,9 @@ pub(crate) async fn create_training_job(
         created_at: now_rfc3339(),
     })
     .map_err(training_plan_error_to_api_error)?;
+    // Iris resume / new phase / load-from: the client named a previous run; SceneWorks derives the
+    // checkpoint/export path from that run's trusted ids and hands it to the trainer.
+    crate::iris_training::resolve_iris_run_sources(&state, &project_id, &mut plan).await?;
 
     // Pre-build the LoRA registry entry the completed job will register, mirroring
     // the `lora_import` pattern: Rust owns LoRA registration. The descriptive
@@ -1818,6 +1861,17 @@ pub(crate) async fn create_training_job(
                     sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE,
                     sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE,
                 ]),
+            );
+        }
+    }
+
+    if sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel) {
+        if let Some(entry) = manifest_entry.as_object_mut() {
+            crate::iris_training::shape_iris_manifest_entry(
+                entry,
+                &output_dir,
+                &plan.output.file_name,
+                is_base_checkpoint,
             );
         }
     }

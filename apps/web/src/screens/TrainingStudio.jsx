@@ -62,6 +62,14 @@ import {
 import { appConfirm } from "../appConfirm.jsx";
 import { useValidation } from "../validation/useValidation.js";
 import { ConfigureJobPanel } from "./training/ConfigureJobPanel.jsx";
+import {
+  irisCaptionFieldOptions,
+  irisPreviousRuns,
+  isIrisTarget,
+  trainingLaneFromCapabilities,
+} from "../training/irisOptions.js";
+import { useIrisDataWalk } from "../training/useIrisDataWalk.js";
+import { collectCaptionSidecars, isJsonCaptionSidecar } from "../training/captionSidecars.js";
 import { DatasetEditorPanel } from "./training/DatasetEditorPanel.jsx";
 
 // Re-exported for callers/tests that import the pure config builders from the
@@ -331,6 +339,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const datasetLibraryMode = mode === "datasets";
   const {
     activeProject,
+    token,
     authenticated = true,
     assets = [],
     attachCharacterLora,
@@ -454,6 +463,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // caption or imports a .txt sidecar, and threaded into the dataset payload on
   // save. Replaces the old importedCaptions + rename-caption draft split.
   const [captionDraftById, setCaptionDraftById] = useState({});
+  // Per-item named captions (`{ field: text }`) parsed from freshly imported `.json` sidecars,
+  // keyed by selection id and threaded into the save payload (sc-25685). Saved items carry theirs
+  // on the item itself.
+  const [namedCaptionsById, setNamedCaptionsById] = useState({});
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
   const [renamePrefix, setRenamePrefix] = useState("");
   const [captionTriggerWords, setCaptionTriggerWords] = useState("");
@@ -762,6 +775,30 @@ export function TrainingStudio({ mode = "training" } = {}) {
     [activeDataset, selectedTarget, readinessBlocksTraining, missingControlModels],
   );
   const configValidity = useValidation(configValidation, configDraft, configContext);
+
+  // Iris-3B (sc-25685): the previous runs a new run can resume / start from, the dataset's caption
+  // field names, the active lane for the declared memory floor, and the data-walk preflight.
+  const irisSelected = isIrisTarget(selectedTarget);
+  const irisDataWalk = useIrisDataWalk({
+    enabled: irisSelected,
+    targetId: selectedTarget?.id,
+    items: activeDataset?.items?.length ?? 0,
+    batchSize: Number(configDraft.batchSize),
+    token,
+  });
+  const irisContext = useMemo(
+    () =>
+      irisSelected
+        ? {
+            previousRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id }),
+            fullRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id, fullOnly: true }),
+            captionFieldOptions: irisCaptionFieldOptions(activeDataset),
+            trainingLane: trainingLaneFromCapabilities(macCapabilities),
+            dataWalk: irisDataWalk,
+          }
+        : {},
+    [irisSelected, jobs, activeProject?.id, activeDataset, macCapabilities, irisDataWalk],
+  );
 
   // The dataset's character kind (person/style/object) — refines the readiness kind
   // and thus the blur floor. "" when the dataset isn't tied to a character.
@@ -1564,19 +1601,23 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setDatasetMessage("");
     try {
       const imageFiles = files.filter(isImageUpload);
-      const captionFiles = files.filter((file) => !isImageUpload(file) && isCaptionUpload(file));
+      const captionFiles = files.filter(
+        (file) => !isImageUpload(file) && (isCaptionUpload(file) || isJsonCaptionSidecar(file)),
+      );
 
-      // Pair each caption with an image by filename stem (`Mira_01.txt` → `Mira_01.png`).
-      const captionByStem = new Map();
+      // Pair each caption with an image by filename stem (`Mira_01.txt` → `Mira_01.png`). A
+      // `<stem>.json` sidecar (sc-25685) carries named caption fields, and its `caption`/`text`
+      // fills the caption when the stem has no `.txt`.
+      const sidecarEntries = [];
       for (const file of captionFiles) {
-        const text = (await file.text()).trim();
-        if (text) {
-          captionByStem.set(uploadFileStem(file.name), text);
-        }
+        const jsonByTypeOnly = isJsonCaptionSidecar(file) && uploadFileExtension(file.name) !== "json";
+        sidecarEntries.push({ name: jsonByTypeOnly ? `${file.name}.json` : file.name, text: await file.text() });
       }
+      const { byStem: sidecarByStem, ignored: ignoredSidecars } = collectCaptionSidecars(sidecarEntries);
 
       const imported = [];
       const captionsByAssetId = {};
+      const namedCaptionsByAssetId = {};
       for (const file of imageFiles) {
         const asset = await uploadDatasetItem(file);
         if (asset?.id) {
@@ -1586,9 +1627,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
           const datasetAsset = { ...asset, datasetOnly: true };
           imported.push(datasetAsset.id);
           setUploadedDatasetAssets((current) => [datasetAsset, ...current.filter((item) => item.id !== datasetAsset.id)]);
-          const caption = captionByStem.get(uploadFileStem(file.name));
-          if (caption) {
-            captionsByAssetId[asset.id] = { source: "imported", text: caption };
+          const sidecar = sidecarByStem.get(uploadFileStem(file.name));
+          if (sidecar?.text) {
+            captionsByAssetId[asset.id] = { source: "imported", text: sidecar.text };
+          }
+          if (sidecar?.captions && Object.keys(sidecar.captions).length) {
+            namedCaptionsByAssetId[asset.id] = sidecar.captions;
           }
         }
       }
@@ -1598,15 +1642,28 @@ export function TrainingStudio({ mode = "training" } = {}) {
         if (Object.keys(captionsByAssetId).length) {
           setCaptionDraftById((current) => ({ ...current, ...captionsByAssetId }));
         }
+        if (Object.keys(namedCaptionsByAssetId).length) {
+          setNamedCaptionsById((current) => ({ ...current, ...namedCaptionsByAssetId }));
+        }
         const imageStems = new Set(imageFiles.map((file) => uploadFileStem(file.name)));
-        const unmatchedCaptions = captionFiles.filter((file) => !imageStems.has(uploadFileStem(file.name))).length;
+        const ignoredNames = new Set(ignoredSidecars);
+        const unmatchedCaptions = captionFiles.filter(
+          (file) => !imageStems.has(uploadFileStem(file.name)) && !ignoredNames.has(uploadFileBaseName(file.name)),
+        ).length;
         const matchedCaptions = Object.keys(captionsByAssetId).length;
+        const matchedNamed = Object.keys(namedCaptionsByAssetId).length;
         const captionNote = matchedCaptions ? ` with ${matchedCaptions} caption${matchedCaptions === 1 ? "" : "s"}` : "";
+        const namedNote = matchedNamed
+          ? ` ${matchedNamed} image${matchedNamed === 1 ? "" : "s"} got named caption fields.`
+          : "";
         const unmatchedNote = unmatchedCaptions
           ? ` ${unmatchedCaptions} caption file${unmatchedCaptions === 1 ? "" : "s"} had no matching image.`
           : "";
+        const ignoredNote = ignoredSidecars.length
+          ? ` Ignored ${ignoredSidecars.length} caption .json file${ignoredSidecars.length === 1 ? "" : "s"} that ${ignoredSidecars.length === 1 ? "is" : "are"} not an object of text fields: ${ignoredSidecars.join(", ")}.`
+          : "";
         setDatasetMessage(
-          `Imported ${imported.length} image${imported.length === 1 ? "" : "s"}${captionNote}. Save the dataset to keep them.${unmatchedNote}`,
+          `Imported ${imported.length} image${imported.length === 1 ? "" : "s"}${captionNote}. Save the dataset to keep them.${namedNote}${unmatchedNote}${ignoredNote}`,
         );
       } else {
         setDatasetError("No images were imported.");
@@ -1641,6 +1698,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       assetsById: baseAssetsById,
       associatedCharacterId,
       captionDraftById,
+      namedCaptionsById,
       name: draftName,
       selectedAssetIds: selectionOverride ?? selectedAssetIds,
     });
@@ -1651,6 +1709,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setActiveDataset(dataset);
       setDraftName(dataset.name ?? draftName.trim());
       setUploadedDatasetAssets([]);
+      setNamedCaptionsById({});
       setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
       setAssociatedCharacterId(dataset.characterId ?? "");
       setSelectedDatasetId(dataset.id ?? "");
@@ -2070,7 +2129,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   onDeleteDataset: handleDeleteDataset, deletingDataset,
                 }}
                 captionSession={{
-                  captionDraftById, onPreview, updateCaption, captioning, addDialogOpen,
+                  captionDraftById, namedCaptionsById, onPreview, updateCaption, captioning, addDialogOpen,
                   selectedAssetIds, addAssets, handleImport, captionDialog,
                   updateCaptionSetting, runCaptionJob, toggleCaptionExtraOption,
                   displayedCaptionPrompt, captionSettings, captionModelMissing,
@@ -2144,6 +2203,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   submitTrainingJob={submitTrainingJob}
                   configSnapshot={configSnapshot}
                   datasetDoctor={datasetDoctor}
+                  irisContext={irisContext}
                 />
                 <TrainingLiveProgress
                   jobs={activeTrainingJobs}

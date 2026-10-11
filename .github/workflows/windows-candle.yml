@@ -222,7 +222,7 @@ on:
         type: boolean
         default: false
       run_iris_worker_smoke:
-        description: "Run the sc-25680 Iris-3B Candle worker job once on real weights (512², 30 steps; snapshots must already be in E:\\huggingface\\hub)"
+        description: "Run the sc-25680 Iris-3B Candle worker job and the sc-25686 Iris LoRA training job once on real weights (snapshots must already be in E:\\huggingface\\hub)"
         required: false
         type: boolean
         default: false
@@ -1714,3 +1714,11 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo test -p sceneworks-worker --features backend-candle --release iris_worker_gpu_smoke -- --ignored --nocapture --test-threads=1
+      # SC-25686: one bounded Iris LoRA `lora_train` job through the production executor (8 steps,
+      # 256²), then the trained adapter applied by an `image_generate` job (same snapshots, offline).
+      - name: Run the Iris-3B Candle training smoke
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test -p sceneworks-worker --features backend-candle --release iris_training_gpu_smoke -- --ignored --nocapture --test-threads=1

@@ -29,6 +29,8 @@ use crate::contracts::{string_enum, ContractNumber, ExtraFields, JsonObject};
 use crate::dataset_quality::{CachedTier0Scalars, QualityAck};
 use crate::store_util::is_safe_relative_path;
 
+pub mod iris;
+
 /// Schema version stamped on persisted training contracts.
 pub const TRAINING_CONTRACT_SCHEMA_VERSION: u32 = 1;
 
@@ -516,6 +518,9 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
                 "SceneWorks/Mage-Flow-Base",
                 "Train an image LoRA against the undistilled Mage-Flow Base model.",
             ),
+            // Iris-3B generation (epic sc-25678, S7 sc-25685 MLX / S8 sc-25686 Candle): LoRA, LoKr
+            // and full fine-tuning (weights- or random-init) over the native trainers.
+            iris::iris_generation_target(),
         ],
         extra: ExtraFields::new(),
     }
@@ -2754,6 +2759,13 @@ pub enum TrainingTargetLimitError {
     UnsupportedNumericLimit {
         field: String,
     },
+    /// A micro-step quantity that must be a whole number of gradient-accumulation windows
+    /// (Iris: checkpoints, previews and the warmup land on optimizer-step boundaries).
+    NotMultipleOf {
+        field: String,
+        value: u64,
+        multiple: u64,
+    },
 }
 
 impl std::fmt::Display for TrainingTargetLimitError {
@@ -2801,6 +2813,15 @@ impl std::fmt::Display for TrainingTargetLimitError {
                 formatter,
                 "Training target advertises unsupported numeric limit '{field}'."
             ),
+            Self::NotMultipleOf {
+                field,
+                value,
+                multiple,
+            } => write!(
+                formatter,
+                "{field} ({value}) is counted in micro-steps and must be a multiple of the \
+                 gradient accumulation ({multiple})."
+            ),
         }
     }
 }
@@ -2828,6 +2849,9 @@ pub fn build_training_plan(
     validate_training_config_for_target(input.target, &input.config)?;
     if input.dataset.items.is_empty() {
         return Err(TrainingPlanError::EmptyDataset);
+    }
+    if iris::is_iris_training_kernel(&input.target.kernel) {
+        iris::validate_iris_dataset_captions(&input.config, input.dataset)?;
     }
 
     let trigger_words = match input.config.trigger_word.as_deref().map(str::trim) {
@@ -2991,6 +3015,10 @@ pub fn validate_training_config_for_target(
     validate_advertised_numeric_limits(target, config)?;
     validate_advertised_optimizer_limit(target, config)?;
     validate_training_config(config)?;
+    validate_advertised_advanced_choices(target, config)?;
+    if iris::is_iris_training_kernel(&target.kernel) {
+        iris::validate_iris_training_config(target, config)?;
+    }
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
         Some(Value::String(value)) if value.trim().is_empty() => "lora",
@@ -3090,6 +3118,20 @@ fn validate_advertised_numeric_limits(
                 "resolution",
                 values,
                 u64::from(config.resolution),
+            )?,
+            // Preview images per cadence (`advanced.sampleCount`, default 4 — the worker's
+            // `DEFAULT_SAMPLE_COUNT`). A trainer that renders fewer advertises its cap here.
+            "sampleCount" => validate_advertised_numeric_range(
+                field,
+                values,
+                match config.advanced.get("sampleCount") {
+                    None | Some(Value::Null) => 4,
+                    Some(value) => value.as_u64().ok_or_else(|| {
+                        TrainingPlanError::InvalidConfig(
+                            "sampleCount must be a non-negative integer.".to_owned(),
+                        )
+                    })?,
+                },
             )?,
             _ => {
                 return Err(TrainingPlanError::TargetLimit(
@@ -3226,6 +3268,71 @@ fn validate_advertised_optimizer_limit(
                 allowed,
             },
         ));
+    }
+    Ok(())
+}
+
+/// Enforce the advanced-bag choice lists a target advertises (`lrSchedulers`, `timestepTypes`,
+/// `timestepBiases`, `lossTypes`, `mixedPrecisions`) and a pinned-off `gradientCheckpointing`. A
+/// target that advertises a list is promising the Studio exactly those choices, so a request
+/// outside it is refused at submit rather than travelling to a trainer that would refuse it after
+/// load (or, worse, ignore it). Targets that advertise no list keep their established behaviour.
+fn validate_advertised_advanced_choices(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    for (limit, field) in [
+        ("lrSchedulers", "lrScheduler"),
+        ("timestepTypes", "timestepType"),
+        ("timestepBiases", "timestepBias"),
+        ("lossTypes", "lossType"),
+        ("mixedPrecisions", "mixedPrecision"),
+    ] {
+        let Some(advertised) = target.limits.get(limit) else {
+            continue;
+        };
+        let allowed = advertised
+            .as_array()
+            .and_then(|values| {
+                values
+                    .iter()
+                    .map(|value| value.as_str().map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .filter(|values| !values.is_empty())
+            .ok_or_else(|| {
+                invalid_advertised_limit(limit, "a choice list must be non-empty strings")
+            })?;
+        let Some(requested) = config.advanced.get(field) else {
+            continue;
+        };
+        let requested = requested.as_str().ok_or_else(|| {
+            TrainingPlanError::InvalidConfig(format!("{field} must be a string."))
+        })?;
+        let normalized = requested.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        if !allowed
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(&normalized))
+        {
+            return Err(TrainingPlanError::TargetLimit(
+                TrainingTargetLimitError::UnsupportedValue {
+                    field: field.to_owned(),
+                    value: requested.to_owned(),
+                    allowed,
+                },
+            ));
+        }
+    }
+    if target.limits.get("gradientCheckpointing") == Some(&Value::Bool(false))
+        && config.advanced.get("gradientCheckpointing") == Some(&Value::Bool(true))
+    {
+        return Err(TrainingPlanError::InvalidConfig(format!(
+            "Training target '{}' does not implement gradient checkpointing.",
+            target.id
+        )));
     }
     Ok(())
 }
