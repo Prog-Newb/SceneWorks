@@ -261,3 +261,11 @@ export function itemSidecarState(item) {
     degraded: Boolean(item?.irisDegradedImage),
   };
 }
+
+// The objective's options bag inside an `advanced` object (`iris` for depth, `iris_restore` for
+// restoration), or undefined.
+export function irisTaskBagOf(objective, advancedObject) {
+  if (objective === "depth") return advancedObject?.iris;
+  if (objective === "restoration") return advancedObject?.iris_restore;
+  return undefined;
+}

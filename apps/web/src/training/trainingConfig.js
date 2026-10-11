@@ -23,6 +23,7 @@ import {
 import {
   IRIS_TASK_BAG_KEYS,
   irisDepthResolution,
+  irisTaskBagOf,
   irisTaskDraftFromDefaults,
   irisTaskOptionsSnapshot,
   irisTaskRequestKeys,
@@ -425,7 +426,10 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     // Depth / restoration (sc-25687 / sc-25688): the objective's options bag plus the run's start.
     ...(taskBag
       ? {
-          irisTask: irisTaskDraftFromDefaults(objective, advanced[taskBag] ?? target?.defaults?.advanced?.[taskBag]),
+          irisTask: irisTaskDraftFromDefaults(
+            objective,
+            irisTaskBagOf(objective, advanced) ?? irisTaskBagOf(objective, target?.defaults?.advanced),
+          ),
           depthInit: asText(advanced.depthInit || "export"),
           resumeFromJobId: "",
           loadFromJobId: "",
@@ -742,7 +746,7 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
       : {}),
   });
   if (taskBag) {
-    for (const key of IRIS_TASK_UNREAD_KEYS) delete advanced[key];
+    for (const key of IRIS_TASK_UNREAD_KEYS) Reflect.deleteProperty(advanced, key);
   }
   return {
     targetId: selectedTarget.id,
