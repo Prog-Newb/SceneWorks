@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference main revision d5c30733 (the merge of inference #1209, the Z-Image Turbo de-distill training adapter on MLX and Candle, on top of #1208, the aux-loss alternation fix): 754 provenance candidates and 108 production-Rust crate prefixes. The advance from the previously pinned inference main revision ab3564bf adds and removes no candidate paths; the rescan only refreshes blob digests of existing first-party trainer, Z-Image and shared perceptual-path files, which stay covered by the existing gen-core, candle-gen and mlx-gen architecture areas. The four production crates crates/media/{candle-gen/candle-gen,mlx-gen/mlx-gen}-{perceptual,body} remain unclassified open advisory items for the epic's compliance pass. The vendored candle-core classification and the first-party speculative benchmark baseline driver carried from 25bd55cd are unchanged. This mapping grants no model-weight redistribution. Generated inventories and digests describe this exact source. Other open compliance items remain advisory under sc-19751. This source audit makes no measurement currency claim.",
-  "inferenceRevision": "d5c30733a0c21dbc8f5f3f748e66a96b2bf909bc",
-  "auditDigest": "41b2a4f24f21bab5631e68107a155ae64308c971045bce6fd0f4c36363a9d2fc",
+  "_comment": "Audit inventory rescanned at inference main revision c1f5989e (the merge of inference #1226, the epsilon-prediction aux-loss gain Parameterization::aux_gain plus the PIXEL_PERCEPTUAL_SCHEDULE and BODY_SURFACE_SCHEDULE window defaults): 754 provenance candidates and 108 production-Rust crate prefixes. The advance from the previously pinned inference main revision d5c30733 adds and removes no candidate paths and changes no matched markers; the rescan only refreshes blob digests of existing first-party gen-core trainer and body-schedule files and candle-gen/mlx-gen training files, which stay covered by the existing gen-core, candle-gen and mlx-gen architecture areas. The four production crates crates/media/{candle-gen/candle-gen,mlx-gen/mlx-gen}-{perceptual,body} remain unclassified open advisory items for the epic's compliance pass. The vendored candle-core classification and the first-party speculative benchmark baseline driver carried from 25bd55cd are unchanged. This mapping grants no model-weight redistribution. Generated inventories and digests describe this exact source. Other open compliance items remain advisory under sc-19751. This source audit makes no measurement currency claim.",
+  "inferenceRevision": "c1f5989ec88596b7a9b171cb2862e5a12c5cb8ff",
+  "auditDigest": "c8fd55ab28cba8e3a0d983b6937ed723c54d40bdf37031dbd7332ea0799da7e1",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "d5c30733a0c21dbc8f5f3f748e66a96b2bf909bc",
+    "revision": "c1f5989ec88596b7a9b171cb2862e5a12c5cb8ff",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 754,
-    "populationSha256": "ebaef4128c2cbf789c9408c23708cb934e87e56dbced45fdfa5b9368ea7a5154"
+    "populationSha256": "be322db5ff0a08a33c4191d0e6cae0750d9dda56eda960b0e5b402cedb16fe51"
   },
   "portedSourceAreas": [
     {
@@ -943,7 +943,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "d5c30733a0c21dbc8f5f3f748e66a96b2bf909bc",
+    "revision": "c1f5989ec88596b7a9b171cb2862e5a12c5cb8ff",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 108,
     "cratePopulationSha256": "6fad70d0f24443f9fd11309c33afc84b9e6b7b70532437a7c0be6c7982af82cc"
