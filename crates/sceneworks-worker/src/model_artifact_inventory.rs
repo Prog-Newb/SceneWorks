@@ -488,6 +488,7 @@ mod tests {
         "crates/sceneworks-worker/src/bernini_tier_build.rs",
         "crates/sceneworks-worker/src/footprint_measure.rs",
         "crates/sceneworks-worker/src/imported_nvfp4_gpu_smoke.rs",
+        "crates/sceneworks-worker/src/iris_gpu_smoke.rs",
         "crates/sceneworks-worker/src/ladder_e2e_sc18101.rs",
         "crates/sceneworks-worker/src/mage_flow_q8_mlx_smoke.rs",
         "crates/sceneworks-worker/src/pid_tier_mlx_smoke.rs",

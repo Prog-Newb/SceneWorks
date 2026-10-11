@@ -1367,6 +1367,8 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
         "wan_2_2_vace_fun_14b",
         // sc-23001: YuE2's floors are derived from its admission estimator, not measured.
         "yue2",
+        // sc-25680: Iris-3B's candle floors are declared from the recorded resident peak, not measured.
+        "iris_3b",
         // The six YuE entries left this set in sc-19387: their candle floors are CUDA-measured.
       ].sort(),
     );

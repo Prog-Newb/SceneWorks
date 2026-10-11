@@ -221,6 +221,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_iris_worker_smoke:
+        description: "Run the sc-25680 Iris-3B Candle worker job once on real weights (512², 30 steps; snapshots must already be in E:\\huggingface\\hub)"
+        required: false
+        type: boolean
+        default: false
 
 # Cancel superseded PR runs, but never cancel a main-push run: this lane is the
 # ONLY thing that compiles the candle-gated worker code, so a main commit whose
@@ -1656,3 +1661,53 @@ jobs:
           if ($env:ACCEPTANCE_OUTCOME -ne 'success' -or ($env:YUE2_ACCEPTANCE_ONLY -ne 'true' -and $env:PROFILE_OUTCOME -ne 'success')) {
             throw "YuE2 terminal evidence failed after upload: acceptance $env:ACCEPTANCE_OUTCOME, profile $env:PROFILE_OUTCOME"
           }
+
+  # SC-25680 (epic 25678): one real-weight Iris-3B `image_generate` job through the production Candle
+  # worker arm, on the real-weights card. Dispatch only — never on PR/push — and bounded (one 512²
+  # image, 30 steps). Offline: the pinned speridlabs/iris-3b + Qwen3-VL-4B-Instruct snapshots must
+  # already be in E:\huggingface\hub (inference's `candle-iris` real-weight profile materializes
+  # them there); a missing snapshot fails the job rather than downloading.
+  #   gh workflow run windows-candle.yml --ref <branch> -f run_iris_worker_smoke=true
+  iris-worker-smoke:
+    needs: candle-worker
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_iris_worker_smoke }}
+    concurrency:
+      group: windows-candle-gpu-real-weights
+      cancel-in-progress: false
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 120
+    env:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "1"
+      CUDA_COMPUTE_CAP: "120"
+      CARGO_NET_OFFLINE: "true"
+      HF_HUB_CACHE: 'E:\huggingface\hub'
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/prepare-rust-runner
+      - name: Disable unstable sccache wrapper for the Iris worker smoke
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - name: Set up Node for Cargo cache selection
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Isolate Cargo dependency checkout for the Iris worker smoke
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
+      - name: Fetch the pinned inference revision for the Iris worker smoke
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      - name: Run the Iris-3B Candle worker smoke
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test -p sceneworks-worker --features backend-candle --release iris_worker_gpu_smoke -- --ignored --nocapture --test-threads=1

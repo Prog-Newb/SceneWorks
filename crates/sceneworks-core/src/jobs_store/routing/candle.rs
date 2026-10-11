@@ -11,8 +11,8 @@ use crate::jobs_store::routing::catalog::{
     CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS,
 };
 use crate::jobs_store::routing::mlx::{
-    instantid_mlx_eligible, pulid_flux_mlx_eligible, qwen_image_2_1_mlx_eligible,
-    upscale_job_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
+    instantid_mlx_eligible, iris_mlx_eligible, pulid_flux_mlx_eligible,
+    qwen_image_2_1_mlx_eligible, upscale_job_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::{
     conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
@@ -399,6 +399,11 @@ pub(crate) enum CandleImageRefusal {
     Phases,
     /// `advanced.mlxQuantize > 0` on a family that ships no packed tier.
     QuantTier,
+    /// Iris-3B (sc-25680): anything outside the plain text-to-image surface the MLX arm admits —
+    /// a non-`text_to_image` mode, controls, a quant carrier (`mlxQuantize` / `quantTier`), a user
+    /// LoRA, or an enabled hires fix. Delegates to [`iris_mlx_eligible`] so the two lanes refuse
+    /// exactly the same list.
+    IrisSurface,
 }
 
 impl CandleImageRefusal {
@@ -417,6 +422,7 @@ impl CandleImageRefusal {
             Self::Poses => "advanced.poses",
             Self::Phases => "advanced.phases",
             Self::QuantTier => "advanced.mlxQuantize",
+            Self::IrisSurface => "a carrier outside Iris-3B's plain text-to-image surface",
         }
     }
 }
@@ -455,7 +461,18 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
     (CandleImageRefusal::Poses, candle_refuses_poses),
     (CandleImageRefusal::Phases, candle_refuses_phases),
     (CandleImageRefusal::QuantTier, candle_refuses_quant_tier),
+    (CandleImageRefusal::IrisSurface, candle_refuses_iris_surface),
 ];
+
+/// Iris-3B (sc-25680) serves ONE request shape on both lanes: plain text-to-image with no source,
+/// reference, mask, control, pose, user LoRA, quant carrier or hires fix. The generic checks above
+/// already refuse most of those; this one closes the rest (`controls`, `quantTier`, a non-
+/// `text_to_image` mode, the hires-fix second pass) by DELEGATING to the MLX predicate instead of
+/// restating it, so the Candle and MLX lanes can never disagree about what Iris accepts. Last in the
+/// table so a carrier the generic checks name is reported by them.
+fn candle_refuses_iris_surface(model: &str, payload: &Map<String, Value>) -> bool {
+    model == "iris_3b" && !iris_mlx_eligible(payload)
+}
 
 /// sc-18475: the SANA specialized route above owns the only accepted reference shape. If the
 /// singular carrier is populated or malformed, do not let it fall through as txt2img.

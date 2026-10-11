@@ -4871,7 +4871,8 @@ fn reconcile_resolved_tier_quant(
     (load_quant, actual_bits)
 }
 
-/// Resolve denoise steps: `advanced.steps` (clamped 1..=80) else the family default.
+/// Resolve denoise steps: `advanced.steps` (clamped 1..=max(80, family default)) else the family
+/// default.
 /// Shared by the MLX path and the candle lane (sc-5096).
 #[cfg(any(
     target_os = "macos",
@@ -4886,8 +4887,21 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
                 .as_u64()
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
-        .map(|steps| (steps as u32).clamp(1, 80))
+        // The historical 80-step ceiling, raised to the model's own default where that is higher
+        // (Iris-3B's release default is 100, sc-25679) so the default is always reachable rather
+        // than silently clamped below what the model ships with.
+        .map(|steps| (steps as u32).clamp(1, max_requested_steps(model.default_steps())))
         .unwrap_or(model.default_steps())
+}
+
+/// The largest `advanced.steps` the generic image lane forwards: the historical 80, or the model's
+/// own default when that is higher. Mirrored by Image Studio's Steps input (`maxStepsForModel`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn max_requested_steps(default_steps: u32) -> u32 {
+    default_steps.max(80)
 }
 
 /// Resolve the guidance scale. Distilled variants (z-image-turbo, flux schnell) take
@@ -6926,6 +6940,22 @@ pub(crate) fn normalize_sampling_knob(
         "{engine}: requested {knob} {name:?} is not advertised (supported: {advertised:?}); \
          falling back to the engine default"
     );
+    emit_sampling_knob_unsupported(knob, json!(name), advertised, model_id, job_id, engine);
+    None
+}
+
+/// The `sampling_knob_unsupported` worker event [`normalize_sampling_knob`] emits when it drops a
+/// requested knob back to the engine default. Shared with the other per-request drops that remove a
+/// value the engine would refuse (Iris-3B's CFG-bound negative prompt and schedule shift, sc-25679),
+/// so every silent drop is observable through the one event.
+pub(crate) fn emit_sampling_knob_unsupported(
+    knob: &str,
+    requested: Value,
+    advertised: &[&str],
+    model_id: &str,
+    job_id: &str,
+    engine: &str,
+) {
     emit_event(
         "sampling_knob_unsupported",
         json!({
@@ -6933,11 +6963,10 @@ pub(crate) fn normalize_sampling_knob(
             "engine": engine,
             "model": model_id,
             "knob": knob,
-            "requested": name,
+            "requested": requested,
             "supported": advertised,
         }),
     );
-    None
 }
 
 /// Read the raw per-generation sampler / scheduler / schedule-shift knobs from a job's `advanced`
@@ -9743,6 +9772,37 @@ async fn generate_stream(
     backend: &str,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    generate_stream_using(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        asset_writes,
+        crate::inference_runtime::load,
+    )
+    .await
+}
+
+/// [`generate_stream`] with the generator loader supplied by the caller (the `_using` seam, see
+/// [`start_cached_gen_stream_with_request_state_using`]): every pre-load decision, the cached
+/// load, the per-item drive, and `consume_gen_events` are the production code; only the engine
+/// is injectable, so a test can pin progress / cancel / failure on a real job arm without weights.
+#[allow(clippy::too_many_arguments)]
+#[cfg(target_os = "macos")]
+async fn generate_stream_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<()> {
     let request = &plan.request;
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
@@ -9816,7 +9876,22 @@ async fn generate_stream(
     // True-CFG families (Chroma) carry the CFG scale in `true_cfg`, not `guidance` (which their
     // engine rejects); `None` for every other family. The recipe records the effective CFG knob.
     let model_true_cfg = resolve_true_cfg(request, &model);
-    let negative_prompt = resolve_negative_prompt(request, &model);
+    // A model whose negative prompt IS the CFG unconditional (`image.negativePromptRequiresGuidance`,
+    // Iris-3B) refuses one at guidance 1.0, where it has no effect anyway — drop it there.
+    // Either drop emits `sampling_knob_unsupported`, like the sampler/scheduler drops above.
+    let knob_drop = iris::KnobDropContext {
+        model_id: &request.model,
+        job_id: &job.id,
+        engine: backend,
+    };
+    let negative_prompt = iris::gate_negative_prompt_on_guidance(
+        &request.model_manifest_entry,
+        guidance,
+        resolve_negative_prompt(request, &model),
+        &knob_drop,
+    );
+    // Iris has no scheduler axis and refuses `scheduler_shift` by name (sc-25679).
+    let scheduler_shift = iris::honored_scheduler_shift(engine_id, scheduler_shift, &knob_drop);
     let repo = model_repo(request, &model);
     let adapter_label = model.adapter_label();
     let count = request.count as usize;
@@ -9943,7 +10018,8 @@ async fn generate_stream(
         // `tokenizer_clip_l` / `tokenizer_clip_bigg` / `vae_fp16_fix`) via the generic seam. Keyed on the
         // resolved `engine_id` (the DESCRIPTOR id) rather than `request.model`, so a finetune sibling that
         // shares one engine under a distinct catalog id resolves the same descriptor (media_descriptor matches
-        // on descriptor.id). Inert on macOS: the MLX SDXL turnkey is self-contained (no `required_components`).
+        // on descriptor.id). The MLX SDXL turnkey is self-contained (no `required_components`); Iris-3B
+        // stages its Qwen3-VL `text_encoder` here (sc-25679).
         spec =
             attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
         // F3 alternate decoder: attach before both the provider-specific memory contract and the generic
@@ -10276,12 +10352,13 @@ async fn generate_stream(
     // Keep the source only if the face stack staged (otherwise no scorer can be built).
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 
-    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         format!("{engine_id} load failed"),
+        load_generator,
         move |generator,
               cache_state,
               loaded_policy,
@@ -12216,8 +12293,39 @@ async fn generate_candle_stream(
     job: &JobSnapshot,
     plan: &ImagePlan,
     project_path: &Path,
+    device_backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    generate_candle_stream_using(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        device_backend,
+        asset_writes,
+        crate::inference_runtime::load,
+    )
+    .await
+}
+
+/// [`generate_candle_stream`] with the generator loader supplied by the caller — the Candle twin of
+/// [`generate_stream_using`] (sc-25680): every pre-load decision, the cached load, the per-item drive
+/// and `consume_gen_events` are the production code; only the engine is injectable, so a test can pin
+/// progress / cancel / failure on a real candle job arm without weights or a CUDA device.
+#[allow(clippy::too_many_arguments)]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn generate_candle_stream_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
     _device_backend: &str,
     asset_writes: &mut Vec<Value>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
 ) -> WorkerResult<()> {
     let request = &plan.request;
     let adapter_label = candle_adapter_label(&request.model);
@@ -12311,7 +12419,20 @@ async fn generate_candle_stream(
     let guidance = resolve_guidance(request, &model);
     let mut true_cfg = resolve_true_cfg(request, &model);
     let hires_fix = resolve_hires_fix_plan(request, steps, guidance, true_cfg);
-    let negative_prompt = resolve_negative_prompt(request, &model);
+    // The same Iris-3B request shaping the MLX arm applies (sc-25680): a CFG-bound negative prompt is
+    // dropped at guidance 1.0 and the withheld schedule shift never reaches the engine, each drop
+    // reported as `sampling_knob_unsupported`. Inert for every other model.
+    let knob_drop = iris::KnobDropContext {
+        model_id: &request.model,
+        job_id: &job.id,
+        engine: backend,
+    };
+    let negative_prompt = iris::gate_negative_prompt_on_guidance(
+        &request.model_manifest_entry,
+        guidance,
+        resolve_negative_prompt(request, &model),
+        &knob_drop,
+    );
 
     // Per-payload flash/accel-attention (sc-3674): the UI Advanced toggle sends `advanced.flashAttn`
     // (default on). Process-global toggle, set before the generator loads (the candle pipeline reads
@@ -12412,6 +12533,7 @@ async fn generate_candle_stream(
     // + a `sampling_knob_unsupported` event, never a hard-fail. The curated knobs light up per-family with
     // zero worker change as the candle engines are adopted.
     let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
+    let scheduler_shift = iris::honored_scheduler_shift(engine_id, scheduler_shift, &knob_drop);
     let sampler = if request.model == "realvisxl_lightning" {
         Some("lightning".to_owned())
     } else {
@@ -13608,12 +13730,13 @@ async fn generate_candle_stream(
     .await;
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 
-    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         format!("candle {engine_id} load failed"),
+        load_generator,
         move |generator,
               cache_state,
               loaded_policy,
@@ -18062,7 +18185,7 @@ mod declared_sequential_resident_tests {
                 .expect(declaration);
             assert!(before < shaped && shaped < release && release < load, "{declaration}");
         }
-        let base = function_body(include_str!("base.rs"), "async fn generate_stream(");
+        let base = function_body(include_str!("base.rs"), "async fn generate_stream_using(");
         let prepared = base.find("prepare_mlx_load_policy(").expect("base policy step");
         let alternative = base
             .find("declared_sequential_resident_alternative(engine_id, &pre_policy_spec, &spec)")
