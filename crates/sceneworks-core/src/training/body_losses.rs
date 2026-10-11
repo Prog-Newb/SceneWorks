@@ -62,12 +62,15 @@ impl BodyLoss {
         format!("{}Weight", self.prefix())
     }
 
-    /// The default noise-level window (upstream: proportion `[0, 1]`, shape and normal
-    /// `[0.4, 0.8]`).
+    /// The default noise-level window. Proportion: `[0, BODY_PROPORTION_MAX_T_DEFAULT]` (sc-2124;
+    /// upstream `[0, 1]`, but the decoded x0 near pure noise is mush and the real-weight A/B saw
+    /// `[0, 1]` pixel losses destroy likeness). Shape and normal: upstream ai-toolkit-perceptual's
+    /// [`BODY_SURFACE_WINDOW_DEFAULT`] `[0.4, 0.8]`, which already excludes the top of the noise
+    /// range.
     pub fn default_window(self) -> (f64, f64) {
         match self {
-            Self::Proportion => (0.0, 1.0),
-            Self::Shape | Self::Normal => (0.4, 0.8),
+            Self::Proportion => (0.0, BODY_PROPORTION_MAX_T_DEFAULT),
+            Self::Shape | Self::Normal => BODY_SURFACE_WINDOW_DEFAULT,
         }
     }
 
@@ -119,6 +122,14 @@ pub const BODY_LOSS_WEIGHT_SUGGESTED: f64 = 0.1;
 pub const BODY_LOSS_EVERY_MAX: u64 = 16;
 /// Default alternation period: strict diffusion / aux alternation (upstream default).
 pub const BODY_LOSS_EVERY_DEFAULT: u32 = 2;
+/// Default upper noise-level bound of the body-proportion loss (web: `bodyProportionMaxTDefault`;
+/// sc-2124): the latent losses' low-noise window `[0, 0.5]` instead of upstream's `[0, 1]` — the
+/// decoded x0 near pure noise is mush. An explicit `bodyProportionMaxT` is honoured unchanged.
+pub const BODY_PROPORTION_MAX_T_DEFAULT: f64 = 0.5;
+/// Default noise window of the body-shape and surface-normal losses (web:
+/// `bodySurfaceWindowDefault`): upstream ai-toolkit-perceptual's `[0.4, 0.8]`, kept by sc-2124
+/// because it already excludes the top of the noise range.
+pub const BODY_SURFACE_WINDOW_DEFAULT: (f64, f64) = (0.4, 0.8);
 /// Upstream `body_shape_loss_min_cos` (web: `bodyShapeMinCosDefault`).
 pub const BODY_SHAPE_MIN_COS_DEFAULT: f64 = 0.2;
 
@@ -250,7 +261,7 @@ fn schedule(
     if min_t > max_t {
         return Err(field_error(
             &max_key,
-            format!("{max_key} ({max_t}) must be at least {min_key} ({min_t})."),
+            super::inverted_window_message(advanced, (&min_key, min_t), (&max_key, max_t)),
         ));
     }
     let every_key = format!("{p}Every");

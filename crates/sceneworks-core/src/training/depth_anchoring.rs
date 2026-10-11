@@ -32,6 +32,10 @@ pub const DEPTH_ANCHORING_WEIGHT_SUGGESTED: f64 = 0.1;
 pub const DEPTH_ANCHORING_EVERY_MAX: u64 = 16;
 /// Default alternation period: strict diffusion / depth alternation (upstream default).
 pub const DEPTH_ANCHORING_EVERY_DEFAULT: u32 = 2;
+/// Default upper noise-level bound (web: `depthAnchoringMaxTDefault`; sc-2124): the latent
+/// losses' low-noise window `[0, 0.5]` — the decoded x0 near pure noise is mush, so an aux-only update there trains toward the frozen model's reading of noise (the epic 2123 real-weight A/B: `[0, 1]` destroyed SDXL likeness and hurt Z-Image). An explicit `{DEPTH_ANCHORING_MAX_T_KEY}` is
+/// honoured unchanged.
+pub const DEPTH_ANCHORING_MAX_T_DEFAULT: f64 = 0.5;
 /// The accepted [`DEPTH_ANCHORING_MODEL_KEY`] values (web: `depthAnchoringModelOptions`).
 pub const DEPTH_ANCHORING_MODELS: [&str; 3] = ["small", "base", "large"];
 
@@ -365,13 +369,18 @@ pub fn depth_anchoring_settings(
             })?,
     };
     let min_t = unit_interval(advanced, DEPTH_ANCHORING_MIN_T_KEY, 0.0)?;
-    let max_t = unit_interval(advanced, DEPTH_ANCHORING_MAX_T_KEY, 1.0)?;
+    let max_t = unit_interval(
+        advanced,
+        DEPTH_ANCHORING_MAX_T_KEY,
+        DEPTH_ANCHORING_MAX_T_DEFAULT,
+    )?;
     if min_t > max_t {
         return Err(field_error(
             DEPTH_ANCHORING_MAX_T_KEY,
-            format!(
-                "{DEPTH_ANCHORING_MAX_T_KEY} ({max_t}) must be at least \
-                 {DEPTH_ANCHORING_MIN_T_KEY} ({min_t})."
+            super::inverted_window_message(
+                advanced,
+                (DEPTH_ANCHORING_MIN_T_KEY, min_t),
+                (DEPTH_ANCHORING_MAX_T_KEY, max_t),
             ),
         ));
     }

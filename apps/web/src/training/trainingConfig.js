@@ -55,6 +55,8 @@ export const depthAnchoringWeightMax = 1;
 export const depthAnchoringWeightSuggested = 0.1;
 export const depthAnchoringEveryMax = 16;
 export const depthAnchoringEveryDefault = 2;
+// Default noise window [0, 0.5] (sc-2124): near pure noise the decoded prediction is mush.
+export const depthAnchoringMaxTDefault = 0.5;
 export const depthAnchoringModelOptions = ["small", "base", "large"];
 // Latent-space perceptual losses (epic 2123, sc-24833): the VAE anchor (the model's prediction is
 // decoded and re-encoded by a frozen FLUX.2 VAE encoder, matched against the training image's
@@ -113,13 +115,17 @@ export const bodyLossWeightMax = 1;
 export const bodyLossWeightSuggested = 0.1;
 export const bodyLossEveryMax = 16;
 export const bodyLossEveryDefault = 2;
+// Default noise windows (sc-2124): body proportion [0, 0.5] (upstream [0, 1]); shape and normal
+// keep upstream's [0.4, 0.8], which already excludes the top of the noise range.
+export const bodyProportionMaxTDefault = 0.5;
+export const bodySurfaceWindowDefault = [0.4, 0.8];
 export const bodyShapeMinCosDefault = 0.2;
 // The three losses: the `advanced` key prefix, the target support flag, the default noise window
-// (upstream: proportion [0, 1], shape/normal [0.4, 0.8]) and the UI label.
+// (proportion [0, bodyProportionMaxTDefault], shape/normal bodySurfaceWindowDefault) and the UI label.
 export const bodyLosses = [
-  { prefix: "bodyProportion", limit: "supportsBodyProportionLoss", window: [0, 1], label: "Body proportion" },
-  { prefix: "bodyShape", limit: "supportsBodyShapeLoss", window: [0.4, 0.8], label: "Body shape" },
-  { prefix: "normal", limit: "supportsNormalLoss", window: [0.4, 0.8], label: "Surface normals" },
+  { prefix: "bodyProportion", limit: "supportsBodyProportionLoss", window: [0, bodyProportionMaxTDefault], label: "Body proportion" },
+  { prefix: "bodyShape", limit: "supportsBodyShapeLoss", window: bodySurfaceWindowDefault, label: "Body shape" },
+  { prefix: "normal", limit: "supportsNormalLoss", window: bodySurfaceWindowDefault, label: "Surface normals" },
 ];
 
 // Face losses (epic 2123, sc-24831): the ArcFace identity loss pulls the decoded prediction's face
@@ -131,6 +137,8 @@ export const faceLossWeightMax = 1;
 export const faceLossWeightSuggested = 0.1;
 export const faceLossEveryMax = 16;
 export const faceLossEveryDefault = 2;
+// Default noise window [0, 0.5] for both face losses (sc-2124).
+export const faceLossMaxTDefault = 0.5;
 export const identityLossMinCosDefault = 0.2;
 export const identityLossReferenceOptions = ["dataset_average", "per_image"];
 export const identityLossReferenceLabels = {
@@ -1266,7 +1274,7 @@ const faceLossSpec = (prefix, name, supported, extra) => ({
   what: `the ${name.toLowerCase()}`,
   weightMax: faceLossWeightMax,
   everyMax: faceLossEveryMax,
-  window: [0, 1],
+  window: [0, faceLossMaxTDefault],
   lenient: true,
   supported,
   refusal: (target, configDraft) => faceLossCombinationRefusal(target, configDraft, name),
@@ -1281,7 +1289,7 @@ const auxLossSpecs = [
     what: "depth anchoring",
     weightMax: depthAnchoringWeightMax,
     everyMax: depthAnchoringEveryMax,
-    window: [0, 1],
+    window: [0, depthAnchoringMaxTDefault],
     lenient: true,
     supported: targetSupportsDepthAnchoring,
     refusal: depthAnchoringCombinationRefusal,
@@ -1384,7 +1392,12 @@ function auxLossIssues(configDraft, selectedTarget, spec) {
     }
   }
   if ((bounds.MinT ?? spec.window[0]) > (bounds.MaxT ?? spec.window[1])) {
-    issues.push([key("MaxT"), "Noise window max must be at least its min"]);
+    issues.push([
+      key("MaxT"),
+      bounds.MaxT === undefined
+        ? `Noise window max must be at least its min — it is empty and its default is now ${spec.window[1]}`
+        : "Noise window max must be at least its min",
+    ]);
   }
   if (String(configDraft[key("Every")] ?? "").trim()) {
     const every = numberFromDraft(configDraft[key("Every")]);

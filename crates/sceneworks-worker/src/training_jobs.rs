@@ -6237,7 +6237,7 @@ mod tests {
             gen_core::AuxLossSchedule {
                 weight: 0.15,
                 t_min: 0.0,
-                t_max: 1.0,
+                t_max: 0.5,
                 every_n: 1,
             }
         );
@@ -6416,7 +6416,7 @@ mod tests {
             gen_core::AuxLossSchedule {
                 weight: 0.2,
                 t_min: 0.0,
-                t_max: 1.0,
+                t_max: 0.5,
                 every_n: 4,
             }
         );
