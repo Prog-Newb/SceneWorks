@@ -13,8 +13,9 @@ import { assetIsHdrSource, assetNativeSize, assetUrl } from "./components/assetM
 import { Modal } from "./components/Modal.jsx";
 import { lazyInteraction } from "./components/LazyScreen.jsx";
 import { useAppContextOptional } from "./context/AppContext.js";
-import { detailCapableModels, editCapableModels, UPSCALE_ENGINES } from "./imageJobs.js";
-import { DEFAULT_MAC_CAPABILITIES, macUpscaleEngineBlocked } from "./macGating.js";
+import { detailCapableModels, editCapableModels } from "./imageJobs.js";
+import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
+import { availableUpscaleEngines as upscaleEnginesForPlatform } from "./upscaleEngines.js";
 import { depthAvailability as depthAvailabilityFor } from "./depthJobs.js";
 
 const BatchOperationsPanel = lazyInteraction(
@@ -54,6 +55,8 @@ export function useAssetBatch() {
     assets = [],
     jobs = [],
     imageModels = [],
+    // Full catalog incl. utility entries: the Iris restoration engine is offered only once its own
+    // `iris_3b_restore` task is installed (sc-25683).
     models = [],
     characters = [],
     deleteAsset,
@@ -91,7 +94,7 @@ export function useAssetBatch() {
   // and the upscale engines this platform actually supports.
   const selectedAssetList = assets.filter((asset) => selectedAssetIds.has(asset.id));
   const eligibleSelected = batchEligibleAssets(selectedAssetList);
-  const availableUpscaleEngines = UPSCALE_ENGINES.filter((engine) => !macUpscaleEngineBlocked(macCapabilities, engine.key));
+  const availableUpscaleEngines = upscaleEnginesForPlatform(macCapabilities, models);
   const editModels = editCapableModels(imageModels);
   const detailModels = detailCapableModels(imageModels);
   // Iris-3B depth (sc-25682): offered only with a native lane AND a complete task install.
@@ -370,6 +373,9 @@ export function useAssetBatch() {
     detailModels,
     availableUpscaleEngines,
     depthAvailability,
+    // The Iris restoration preview plans the selection against its project (sc-25683).
+    projectId: activeProject?.id ?? null,
+    token,
   };
 }
 
@@ -553,6 +559,8 @@ export function AssetBatchModal({ batch }) {
       upscaleEngines={batch.availableUpscaleEngines}
       depthAvailability={batch.depthAvailability}
       initialOp={batch.batchInitialOp ?? undefined}
+      projectId={batch.projectId}
+      token={batch.token}
       busy={Boolean(batch.batch?.submitting)}
       items={batch.batchItems}
       progress={batch.batchProgress}

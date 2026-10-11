@@ -65,12 +65,15 @@ import {
   sam3SegmentModel,
   SAM3_SEGMENT_MODEL_ID,
   upscaleEngineHasSoftness,
+  upscaleEngineIsRestoration,
   upscaleFactorsForEngine,
 } from "../imageJobs.js";
 import {
   availableUpscaleEngines as upscaleEnginesForPlatform,
   useUpscaleEngineFallback,
 } from "../upscaleEngines.js";
+import { IRIS_RESTORE_DEFAULTS, irisRestoreControls } from "../irisRestore.js";
+import { IrisRestoreControls } from "../components/IrisRestoreControls.jsx";
 // Per-tool logic extracted to dedicated hooks + pure helper modules (sc-9752, F-052
 // follow-up). Each hook owns its tool's state/refs/handlers and is wired below; the pure
 // helpers are re-exported here so this module's public surface (and ImageEditor.test.jsx's
@@ -136,6 +139,7 @@ import { editTransparencyFor, imageBytesCarryAlpha } from "../qwenAlpha.js";
 const UPSCALE_ENGINE_DESC = {
   "real-esrgan": "Fast, faithful general-purpose upscaler. Great default.",
   seedvr2: "Detail-restoring diffusion upscaler for degraded sources.",
+  iris: "Iris-3B restoration: any scale (1× restores only), tiled.",
   "aura-sr": "Sharpest output, best for print. Slower.",
 };
 
@@ -1325,12 +1329,17 @@ export function ImageEditor() {
   // SeedVR2 detail/softness knob (0..1, sc-4815) — only meaningful for the seedvr2 engine.
   const [upscaleSoftness, setUpscaleSoftness] = useState(0);
   // Engines offered in the picker; AuraSR is dropped on every platform (sc-3668 / sc-5499).
-  const availableUpscaleEngines = upscaleEnginesForPlatform(macCapabilities);
+  // Iris restoration (sc-25683) joins only once its own task entry is installed (`models`).
+  const availableUpscaleEngines = upscaleEnginesForPlatform(macCapabilities, models);
+  // Iris restoration controls + the planner preview's status (a refused plan blocks the run).
+  const [irisRestore, setIrisRestore] = useState(IRIS_RESTORE_DEFAULTS);
+  const [irisPlanStatus, setIrisPlanStatus] = useState({ ready: false, blocked: false, error: null });
   // If the selected engine got gated out (e.g. a stale saved AuraSR selection), fall back to the
   // default real-esrgan engine (the guaranteed-available cross-platform upscaler) so the tool stays
   // usable. Shared with ImageStudio via the single fallback hook (sc-8853).
   useUpscaleEngineFallback({
     macCapabilities,
+    models,
     upscaleEngine,
     setUpscaleEngine,
     upscaleFactor,
@@ -2954,6 +2963,27 @@ export function ImageEditor() {
   runAiOpRef.current = runAiOp;
 
   function runUpscale() {
+    if (upscaleEngineIsRestoration(upscaleEngine)) {
+      // Iris restoration (sc-25683): sized by scale; the preview must have planned it (a refused
+      // plan is never submitted, and the request is never silently changed).
+      if (!irisPlanStatus.ready) return;
+      const restore = irisRestoreControls(irisRestore);
+      runAiOp({
+        label: "restore",
+        layerSource: "composite",
+        edit: { op: "upscale", engine: upscaleEngine, ...restore },
+        buildBody: (scratch) =>
+          buildUpscaleJobBody({
+            project: activeProject,
+            requestedGpu,
+            sourceAssetId: scratch.id,
+            engine: upscaleEngine,
+            displayName: working?.source?.name,
+            restore,
+          }),
+      });
+      return;
+    }
     const valid = upscaleFactorsForEngine(upscaleEngine);
     const factor = valid.includes(upscaleFactor) ? upscaleFactor : valid[0];
     const softness = upscaleEngineHasSoftness(upscaleEngine) ? upscaleSoftness : undefined;
@@ -3440,6 +3470,13 @@ export function ImageEditor() {
     StudioUpdateBadge,
     StudioUpdateNotice,
     UPSCALE_ENGINE_DESC,
+    IrisRestoreControls,
+    irisPlanStatus,
+    irisRestore,
+    setIrisPlanStatus,
+    setIrisRestore,
+    token,
+    upscaleEngineIsRestoration,
     activeGradeIsIdentity,
     activeLayerOf,
     actualSize,

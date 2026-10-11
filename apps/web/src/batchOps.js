@@ -52,6 +52,8 @@ export function buildBatchJob({ op, asset, params = {}, project, requestedGpu, d
         engine: params.engine,
         displayName,
         softness: params.softness,
+        // Iris restoration controls (sc-25683); ignored by the factor engines.
+        restore: params.restore,
       }),
     };
   }

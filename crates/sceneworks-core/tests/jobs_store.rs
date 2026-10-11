@@ -5967,6 +5967,7 @@ fn mac_capabilities_master_switch_and_infra_features() {
                     | "imageSegment"
                     | "imageUpscale"
                     | "imageUpscaleSeedvr2"
+                    | "imageUpscaleIris"
                     | "personDetect"
                     | "poseFromPhoto"
                     | "videoUpscale"
@@ -5983,6 +5984,11 @@ fn mac_capabilities_master_switch_and_infra_features() {
     let windows = mac_capabilities("windows", false);
     assert!(windows.features["imageUpscaleSeedvr2"].supported);
     assert!(windows.features["imageUpscaleSeedvr2"].reason.is_none());
+    // Iris restoration (sc-25683) has a backend on the same three platforms (MLX + Candle).
+    assert!(mac.features["imageUpscaleIris"].supported);
+    assert!(windows.features["imageUpscaleIris"].supported);
+    assert!(inert.features["imageUpscaleIris"].supported);
+    assert!(!mac_capabilities("freebsd", false).features["imageUpscaleIris"].supported);
     assert!(windows.features["imageSegment"].supported);
     assert!(windows.features["imageSegment"].reason.is_none());
     assert!(inert.features["imageSegment"].supported);

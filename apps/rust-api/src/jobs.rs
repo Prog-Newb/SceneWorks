@@ -1087,6 +1087,9 @@ async fn validate_raw_job_payload(
     ) {
         validate_payload_model(payload)?;
     }
+    if matches!(job_type, JobType::ImageUpscale) {
+        validate_image_upscale_engine_controls(payload)?;
+    }
     if matches!(
         job_type,
         JobType::ModelDownload | JobType::ModelImport | JobType::ModelConvert
@@ -1149,6 +1152,34 @@ async fn validate_raw_job_payload(
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
     }
     Ok(())
+}
+
+/// The engine-specific controls of a raw `image_upscale` job (sc-25683). The Iris restoration engine
+/// is sized by `scale` (with `inputSizing` / `colorFix`) and refuses the other engines' `factor` /
+/// `softness` / `seed`; every other engine refuses the Iris-only keys. Refusing at submission keeps a
+/// control from being silently ignored by the worker (which applies the same rules).
+fn validate_image_upscale_engine_controls(payload: &JsonObject) -> Result<(), ApiError> {
+    use sceneworks_core::image_restoration::{
+        is_iris_engine, parse_iris_restore_params, reject_iris_only_keys,
+    };
+    let engine = payload
+        .get("engine")
+        .and_then(Value::as_str)
+        .unwrap_or("real-esrgan");
+    if is_iris_engine(engine) {
+        if let Some(key) = ["factor", "softness", "seed"]
+            .into_iter()
+            .find(|key| payload.get(*key).is_some_and(|value| !value.is_null()))
+        {
+            return Err(ApiError::bad_request(format!(
+                "{key} is not a control of the Iris restoration engine; it is sized by scale"
+            )));
+        }
+        parse_iris_restore_params(payload).map_err(ApiError::bad_request)?;
+        Ok(())
+    } else {
+        reject_iris_only_keys(payload, engine).map_err(ApiError::bad_request)
+    }
 }
 
 /// Generation kinds whose `model` selects weights and therefore reaches worker path resolution.
