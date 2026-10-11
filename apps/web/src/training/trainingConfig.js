@@ -12,6 +12,14 @@ import {
   numberFromDraft,
   numericDraft,
 } from "./drafts.js";
+import {
+  irisDraftFromDefaults,
+  irisOptionsSnapshot,
+  irisRequestKeys,
+  irisUpstreamPromptsOn,
+  irisValidation,
+  isIrisTarget,
+} from "./irisOptions.js";
 
 export const defaultGpuOptions = ["auto"];
 export const defaultOptimizerOptions = ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"];
@@ -225,8 +233,25 @@ export function optimizerLabel(value) {
 // plans Anima/Mage rejected only after model load. A recognized target default/current value remains
 // selected because it is already in the owning target's exact set—unsupported stale values are not
 // smuggled back into the menu.
+//
+// A target that advertises `limits.timestepTypes` (Iris, sc-25685) gets exactly that list.
 export function timestepTypeOptionsForTarget(target) {
+  const advertised = choiceOptionsForTarget(target, "timestepTypes", null);
+  if (advertised) return advertised;
   return target?.kernel === "sd3_lora" ? sd3TimestepTypeOptions : timestepTypeOptions;
+}
+
+// A choice list the target advertises in `limits[key]` (timestepTypes / timestepBiases /
+// lossTypes / lrSchedulers / mixedPrecisions — the generic `validate_advertised_advanced_choices`
+// set), or `fallback` when it advertises none, so a target without the key keeps today's menu.
+export function choiceOptionsForTarget(target, key, fallback) {
+  const advertised = target?.limits?.[key];
+  return Array.isArray(advertised) && advertised.length ? advertised : fallback;
+}
+
+// `limits.gradientCheckpointing: false` — the target's trainer does not implement it (Iris).
+export function gradientCheckpointingUnsupported(target) {
+  return target?.limits?.gradientCheckpointing === false;
 }
 
 export function networkTypeLabel(value) {
@@ -339,7 +364,7 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     lossType: asText(advanced.lossType || "mse"),
     trainingAdapterRepo: asText(advanced.trainingAdapterRepo),
     trainingAdapterVersion: normalizeTrainingAdapterVersion(advanced.trainingAdapterVersion),
-    gradientCheckpointing: advanced.gradientCheckpointing !== false,
+    gradientCheckpointing: !gradientCheckpointingUnsupported(target) && advanced.gradientCheckpointing !== false,
     resolution: numericDraft(defaults.resolution),
     precision: asText(advanced.mixedPrecision),
     saveEvery: numericDraft(defaults.saveEvery),
@@ -368,6 +393,15 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
           ltxVideo: ltxPlan.video,
           ltxAudio: ltxPlan.audio,
           ltxValidation: ltxValidationSnapshot(advanced.ltxValidation),
+        }
+      : {}),
+    // The Iris engine options bag (sc-25685) plus the previous-run pickers. Seeded from the
+    // preset's bag when it has one, else the target's.
+    ...(isIrisTarget(target)
+      ? {
+          iris: irisDraftFromDefaults(advanced.iris ?? target?.defaults?.advanced?.iris),
+          resumeFromJobId: "",
+          loadFromJobId: "",
         }
       : {}),
   };
@@ -480,6 +514,32 @@ export function configValidation(
       ),
     );
   }
+  // Micro-step fields (Iris, sc-25685): the trainer lands checkpoints, previews and the warmup on
+  // optimizer-step boundaries, so each must be a whole number of accumulation windows. The API
+  // refuses the same request with a typed `NotMultipleOf` 400.
+  const microStepFields = selectedTarget?.limits?.microStepFields;
+  const accumulation = numberFromDraft(configDraft.gradientAccumulation);
+  if (Array.isArray(microStepFields) && Number.isInteger(accumulation) && accumulation > 1) {
+    for (const field of microStepFields) {
+      const value = numberFromDraft(configDraft[field]);
+      if (value !== null && value % accumulation !== 0) {
+        issues.push(
+          issue.error(field, `${microStepFieldLabels[field] ?? optionLabel(field)} must be a multiple of the gradient accumulation (${accumulation})`),
+        );
+      }
+    }
+  }
+  const sampleCountRange = selectedTarget?.limits?.sampleCount;
+  if (Array.isArray(sampleCountRange) && sampleCountRange.length === 2) {
+    const sampleCount = numberFromDraft(configDraft.sampleCount);
+    const [min, max] = sampleCountRange.map(Number);
+    if (sampleCount !== null && (!Number.isInteger(sampleCount) || sampleCount < min || sampleCount > max)) {
+      issues.push(issue.error("sampleCount", `Sample count must be a whole number between ${min} and ${max}`));
+    }
+  }
+  if (isIrisTarget(selectedTarget)) {
+    issues.push(...irisValidation(configDraft));
+  }
   if (selectedTarget?.baseModel === "ltx_2_5") {
     const workflows = Array.isArray(selectedTarget?.limits?.ltxWorkflows)
       ? selectedTarget.limits.ltxWorkflows
@@ -524,6 +584,13 @@ export function configValidation(
   }
   return issues;
 }
+
+const microStepFieldLabels = {
+  steps: "Steps",
+  saveEvery: "Checkpoint cadence",
+  sampleEvery: "Sample cadence",
+  lrWarmupSteps: "LR warmup steps",
+};
 
 export function samplePromptsFromTrigger(triggerWord) {
   const trigger = String(triggerWord ?? "").trim() || "the trained subject";
@@ -576,7 +643,12 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
   // backends cap this pool at sampleCount (one preview per prompt), so the pool can hold
   // more prompts than render.
   const editedPrompts = promptLinesToList(configDraft.samplePrompts);
-  const samplePrompts = editedPrompts.length ? editedPrompts : samplePromptsFromTrigger(configDraft.triggerWord);
+  const iris = isIrisTarget(selectedTarget);
+  // Iris' upstream validation prompts REPLACE the pool: the trainer renders its seven built-in
+  // prompts and refuses a request that also carries user prompts.
+  const samplePrompts = iris && irisUpstreamPromptsOn(configDraft)
+    ? []
+    : editedPrompts.length ? editedPrompts : samplePromptsFromTrigger(configDraft.triggerWord);
   const ltxWorkflow = asText(configDraft.ltxWorkflow).trim();
   const ltxPlan = selectedTarget?.baseModel === "ltx_2_5"
     ? ltx25WorkflowPlan(ltxWorkflow, configDraft.ltxVideo, configDraft.ltxAudio)
@@ -599,8 +671,9 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     trainingAdapterVersion: asText(configDraft.trainingAdapterVersion).trim(),
     // Platform-effective target metadata carries any backend-specific full-tune requirement. MLX
     // has no override and keeps the submitted draft; Candle Mage advertises f32/no-checkpointing.
-    gradientCheckpointing:
-      fullFinetuneConfig?.gradientCheckpointing ?? Boolean(configDraft.gradientCheckpointing),
+    gradientCheckpointing: gradientCheckpointingUnsupported(selectedTarget)
+      ? false
+      : fullFinetuneConfig?.gradientCheckpointing ?? Boolean(configDraft.gradientCheckpointing),
     mixedPrecision: fullFinetuneConfig?.mixedPrecision ?? asText(configDraft.precision).trim(),
     sampleEvery: numberFromDraft(configDraft.sampleEvery),
     sampleSteps: numberFromDraft(configDraft.sampleSteps),
@@ -620,6 +693,9 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
           ltxValidation: ltxValidationSnapshot(configDraft.ltxValidation),
         }
       : {}),
+    // Always the compacted draft bag (never the target's raw default bag spread above), so a
+    // key the run does not use is absent rather than defaulted in.
+    ...(iris ? { iris: irisOptionsSnapshot(configDraft), ...irisRequestKeys(configDraft) } : {}),
   });
   return {
     targetId: selectedTarget.id,

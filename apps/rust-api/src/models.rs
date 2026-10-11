@@ -9014,6 +9014,9 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        // A trained checkpoint of a builtin generation engine (the Iris full-model export,
+        // sc-25685) renders through that engine's id-keyed lane, so it carries the engine's verdict.
+        let id = crate::iris_training::trained_checkpoint_engine_model(object).unwrap_or(id);
         model_mac_support(id, model_type, family)
     };
     if let Ok(mac_support) = serde_json::to_value(mac_support) {
@@ -9031,6 +9034,7 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let id = crate::iris_training::trained_checkpoint_engine_model(object).unwrap_or(id);
         model_candle_support(id, model_type)
     };
     if let Ok(candle_support) = serde_json::to_value(candle_support) {
@@ -10071,6 +10075,11 @@ async fn load_model_catalog_inputs(
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
     let mut models = merge_entries_by_id(builtin, user);
+    // A trained checkpoint (Iris full export) takes its generation surface from its engine's entry
+    // on every read, never from a registration-time snapshot.
+    for model in &mut models {
+        crate::iris_training::overlay_trained_checkpoint_surface(model, &decoder_providers)?;
+    }
     retain_models_for_os(&mut models, std::env::consts::OS, &state.settings.data_dir)?;
     // Resolve per-platform download sources before computing install state/size: some video models
     // carry both a native MLX-convert checkpoint (macOS) and a diffusers/torch checkpoint
@@ -10240,6 +10249,9 @@ pub(crate) async fn resolve_model_manifest_entry(
         None
     };
     let mut entry = merge_model_manifest_entry(builtin_entry, user_entry);
+    if catalog_scope == Some("user") {
+        crate::iris_training::overlay_trained_checkpoint_surface(&mut entry, &builtin)?;
+    }
     if entry.as_object().is_none_or(JsonObject::is_empty) {
         // The model-source seam (sc-19708) resolves fixed utility models (upscalers, detectors,
         // the face stack) for job admission even when the configured manifest directory is
