@@ -464,19 +464,30 @@ impl IrisDepthEstimator for FakeEstimator {
 
 type Posts = Arc<Mutex<Vec<Value>>>;
 
-async fn spawn_job_api(cancel_requested: bool) -> (String, Posts) {
+/// `reject_completion`: the progress route answers the `completed` post with a 500, as an API that
+/// failed to persist the asset would.
+async fn spawn_job_api(cancel_requested: bool, reject_completion: bool) -> (String, Posts) {
+    type ApiState = (Posts, bool, bool);
     async fn job_route(
-        State((_, cancel)): State<(Posts, bool)>,
+        State((_, cancel, _)): State<ApiState>,
         AxumPath(job_id): AxumPath<String>,
     ) -> Response {
         Json(crate::tests::job_snapshot_json(&job_id, cancel)).into_response()
     }
     async fn progress_route(
-        State((posts, cancel)): State<(Posts, bool)>,
+        State((posts, cancel, reject_completion)): State<ApiState>,
         AxumPath(job_id): AxumPath<String>,
         Json(body): Json<Value>,
     ) -> Response {
+        let completing = body["status"] == "completed";
         posts.lock().unwrap().push(body);
+        if reject_completion && completing {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "asset persist failed",
+            )
+                .into_response();
+        }
         Json(crate::tests::job_snapshot_json(&job_id, cancel)).into_response()
     }
     async fn heartbeat_route(AxumPath(worker_id): AxumPath<String>) -> Response {
@@ -495,7 +506,7 @@ async fn spawn_job_api(cancel_requested: bool) -> (String, Posts) {
             "/api/v1/workers/:worker_id/heartbeat",
             post(heartbeat_route),
         )
-        .with_state((posts.clone(), cancel_requested));
+        .with_state((posts.clone(), cancel_requested, reject_completion));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -542,6 +553,7 @@ impl JobRun {
 struct JobSetup {
     behavior: Behavior,
     cancel_requested: bool,
+    reject_completion: bool,
     stage: &'static [&'static str],
     memory_cap_gb: &'static str,
     orientation: Option<u16>,
@@ -553,6 +565,7 @@ impl Default for JobSetup {
         Self {
             behavior: Behavior::Succeeds,
             cancel_requested: false,
+            reject_completion: false,
             stage: &DEPTH_EXPORT_FILES,
             memory_cap_gb: "64",
             orientation: Some(6),
@@ -606,7 +619,8 @@ fn run_job(setup: JobSetup) -> JobRun {
         .unwrap();
     let project_id = project.id.clone();
     let (outcome, posts) = runtime.block_on(async {
-        let (base_url, posts) = spawn_job_api(setup.cancel_requested).await;
+        let (base_url, posts) =
+            spawn_job_api(setup.cancel_requested, setup.reject_completion).await;
         let mut settings = settings_at(data.path());
         settings.api_url = base_url;
         settings.heartbeat_seconds = 5;
@@ -816,6 +830,23 @@ fn an_engine_failure_leaves_no_asset_and_no_file() {
     });
     let error = run.outcome.as_ref().unwrap_err().to_string();
     assert!(error.contains("fixture engine failure"), "{error}");
+    assert!(run.depth_files().is_empty(), "{:?}", run.depth_files());
+}
+
+/// The files are published before the completion post that hands the API the asset fact; if the
+/// API refuses that post, no asset exists, so the published `.npy` and preview are removed too.
+#[test]
+fn a_refused_completion_leaves_no_file() {
+    let run = run_job(JobSetup {
+        reject_completion: true,
+        ..JobSetup::default()
+    });
+    assert!(run.outcome.is_err(), "{:?}", run.outcome);
+    assert!(
+        run.posts.iter().any(|post| post["status"] == "completed"),
+        "the completion was attempted: {:#?}",
+        run.posts
+    );
     assert!(run.depth_files().is_empty(), "{:?}", run.depth_files());
 }
 

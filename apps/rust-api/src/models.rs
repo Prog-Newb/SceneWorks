@@ -13833,17 +13833,15 @@ mod variant_delete_tests {
         assert_eq!(catalog.len(), 2);
         let entry = |id: &str| catalog.iter().find(|e| e["id"] == id).unwrap().clone();
 
+        let depth_files: &[&str] = &[
+            "depth/config.yaml",
+            "depth/model.safetensors",
+            "depth/empty_prompt.safetensors",
+        ];
+        let generation_files: &[&str] = &["config.yaml", "model.safetensors"];
         for (deleted, kept_files, removed_files) in [
-            (
-                "iris_3b_depth",
-                ["config.yaml", "model.safetensors"],
-                ["depth/config.yaml", "depth/model.safetensors"],
-            ),
-            (
-                "iris_3b",
-                ["depth/config.yaml", "depth/model.safetensors"],
-                ["config.yaml", "model.safetensors"],
-            ),
+            ("iris_3b_depth", generation_files, depth_files),
+            ("iris_3b", depth_files, generation_files),
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let data_dir = tmp.path();

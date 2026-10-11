@@ -72,6 +72,7 @@ pub const PROJECT_FOLDERS: &[&str] = &[
     "assets/documents",
     "assets/poses",
     "assets/keypoints",
+    "assets/depth",
     "characters",
     "generation-sets",
     "loras",
@@ -8665,6 +8666,16 @@ mod tests {
             asset["recipe"]["rawAdapterSettings"]["depth"]["resolution"]["maxSide"],
             1024
         );
+
+        // An index rebuild re-reads sidecars from disk: the depth asset must survive it whole.
+        store.reindex_project(&project.id).expect("reindexes");
+        let reindexed = store
+            .get_asset(&project.id, "asset_depth1")
+            .expect("depth asset survives a reindex");
+        assert_eq!(reindexed["type"], "depth");
+        assert_eq!(reindexed["file"]["path"], npy_rel);
+        assert_eq!(reindexed["preview"]["path"], preview_rel);
+        assert_eq!(reindexed["depth"], depth_block);
 
         store
             .purge_asset(&project.id, "asset_depth1", true)

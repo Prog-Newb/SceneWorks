@@ -270,7 +270,9 @@ where
         metadata: &metadata,
     })?;
     let result = depth_job_result(&outputs, &metadata, fact);
-    update_job(
+    // The API persists the asset only when it accepts this completion; if it refuses, the
+    // published files would be orphans, so remove them before reporting the failure.
+    if let Err(error) = update_job(
         api,
         &job.id,
         progress_payload(
@@ -283,7 +285,11 @@ where
             None,
         ),
     )
-    .await?;
+    .await
+    {
+        outputs.discard();
+        return Err(error);
+    }
     Ok(())
 }
 
