@@ -222,7 +222,7 @@ on:
         type: boolean
         default: false
       run_iris_worker_smoke:
-        description: "Run the sc-25680 Iris-3B Candle worker job once on real weights (512², 30 steps; snapshots must already be in E:\\huggingface\\hub)"
+        description: "Run the Iris-3B Candle worker jobs once on real weights (sc-25680 generation 512², 30 steps; sc-25682 depth on a 1024x768 EXIF-rotated photo; snapshots must already be in E:\\huggingface\\hub)"
         required: false
         type: boolean
         default: false
@@ -1667,6 +1667,8 @@ jobs:
   # image, 30 steps). Offline: the pinned speridlabs/iris-3b + Qwen3-VL-4B-Instruct snapshots must
   # already be in E:\huggingface\hub (inference's `candle-iris` real-weight profile materializes
   # them there); a missing snapshot fails the job rather than downloading.
+  # SC-25682 extends it with one real-weight `image_depth` job (`iris_worker_gpu_smoke_depth`, matched
+  # by the same test filter): the installed `depth/` export only — no text encoder.
   #   gh workflow run windows-candle.yml --ref <branch> -f run_iris_worker_smoke=true
   iris-worker-smoke:
     needs: candle-worker

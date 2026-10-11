@@ -753,3 +753,6 @@ fn depth_job_result(outputs: &DepthOutputPaths, metadata: &DepthMetadata, fact: 
 
 #[cfg(test)]
 mod tests;
+// Real-weight acceptance on this build's native lane (ignored; GPU + installed export required).
+#[cfg(test)]
+mod gpu_smoke;
