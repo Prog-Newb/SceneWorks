@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference revision c9bc4ac4 (the Iris-3B inference feature-branch head carrying the Candle provider, controls/adapters/previews, depth, restoration, MLX trainer and Candle trainer work of epic sc-25678): 763 provenance candidates and 110 production-Rust crate prefixes. The mlx-gen-iris and new candle-gen-iris crates are architecture reimplementations of speridlabs/iris-3b classified under the iris-3b About component; mlx-gen-body, mlx-gen-perceptual, candle-gen-body and candle-gen-perceptual arrive with the pin advance from the epic 2123 work and remain unclassified advisory items for that epic. The vendored candle-core crate is upstream Hugging Face Candle 0.10.2 with the exact upstream base, cherry-picks, and local CUDA quantized-padding change and the sc-25686 backprop patch that skips gradients for untracked operands, both documented in its VENDORED.md; its source is classified under the existing Hugging Face Candle About license component. The speculative benchmark baseline driver is a first-party testkit copy, classified separately from upstream model source. Other candidate changes reflect the current inference source inventory; historical YuE2 source and measurement records remain attributed to their own revisions. This mapping grants no model-weight redistribution. Other open compliance items remain advisory under sc-19751. Generated inventories and digests describe this exact source; this audit makes no measurement currency claim.",
-  "inferenceRevision": "c9bc4ac4ffc53117860f00b3b2b813b809119e55",
-  "auditDigest": "0a7832adcf74afa8add2f538f4b824b5d4cbd7c0229692765517a10bf9a64f4d",
+  "_comment": "Audit inventory rescanned at inference revision 1b2737f4 (the Iris-3B inference feature-branch head carrying the Candle provider, controls/adapters/previews, depth, restoration, MLX and Candle LoRA trainers, and the depth and restoration task trainers of epic sc-25678): 765 provenance candidates and 110 production-Rust crate prefixes. The mlx-gen-iris and candle-gen-iris crates are architecture reimplementations of speridlabs/iris-3b classified under the iris-3b About component, and the new gen-core iris degradation and restoration-training modules fall under the existing gen-core ported-source area; mlx-gen-body, mlx-gen-perceptual, candle-gen-body and candle-gen-perceptual arrive with the pin advance from the epic 2123 work and remain unclassified advisory items for that epic. The vendored candle-core crate is upstream Hugging Face Candle 0.10.2 with the exact upstream base, cherry-picks, and local CUDA quantized-padding change, the sc-25686 backprop patch that skips gradients for untracked operands, and the max_pool2d backward fix, all documented in its VENDORED.md; its source is classified under the existing Hugging Face Candle About license component. The mlx-rs fork pin moves to fe22998b (CPU conv padding-overhang fix), which adds no provenance candidate. The speculative benchmark baseline driver is a first-party testkit copy, classified separately from upstream model source. Other candidate changes reflect the current inference source inventory; historical YuE2 source and measurement records remain attributed to their own revisions. This mapping grants no model-weight redistribution. Other open compliance items remain advisory under sc-19751. Generated inventories and digests describe this exact source; this audit makes no measurement currency claim.",
+  "inferenceRevision": "1b2737f48e3e42a9bab50627d8f64989dec9c3b2",
+  "auditDigest": "9109a4818bd70bdcedec09b5832b8bb453978d75e437ae0f198686884e8983b9",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "c9bc4ac4ffc53117860f00b3b2b813b809119e55",
+    "revision": "1b2737f48e3e42a9bab50627d8f64989dec9c3b2",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 763,
-    "populationSha256": "0a886f1bfcfb2f8c8943855ff6d99e576c2a462e89bb6015e422017be67afecd"
+    "matchedFiles": 765,
+    "populationSha256": "ea6de3eea1b1ab12897bd57ae2f224a038761fd3d6d0bade8a2d3d25931f8713"
   },
   "portedSourceAreas": [
     {
@@ -957,7 +957,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "c9bc4ac4ffc53117860f00b3b2b813b809119e55",
+    "revision": "1b2737f48e3e42a9bab50627d8f64989dec9c3b2",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 110,
     "cratePopulationSha256": "8a5440c3b8504b13d2ea61380b47e52087962d80e48d5df07b18651c315910e3"
