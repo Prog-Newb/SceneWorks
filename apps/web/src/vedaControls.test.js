@@ -6,6 +6,6 @@ it("legacy recipes restore frozen off defaults and never restore execution", () 
 });
 it("enabled incompatible model changes are refused, never silently dropped", () => {
   const veda = { ...defaultVedaSettings(), enabled: true };
-  expect(vedaControlError("wan", veda, 50)).toContain("only supported");
+  expect(vedaControlError(false, veda)).toContain("requires MiniMax-H3");
   expect(vedaAdvancedSettings(veda)).toEqual({ veda });
 });

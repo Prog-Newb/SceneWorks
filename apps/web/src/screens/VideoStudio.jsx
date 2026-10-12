@@ -1800,9 +1800,8 @@ export function VideoStudio() {
   // One summary gates Generate and carries every reason it might be dead, so the button
   // and the messages can't drift — the bug this screen used to embody, where `canSubmit`
   // and `blockedMessage` re-derived the same rules side by side (epic 10644).
-  const vedaSteps = stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
-    ? Number(stepsOverride) : activeTurboVariant?.sampling?.steps ?? selectedModel?.defaults?.steps ?? 50;
-  const vedaBlockMessage = vedaControlError(model, veda, vedaSteps);
+  const vedaSteps = finiteNumberOrUndefined(stepsOverride) ?? activeTurboVariant?.sampling?.steps ?? selectedModel?.defaults?.steps ?? 50;
+  const vedaBlockMessage = vedaControlError(showTurbo, veda);
   const videoDraft = useMemo(
     () => ({
       activeProject,
@@ -2593,7 +2592,7 @@ export function VideoStudio() {
             open={advancedOpen}
           >
             <div className="advanced-panel">
-              {showTurbo || veda.enabled ? <VedaControls value={veda} onChange={setVeda} steps={vedaSteps} compatible={showTurbo} /> : null}
+              {showTurbo || veda.enabled ? <VedaControls value={veda} onChange={setVeda} steps={vedaSteps} /> : null}
               <label>
                 Frames
                 <select onChange={(event) => setFps(Number(event.target.value))} value={fps}>
@@ -3150,8 +3149,7 @@ export function VideoStudio() {
           <ValidationSummary issues={videoValidity.surfaced} label="Generate errors" />
           <VedaOutcome
             label="Recorded recipe attention"
-            outcome={launchRequest?.recipe?.rawAdapterSettings?.vedaExecution}
-            requested={launchRequest?.recipe?.rawAdapterSettings?.veda}
+            raw={launchRequest?.recipe?.rawAdapterSettings}
           />
           {canStartNewGenerationFromReplay ? (
             <button

@@ -474,7 +474,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     await act(async () => setSelect(container.querySelector(".settings-field-model select"), BERNINI.id));
     expect(vedaToggle().checked).toBe(true);
     await generate(); expect(context.createVideoJob).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Veda is only supported");
+    expect(container.textContent).toContain("Veda requires MiniMax-H3");
     await click(vedaToggle()); await generate();
     expect(lastJob(context).advanced).not.toHaveProperty("veda");
   });

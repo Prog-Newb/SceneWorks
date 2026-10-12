@@ -922,7 +922,7 @@ export function WorkerProgressCard({
       {thumbnailAssets?.[0]?.recipe?.rawAdapterSettings?.vedaExecution ? (
         <AssetVedaOutcome asset={thumbnailAssets[0]} />
       ) : (
-        <VedaOutcome outcome={job?.result?.assetWrites?.[0]?.rawAdapterSettings?.vedaExecution} requested={job?.result?.assetWrites?.[0]?.rawAdapterSettings?.veda} />
+        <VedaOutcome raw={job?.result?.assetWrites?.[0]?.rawAdapterSettings} />
       )}
       <ThumbnailsRegion
         variant={thumbnailsVariant}
