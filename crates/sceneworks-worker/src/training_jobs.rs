@@ -5704,11 +5704,23 @@ mod tests {
             checked > 10,
             "only {checked} builtin targets resolved to a linked trainer"
         );
-        // LTX-2.5 refuses on both backends; the Krea ControlNet trainer exists only on Candle.
+        // LTX-2.5 refuses on both backends; the Krea ControlNet trainer exists only on Candle; the
+        // Iris-3B trainers declare no epic 2123 technique on either backend.
         let expected: &[&str] = if cfg!(target_os = "macos") {
-            &["ltx_2_5_video_lora"]
+            &[
+                "ltx_2_5_video_lora",
+                "iris_3b_generation",
+                "iris_3b_depth",
+                "iris_3b_restore",
+            ]
         } else {
-            &["krea_2_control", "ltx_2_5_video_lora"]
+            &[
+                "krea_2_control",
+                "ltx_2_5_video_lora",
+                "iris_3b_generation",
+                "iris_3b_depth",
+                "iris_3b_restore",
+            ]
         };
         assert_eq!(unsupported, expected);
     }
@@ -5892,7 +5904,15 @@ mod tests {
             "no builtin target resolved to a linked trainer"
         );
         // The refusal side is exercised, not just the agreeing side.
-        assert_eq!(withheld, ["ltx_2_5_video_lora"]);
+        assert_eq!(
+            withheld,
+            [
+                "ltx_2_5_video_lora",
+                "iris_3b_generation",
+                "iris_3b_depth",
+                "iris_3b_restore"
+            ]
+        );
     }
 
     /// sc-24826/sc-24827 (epic 2123): `advanced.weightNoiseSigma` / `gradientNoiseEta` /

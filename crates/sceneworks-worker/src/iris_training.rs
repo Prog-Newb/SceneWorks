@@ -908,6 +908,12 @@ mod job_tests {
             let user_cancel = CancelSwitch::default();
             let (base_url, posts) = spawn_job_api(Arc::clone(&user_cancel)).await;
             let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
+            // Off-Mac the Iris memory gate reads the worker's NVIDIA card; `isolated_env` caps it
+            // (`SCENEWORKS_CUDA_VRAM_CAP_GB`), so the bound is the test's, not the runner's.
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            {
+                settings.gpu_id = "0".to_owned();
+            }
             settings.api_url = base_url;
             settings.data_dir = data.to_path_buf();
             settings.heartbeat_seconds = 5;
@@ -1357,6 +1363,12 @@ mod job_tests {
             let user_cancel = CancelSwitch::default();
             let (base_url, posts) = spawn_job_api(Arc::clone(&user_cancel)).await;
             let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
+            // Off-Mac the Iris memory gate reads the worker's NVIDIA card; `isolated_env` caps it
+            // (`SCENEWORKS_CUDA_VRAM_CAP_GB`), so the bound is the test's, not the runner's.
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            {
+                settings.gpu_id = "0".to_owned();
+            }
             settings.api_url = base_url;
             settings.data_dir = data.clone();
             settings.heartbeat_seconds = 5;
@@ -2182,6 +2194,12 @@ mod job_tests {
                 });
             }
             let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
+            // Off-Mac the Iris memory gate reads the worker's NVIDIA card; `isolated_env` caps it
+            // (`SCENEWORKS_CUDA_VRAM_CAP_GB`), so the bound is the test's, not the runner's.
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            {
+                settings.gpu_id = "0".to_owned();
+            }
             settings.api_url = base_url;
             settings.data_dir = data.to_path_buf();
             settings.heartbeat_seconds = 5;
@@ -2380,6 +2398,12 @@ mod job_tests {
         let install = stage_install(&data);
         let plan = plan(&data, &install.backbone, 2, two_ranks(true));
         let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
+        // Off-Mac the Iris memory gate reads the worker's NVIDIA card; `isolated_env` caps it
+        // (`SCENEWORKS_CUDA_VRAM_CAP_GB`), so the bound is the test's, not the runner's.
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        {
+            settings.gpu_id = "0".to_owned();
+        }
         settings.data_dir = data.clone();
         let spec = crate::iris_dist::RankSpec {
             job_id: "job-iris-train".to_owned(),

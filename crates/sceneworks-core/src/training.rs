@@ -170,8 +170,15 @@ pub const RESOLUTION_BUCKETS_SUPPORT_LIMIT: &str = "supportsResolutionBuckets";
 
 /// Builtin targets whose trainer does NOT honor resolution buckets on any platform: LTX-2.5 trains
 /// on prepared latent packs whose geometry is fixed by the bundle, so there is no spatial edge to
-/// bucket. Every other builtin target advertises [`RESOLUTION_BUCKETS_SUPPORT_LIMIT`].
-const RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS: [&str; 1] = ["ltx_2_5_video_lora"];
+/// bucket; the Iris-3B trainers (generation, depth, restoration) declare no epic 2123 technique —
+/// they bucket by their own `shape_policy` / `aspect_ratio_bucket` options instead. Every other
+/// builtin target advertises [`RESOLUTION_BUCKETS_SUPPORT_LIMIT`].
+const RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS: [&str; 4] = [
+    "ltx_2_5_video_lora",
+    "iris_3b_generation",
+    "iris_3b_depth",
+    "iris_3b_restore",
+];
 
 /// Whether `target` advertises resolution-bucket support.
 pub fn target_supports_resolution_buckets(target: &TrainingTarget) -> bool {
