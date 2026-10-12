@@ -23,3 +23,7 @@ pub(crate) fn task_weights(task: IrisTask) -> Vec<u8> {
     bytes.extend_from_slice(&header);
     bytes
 }
+
+/// The released `speridlabs/iris-3b` backbone `config.yaml` (Apache-2.0), so tests that stage an
+/// install run the engine's own plan resolution against the real architecture (sc-25689).
+pub(crate) const RELEASE_CONFIG_YAML: &str = include_str!("../tests/fixtures/iris/config.yaml");

@@ -1,4 +1,5 @@
 import React from "react";
+import { itemSplit } from "../../training/irisCurricula.js";
 
 import { AssetThumbnail } from "../../components/assetMedia.jsx";
 import { CompactSelector } from "../../components/CompactSelector.jsx";
@@ -97,7 +98,7 @@ export function DatasetEditorPanel({
     onImportParquet, onDeleteDataset, deletingDataset,
   } = datasetSession;
   const {
-    captionDraftById, namedCaptionsById = {}, onPreview, updateCaption, captioning, addDialogOpen,
+    captionDraftById, namedCaptionsById = {}, holdoutById = {}, onToggleHoldout, onPreview, updateCaption, captioning, addDialogOpen,
     selectedAssetIds, addAssets, handleImport, captionDialog, updateCaptionSetting,
     runCaptionJob, toggleCaptionExtraOption, displayedCaptionPrompt, captionSettings,
     captionModelMissing = false, onDownloadCaptionModel, captionModelSizeLabel = "",
@@ -540,6 +541,16 @@ export function DatasetEditorPanel({
                       rows={3}
                       value={draft.text ?? ""}
                     />
+                    {onToggleHoldout ? (
+                      <label className="training-checkbox-field" title="Iris training: a holdout item is never trained on; it is the holdout set the run validates against.">
+                        <input
+                          checked={itemSplit(holdoutById, asset.id, savedItem) === "holdout"}
+                          onChange={(event) => onToggleHoldout(asset.id, event.target.checked)}
+                          type="checkbox"
+                        />
+                        Holdout (validation only)
+                      </label>
+                    ) : null}
                     {namedCaptionFields.length ? (
                       <span
                         className="training-field-hint training-caption-named-fields"

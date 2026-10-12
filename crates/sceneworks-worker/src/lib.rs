@@ -272,6 +272,35 @@ pub use iris_task_training::{
     iris_task_dataset_report, iris_task_training_unavailable,
     task_objective as iris_task_objective,
 };
+// Iris-3B curricula, REPA, holdout and fp16 (sc-25689): the engine's stage presets, its plan
+// resolution (typed refusals + receipts) and the REPA teacher TRAINING resource.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code, unused_imports)
+)]
+mod iris_curricula;
+pub use iris_curricula::{
+    installed_repa_teacher, iris_stage_presets, IrisPlanRefusal, ResolvedIrisPlan,
+};
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub use iris_curricula::{resolve_iris_config, resolve_iris_plan};
+// Multi-rank Iris training on one host (sc-25689): the worker launches `world_size` rank processes
+// (this same executable, re-entered through [`iris_rank_entry`]) and coordinates them.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code, unused_imports)
+)]
+mod iris_dist;
+pub use iris_dist::iris_rank_entry;
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
 // into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
 // helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.

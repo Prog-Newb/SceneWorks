@@ -6028,6 +6028,49 @@
       }
     },
     {
+      // sc-25689 (epic 25678, E4) — the frozen DINOv2-B/14 REPA teacher of Iris 3B generation
+      // training (upstream `repa.teacher: dinov2_vitb14`, the Hugging Face mirror of the hub
+      // checkpoint at the revision `gen_core::iris::train::repa::DINOV2_BASE_HF_REVISION` pins).
+      // TRAINING-ONLY resource: read by the `iris_3b` TRAINER only, staged as its `repa_teacher`
+      // load component after the worker re-checks the pinned size + sha256
+      // (`iris_curricula::verify_repa_teacher_file`). Never part of the generation inference
+      // closure (`iris_3b` installs and generates without it), never downloaded at training time,
+      // and never a routable `model` of any job.
+      "id": "iris_repa_teacher_dinov2_base",
+      "name": "Iris REPA Teacher — DINOv2-B/14",
+      "family": "iris",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/facebook/dinov2-base",
+      "downloads": [
+        {
+          // Upstream, pinned to an immutable revision, not re-hosted. EXACT bytes (346345912,
+          // sha256 d73036b5…0841 — the LFS pointer at this revision).
+          "provider": "huggingface",
+          "repo": "facebook/dinov2-base",
+          "revision": "f9e44c814b77203eaa57a6bdbbd535f21ede1415",
+          "files": ["model.safetensors"],
+          "estimatedSizeBytes": 346345912
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/facebook/dinov2-base"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Iris REPA Teacher — DINOv2-B/14",
+        "description": "Training-only: the frozen DINOv2-B/14 image encoder (facebook/dinov2-base, ~346 MB) that Iris 3B training aligns its features to when REPA / iREPA is on (the official stage-1 curriculum). Not needed for generating with Iris 3B. Apache-2.0.",
+        "recommendedFor": []
+      }
+    },
+    {
       // sc-25682 (epic 25678, E4/E5) — Iris-3B MONOCULAR DEPTH as its own TASK install. The depth
       // task is a separate fine-tune shipped in the `depth/` folder of the same upstream repo: one
       // forward of the widened backbone conditioned on the export's shipped empty-prompt states, so

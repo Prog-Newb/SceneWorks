@@ -7,6 +7,7 @@ import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
 import { IrisTaskOptions } from "./IrisTaskOptions.jsx";
 import { IrisTrainingOptions } from "./IrisTrainingOptions.jsx";
+import { IrisCurriculaOptions } from "./IrisCurriculaOptions.jsx";
 import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Validation.jsx";
 import {
   choiceOptionsForTarget,
@@ -795,6 +796,17 @@ export function ConfigureJobPanel({
                 configValidity={configValidity}
                 fullRuns={irisContext.fullRuns}
                 previousRuns={irisContext.previousRuns}
+                updateConfigDraft={updateConfigDraft}
+              />
+            ) : null}
+            {iris ? (
+              <IrisCurriculaOptions
+                configDraft={configDraft}
+                configValidity={configValidity}
+                onApplyPreset={irisContext.applyPreset}
+                planCheck={irisContext.planCheck}
+                presets={irisContext.presets}
+                resumeMetrics={irisContext.resumeMetrics}
                 updateConfigDraft={updateConfigDraft}
               />
             ) : null}

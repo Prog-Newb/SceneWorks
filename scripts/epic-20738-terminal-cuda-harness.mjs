@@ -183,10 +183,11 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // 121 repo@revision keys including the two frozen importer authorities; sc-25679 re-recorded it
 // with the two Iris-3B keys (speridlabs/iris-3b, Qwen/Qwen3-VL-4B-Instruct): 123 keys; sc-25688
 // re-recorded it (`check-download-patterns.mjs --write`) with the three Iris restoration TRAINING
-// resources (timm/vgg16.tv_in1k, vivym/lpips, laion/CLIP-convnext_xxlarge-…-soup): 126 keys.
+// resources (timm/vgg16.tv_in1k, vivym/lpips, laion/CLIP-convnext_xxlarge-…-soup): 126 keys; sc-25689
+// re-recorded it with the Iris REPA teacher TRAINING resource (facebook/dinov2-base): 127 keys.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "c6071538c82e60cd3f121f76f052a0b1a12885088d5b3a3a647d8fe732254727";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "6da320aa0d3524e78a9a1946090138d5dff2026861d2d39a82db5bf2ce03b239";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

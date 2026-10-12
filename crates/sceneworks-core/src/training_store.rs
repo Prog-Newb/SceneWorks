@@ -1805,6 +1805,8 @@ fn materialize_external_item(
     validate_supported_modality(modality)?;
     crate::training::iris::validate_item_iris_extras(&input.extra)
         .map_err(ProjectStoreError::BadRequest)?;
+    crate::training::iris::curricula::validate_item_split(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
     let source_path = fs::canonicalize(&input.source_path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             ProjectStoreError::NotFound("Verified dataset source was unavailable".to_owned())
@@ -1898,6 +1900,8 @@ fn materialize_item(
     // source) ride in the forward-compatible extra bag; refuse a malformed map at the store
     // boundary rather than at the trainer mid-epoch.
     crate::training::iris::validate_item_iris_extras(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
+    crate::training::iris::curricula::validate_item_split(&input.extra)
         .map_err(ProjectStoreError::BadRequest)?;
     let source = resolve_item_source(project_path, project_id, &input, modality)?;
     // sc-6143: normalize a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to lossless PNG

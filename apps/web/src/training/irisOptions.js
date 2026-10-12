@@ -15,6 +15,13 @@
 import { issue } from "../validation/issues.js";
 import { asText, numberFromDraft, numericDraft } from "./drafts.js";
 import { terminalStatuses } from "../jobTypes.js";
+import {
+  IRIS_CURRICULA_SPECS,
+  curriculaInPlay,
+  curriculaIssues,
+  dottedValue,
+  nestDotted,
+} from "./irisCurricula.js";
 
 export const IRIS_TRAINING_KERNEL = "iris_train";
 export const IRIS_TRAINING_TARGET_ID = "iris_3b_generation";
@@ -85,6 +92,8 @@ export const IRIS_OPTION_SPECS = Object.freeze({
 });
 
 export const IRIS_OPTION_KEYS = Object.freeze(Object.keys(IRIS_OPTION_SPECS));
+// Every drafted key: the S7 options plus the S11 curricula keys (sc-25689, irisCurricula.js).
+const GENERATION_SPECS = { ...IRIS_OPTION_SPECS, ...IRIS_CURRICULA_SPECS };
 
 // Draft value for one key: strings for inputs/selects, booleans (or "" = trainer default) for
 // toggles, an array of names for caption_fields, "a, b" text for milestone steps, a pair of
@@ -111,9 +120,9 @@ export function draftValue(spec, value) {
 }
 
 // The draft of an options bag: every key of `specs` (generation's by default) as an input value.
-export function irisDraftFromDefaults(defaults, specs = IRIS_OPTION_SPECS) {
+export function irisDraftFromDefaults(defaults, specs = GENERATION_SPECS) {
   const source = defaults && typeof defaults === "object" ? defaults : {};
-  return Object.fromEntries(Object.keys(specs).map((key) => [key, draftValue(specs[key], source[key])]));
+  return Object.fromEntries(Object.keys(specs).map((key) => [key, draftValue(specs[key], dottedValue(source, key))]));
 }
 
 // One pass over an options bag (generation, depth or restoration): `values` = the filled, in-play,
@@ -240,6 +249,7 @@ function irisRunContext(configDraft = {}) {
 // Whether `key` applies to this run. A key that is not in play is neither rendered as a live
 // control nor sent nor validated.
 export function irisOptionInPlay(key, configDraft) {
+  if (key in IRIS_CURRICULA_SPECS) return curriculaInPlay(key, configDraft);
   const run = irisRunContext(configDraft);
   switch (key) {
     case "init":
@@ -266,7 +276,7 @@ export function irisOptionInPlay(key, configDraft) {
 // `advanced.iris` for the request: only filled, in-play, in-domain keys.
 function irisBag(configDraft) {
   return parseOptionsBag(
-    IRIS_OPTION_SPECS,
+    GENERATION_SPECS,
     configDraft.iris,
     (key) => irisOptionInPlay(key, configDraft),
     "iris",
@@ -275,7 +285,7 @@ function irisBag(configDraft) {
 }
 
 export function irisOptionsSnapshot(configDraft = {}) {
-  return irisBag(configDraft).values;
+  return nestDotted(irisBag(configDraft).values);
 }
 
 // The request-level keys that ride beside `advanced.iris`.
@@ -296,6 +306,7 @@ export function irisUpstreamPromptsOn(configDraft = {}) {
 // The Iris-specific rules (fields `iris.<key>` outline their own inputs).
 export function irisValidation(configDraft = {}) {
   const { issues } = irisBag(configDraft);
+  for (const [field, message] of curriculaIssues(configDraft)) issues.push(issue.error(field, message));
   const iris = configDraft.iris ?? {};
   const run = irisRunContext(configDraft);
   const { loadFromJobId } = irisRequestKeys(configDraft);

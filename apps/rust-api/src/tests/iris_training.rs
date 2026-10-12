@@ -8,14 +8,14 @@ const IRIS_TARGET: &str = "iris_3b_generation";
 
 /// Holds the HF-env lock (via [`isolate_hf_cache`]) and pins the MLX unified-memory emulation cap,
 /// so the macOS submit-time memory floor judges a deterministic budget on any host.
-struct IrisEnv {
+pub(super) struct IrisEnv {
     _hf: HfCacheEnvGuard,
     previous_cap: Option<String>,
 }
 
 const MLX_CAP_ENV: &str = "SCENEWORKS_MLX_MEMORY_CAP_GB";
 
-fn iris_env(cap_gb: &str) -> IrisEnv {
+pub(super) fn iris_env(cap_gb: &str) -> IrisEnv {
     let hf = isolate_hf_cache();
     let previous_cap = std::env::var(MLX_CAP_ENV).ok();
     std::env::set_var(MLX_CAP_ENV, cap_gb);
@@ -36,7 +36,7 @@ impl Drop for IrisEnv {
 
 /// The adapter registry accepts the `iris` family once the generation install advertises it (S3,
 /// sc-25681, owns that declaration); stand that in so the training guardrail is satisfied.
-fn seed_iris_install(settings: &Settings) {
+pub(super) fn seed_iris_install(settings: &Settings) {
     seed_installed_training_base(&settings.data_dir, "iris_3b");
     let manifests = settings.config_dir.join("manifests");
     std::fs::create_dir_all(&manifests).expect("manifest dir");
@@ -56,7 +56,7 @@ fn seed_iris_install(settings: &Settings) {
     .expect("user models manifest");
 }
 
-async fn project(app: &axum::Router) -> String {
+pub(super) async fn project(app: &axum::Router) -> String {
     let (_, project) = request(
         app.clone(),
         "POST",
@@ -67,7 +67,7 @@ async fn project(app: &axum::Router) -> String {
     project["id"].as_str().expect("project id").to_owned()
 }
 
-async fn dataset(app: &axum::Router, project_id: &str, items: Value) -> String {
+pub(super) async fn dataset(app: &axum::Router, project_id: &str, items: Value) -> String {
     let mut built = Vec::new();
     for (index, item) in items
         .as_array()
@@ -99,7 +99,7 @@ async fn dataset(app: &axum::Router, project_id: &str, items: Value) -> String {
     dataset["id"].as_str().expect("dataset id").to_owned()
 }
 
-async fn iris_target(app: &axum::Router) -> Value {
+pub(super) async fn iris_target(app: &axum::Router) -> Value {
     let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
     registry["targets"]
         .as_array()
@@ -110,7 +110,7 @@ async fn iris_target(app: &axum::Router) -> Value {
         .clone()
 }
 
-async fn submit(
+pub(super) async fn submit(
     app: &axum::Router,
     project_id: &str,
     dataset_id: &str,
@@ -191,7 +191,7 @@ async fn iris_submit_refuses_what_the_trainer_refuses() {
             "timestepType",
         ),
         (
-            json!({"advanced": {"mixedPrecision": "fp16"}}),
+            json!({"advanced": {"mixedPrecision": "fp8"}}),
             "mixedPrecision",
         ),
         (
@@ -304,7 +304,12 @@ async fn data_walk_reports_the_unused_tail_before_launch() {
     assert_eq!(other["applies"], false);
 }
 
-async fn complete(app: &axum::Router, job_id: &str, status: &str, result: Value) -> Value {
+pub(super) async fn complete(
+    app: &axum::Router,
+    job_id: &str,
+    status: &str,
+    result: Value,
+) -> Value {
     let (code, body) = request(
         app.clone(),
         "POST",

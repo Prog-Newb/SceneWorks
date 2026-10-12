@@ -1784,6 +1784,16 @@ pub(crate) async fn create_training_job(
     // Iris resume / new phase / load-from: the client named a previous run; SceneWorks derives the
     // checkpoint/export path from that run's trusted ids and hands it to the trainer.
     crate::iris_training::resolve_iris_run_sources(&state, &project_id, &mut plan).await?;
+    // Iris curricula / REPA / distributed (sc-25689): lineage, teacher, topology and the engine's
+    // own plan resolution, and the receipts the run and its registered output carry.
+    let iris_receipts = crate::iris_curricula::check_iris_submit(
+        &state,
+        &project_id,
+        target,
+        &plan,
+        payload.dry_run,
+    )
+    .await?;
     // Restoration's synthetic-degradation overrides go through the engine's own parser (unknown
     // Real-ESRGAN keys, bad ranges, a kernel larger than the crop) before a job exists.
     if iris_task == Some(sceneworks_core::training::iris::IrisObjective::Restoration) {
@@ -1884,6 +1894,12 @@ pub(crate) async fn create_training_job(
                 is_base_checkpoint,
                 &target.base_model,
             );
+            if let Some(receipts) = &iris_receipts {
+                entry.insert(
+                    crate::iris_curricula::IRIS_RECEIPTS_KEY.to_owned(),
+                    receipts.clone(),
+                );
+            }
         }
     }
 
@@ -1939,6 +1955,12 @@ pub(crate) async fn create_training_job(
     job_payload.insert("outputName".to_owned(), Value::String(output_name));
     job_payload.insert("plan".to_owned(), plan_value);
     job_payload.insert("manifestEntry".to_owned(), manifest_entry);
+    if let Some(receipts) = iris_receipts {
+        job_payload.insert(
+            crate::iris_curricula::IRIS_RECEIPTS_KEY.to_owned(),
+            receipts,
+        );
+    }
     // Route-owned DATA for the model-source seam: a real training run loads this base model, so
     // it must carry the same typed identity as generation. The seam resolves and preflights it.
     job_payload.insert(

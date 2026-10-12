@@ -121,7 +121,7 @@ fn plan_network_type(plan: &TrainingPlan) -> String {
         .to_ascii_lowercase()
 }
 
-fn file_stem(file_name: &str) -> Option<String> {
+pub(crate) fn file_stem(file_name: &str) -> Option<String> {
     if !is_plain_relative_file(file_name) {
         return None;
     }
@@ -134,7 +134,7 @@ fn file_stem(file_name: &str) -> Option<String> {
 
 /// The output directory a previous training job wrote, RECOMPUTED from its trusted ids (the same
 /// discipline as the completion registrars): never read back from the mutable job payload's paths.
-async fn trusted_previous_output_dir(
+pub(crate) async fn trusted_previous_output_dir(
     state: &AppState,
     job: &JobSnapshot,
 ) -> Result<PathBuf, ApiError> {
@@ -188,7 +188,7 @@ fn newest_complete_checkpoint(root: &FsPath) -> Option<PathBuf> {
 }
 
 /// Load and vet the previous Iris training job a request names.
-async fn previous_iris_run(
+pub(crate) async fn previous_iris_run(
     state: &AppState,
     project_id: &str,
     job_id: &str,

@@ -1308,6 +1308,23 @@
       ]
     },
     {
+      "id": "iris-repa-teacher",
+      "models": [
+        "iris_repa_teacher_dinov2_base"
+      ],
+      "name": "DINOv2-B/14 (facebook/dinov2-base) — Iris REPA training teacher",
+      "publisher": "Meta AI (FAIR)",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/facebook/dinov2-base",
+      "usage": "Training-only resource of Iris 3B generation training (Training Studio, sc-25689): the frozen DINOv2-B/14 image encoder whose patch features REPA / iREPA aligns the trained backbone to. Its own Model Manager install, pinned to an immutable Hugging Face revision, checked against its pinned size and sha256 before every training run, downloaded from its upstream repository (NOT re-hosted by SceneWorks), and never used for generation or any other inference. Apache-2.0.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "iris-repa-teacher-apache"
+        }
+      ]
+    },
+    {
       "id": "iris-restore-training",
       "models": [
         "iris_restore_train_vgg16",
