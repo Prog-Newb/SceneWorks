@@ -1686,12 +1686,40 @@ pub(super) async fn generate_candle_minimax_h3(
                         .to_owned(),
                 )
             })?;
-    if let Some(error) = crate::vram_gate::minimax_h3_fit_error(
+    // CUDA copies/kernel CSR are bounded at full tile density, so this cold-load
+    // envelope is independent of percentage/count/layer/step controls. The common
+    // queued gate consumes the complete typed input.veda supplied by the request parser.
+    let sparse_controls = request
+        .advanced
+        .get("veda")
+        .and_then(|v| v.get("enabled"))
+        .and_then(Value::as_bool)
+        .filter(|&v| v)
+        .map(|_| gen_core::VedaRequest {
+            enabled: true,
+            ..Default::default()
+        });
+    let sparse_bound = gen_core::veda::workspace::for_video_request(
+        gen_core::veda::workspace::Request {
+            veda: sparse_controls.as_ref(),
+            width: request.width,
+            height: request.height,
+            frames,
+            count: 1,
+            prompt: &request.prompt,
+            conditioning: &conditioning,
+            reference_image_short_edge,
+        },
+        gen_core::veda::workspace::Backend::Cuda,
+    )
+    .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+    if let Some(error) = crate::vram_gate::minimax_h3_fit_error_with_sparse(
         &request.model_manifest_entry,
         load.tier,
         adapter_bytes,
         &settings.gpu_id,
         super::candle::candle_video_vram_budget(settings).await,
+        sparse_bound.as_ref(),
     ) {
         return Err(error);
     }

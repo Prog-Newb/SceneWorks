@@ -9332,7 +9332,9 @@ fn bernini_editing_reference_modes_real_weights() {
     }
 }
 
-// ===================== SCAIL-2 validation (epic 5439 / sc-5450) =====================
+// ===================== SCAIL-2 validation (epic 5439 / sc-5450) ==============}
+
+#[cfg(target_os = "macos")]
 
 /// Only the `scail2_14b` catalog id routes to the SCAIL-2 engine (sc-5448). Every other video
 /// family (Wan/LTX/SVD/Bernini/image ids) is `None`, so they keep their own routing.
@@ -17930,12 +17932,30 @@ fn drive_minimax_h3_arm_in_project_with_env(
     project_path: &Path,
     extra_env: &[(&str, &str)],
 ) -> WorkerResult<(DecodedVideo, Value)> {
+    drive_minimax_h3_arm_in_project_with_loader(
+        tier_root,
+        base_root,
+        request,
+        project_path,
+        extra_env,
+        probe.loader(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn drive_minimax_h3_arm_in_project_with_loader(
+    tier_root: &Path,
+    base_root: &Path,
+    request: &VideoRequest,
+    project_path: &Path,
+    extra_env: &[(&str, &str)],
+    loader: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static,
+) -> WorkerResult<(DecodedVideo, Value)> {
     let settings = Settings {
         data_dir: minimax_h3_data_dir(tier_root),
         ..offline_settings()
     };
     let job = minimax_h3_job_snapshot();
-    let loader = probe.loader();
     let hf_cache = tier_root.join("unused-hf-cache");
     let project_path = project_path.to_path_buf();
     let mut env: Vec<(&str, &str)> = vec![
@@ -21433,4 +21453,76 @@ fn veda_result_persistence_discards_request_carried_observations_without_provide
     let cleaned = record_veda_outcome(raw, None);
     assert!(cleaned.get("vedaExecution").is_none());
     assert_eq!(cleaned["veda"]["enabled"], true);
+}
+
+#[cfg(target_os = "macos")]
+struct VedaAdmissionProbe(Box<dyn Generator>);
+#[cfg(target_os = "macos")]
+impl Generator for VedaAdmissionProbe {
+    fn descriptor(&self) -> &gen_core::ModelDescriptor {
+        self.0.descriptor()
+    }
+    fn validate(&self, r: &GenerationRequest) -> gen_core::Result<()> {
+        self.0.validate(r)
+    }
+    fn generate(
+        &self,
+        r: &GenerationRequest,
+        p: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<GenerationOutput> {
+        self.0.generate(r, p)
+    }
+    fn veda_workspace_bound(
+        &self,
+        r: gen_core::veda::workspace::Request<'_>,
+    ) -> gen_core::Result<Option<gen_core::veda::workspace::WorkspaceBound>> {
+        if r.veda.is_some_and(|v| v.enabled) {
+            Err(gen_core::Error::Msg(
+                "CPU Veda admission bound refusal before generate".into(),
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+}
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_veda_queued_request_prices_bound_before_engine_generate() {
+    for enabled in [false, true] {
+        let tiers = minimax_h3_tier_root(
+            "h3_veda_admission_",
+            &["q4"],
+            &["transformer", "transformer_ref"],
+        );
+        let base = minimax_h3_base_root("h3_veda_admission_base_");
+        let probe = ArmProbe::default();
+        let request = minimax_h3_request(
+            "minimax_h3",
+            json!({"advanced":{"veda":{"enabled":enabled}}}),
+        );
+        let loader = probe.loader();
+        let result = drive_minimax_h3_arm_in_project_with_loader(
+            tiers.path(),
+            base.path(),
+            &request,
+            &tiers.path().join("unused-project"),
+            &[],
+            move |id, spec| {
+                let inner = loader(id, spec)?;
+                Ok(Box::new(VedaAdmissionProbe(inner)))
+            },
+        );
+        if enabled {
+            let error = result
+                .err()
+                .expect("enabled bound refusal must propagate before generation");
+            assert!(error
+                .to_string()
+                .contains("CPU Veda admission bound refusal"));
+            assert!(probe.request.lock().unwrap().is_none());
+        } else {
+            assert!(result.is_ok());
+            assert!(probe.request.lock().unwrap().is_some());
+        }
+    }
 }

@@ -2922,6 +2922,18 @@ pub(super) async fn generate_video_using(
                     &admission_mode,
                     generator.memory_strategy_contract(),
                 )?;
+                let sparse_bound = generator
+                    .veda_workspace_bound(gen_core::veda::workspace::Request {
+                        veda: input.veda.as_ref(),
+                        width: input.width,
+                        height: input.height,
+                        frames: input.frames,
+                        count: 1,
+                        prompt: &input.prompt,
+                        conditioning: &input.conditioning,
+                        reference_image_short_edge: input.reference_image_short_edge,
+                    })
+                    .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
                 let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {
                     model_id: &admission_model_id,
                     model_family: &admission_model_family,
@@ -2944,20 +2956,20 @@ pub(super) async fn generate_video_using(
                 };
                 // Evidence is the preflight: an unsupported request stays direct generation without
                 // attempting a platform memory probe that could fail independently of admission.
-                let admission_runtime =
-                    if crate::video_admission::packaged_video_evidence_covers_request(
+                let admission_runtime = if sparse_bound.is_some()
+                    || crate::video_admission::packaged_video_evidence_covers_request(
                         generator,
                         &admission_inputs,
                     ) {
-                        crate::video_admission::live_video_runtime_state(
-                            engine_id,
-                            cache_state,
-                            load_policy,
-                            provider_resident_bytes,
-                        )?
-                    } else {
-                        None
-                    };
+                    crate::video_admission::live_video_runtime_state(
+                        engine_id,
+                        cache_state,
+                        load_policy,
+                        provider_resident_bytes,
+                    )?
+                } else {
+                    None
+                };
                 let admission_headroom_bytes = match admission_runtime {
                     Some(runtime) => spec_headroom_bytes
                         .checked_sub(runtime.budget.reserved_headroom_bytes)
@@ -2974,9 +2986,18 @@ pub(super) async fn generate_video_using(
                 };
                 admission_inputs.runtime = admission_runtime;
                 admission_inputs.headroom_bytes = admission_headroom_bytes;
-                let outcome =
-                    crate::video_admission::admit_video_generation(generator, admission_inputs);
-                apply_video_admission_outcome(&mut input, outcome)?;
+                if let Some(bound) = &sparse_bound {
+                    crate::video_admission::admit_veda_workspace(
+                        generator.memory_strategy_contract(),
+                        bound,
+                        admission_runtime,
+                        spec_headroom_bytes,
+                    )?;
+                } else {
+                    let outcome =
+                        crate::video_admission::admit_video_generation(generator, admission_inputs);
+                    apply_video_admission_outcome(&mut input, outcome)?;
+                }
                 let mut on_progress = |progress: Progress| {
                     // A closed channel means the consumer loop returned early (POST failure /
                     // 409); trip the engine flag so the denoise bails instead of running unheard
