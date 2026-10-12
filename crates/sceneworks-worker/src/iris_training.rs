@@ -55,6 +55,74 @@ pub(crate) fn training_lane() -> &'static str {
     }
 }
 
+/// The accelerator a rank occupies on `lane` (refusal text).
+pub(crate) fn device_noun(lane: &str) -> &'static str {
+    if lane == "mlx" {
+        "Mac GPU"
+    } else {
+        "GPU"
+    }
+}
+
+/// The admission decision for a whole Iris run (sc-25689) on a worker with `devices` accelerators:
+/// the declared floor of ONE rank (+ the REPA teacher) times the ranks sharing the busiest device,
+/// against that device's capacity. Missing evidence refuses, exactly like [`iris_memory_refusal`].
+pub(crate) fn iris_run_memory_refusal(
+    lane: &str,
+    config: &sceneworks_core::training::TrainingConfig,
+    devices: u64,
+    capacity_gb: Option<f64>,
+) -> Option<String> {
+    use sceneworks_core::training::iris::curricula;
+    let world = curricula::iris_world_size(config);
+    let ranks = curricula::ranks_per_device(world, devices);
+    let network_type = config
+        .advanced
+        .get("networkType")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("lora");
+    let floor = curricula::iris_run_memory_floor_gb(lane, config, devices);
+    let repa = sceneworks_core::training::iris::iris_options(config)
+        .map(|options| curricula::iris_repa_enabled(&options))
+        .unwrap_or(false);
+    let mut shape = run_shape(network_type, config.resolution);
+    if repa {
+        shape.push_str(" with REPA (+ the DINOv2 teacher)");
+    }
+    if ranks > 1 {
+        shape.push_str(&format!(
+            " × {ranks} ranks sharing one {}",
+            device_noun(lane)
+        ));
+    }
+    memory_refusal_for_floor(lane, floor, &shape, capacity_gb)
+}
+
+fn run_shape(network_type: &str, resolution: u32) -> String {
+    let artifact = if network_type.trim().eq_ignore_ascii_case("full") {
+        "a full fine-tune"
+    } else {
+        "an adapter (LoRA/LoKr) run"
+    };
+    format!("{artifact} at {resolution}px")
+}
+
+/// The submit-time twin of the worker's run gate for the co-located macOS API (sc-25689): the
+/// declared floor of the whole run (REPA, ranks sharing the one Mac GPU). `None` off macOS.
+pub fn iris_training_run_memory_error(
+    config: &sceneworks_core::training::TrainingConfig,
+) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        iris_run_memory_refusal("mlx", config, 1, mlx_training_capacity_gb())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = config;
+        None
+    }
+}
+
 fn capacity_noun(lane: &str) -> &'static str {
     if lane == "mlx" {
         "unified memory"
@@ -73,27 +141,38 @@ pub(crate) fn iris_memory_refusal(
     resolution: u32,
     capacity_gb: Option<f64>,
 ) -> Option<String> {
-    let artifact = if network_type.trim().eq_ignore_ascii_case("full") {
-        "a full fine-tune"
-    } else {
-        "an adapter (LoRA/LoKr) run"
-    };
-    let noun = capacity_noun(lane);
-    let Some(floor) = sceneworks_core::training::iris::iris_training_memory_floor_gb(
+    let floor = sceneworks_core::training::iris::iris_training_memory_floor_gb(
         lane,
         network_type,
         resolution,
-    ) else {
+    );
+    memory_refusal_for_floor(
+        lane,
+        floor,
+        &run_shape(network_type, resolution),
+        capacity_gb,
+    )
+}
+
+/// [`iris_memory_refusal`] for an already-resolved declared `floor` of a run described by `shape`.
+fn memory_refusal_for_floor(
+    lane: &str,
+    floor: Option<u32>,
+    shape: &str,
+    capacity_gb: Option<f64>,
+) -> Option<String> {
+    let noun = capacity_noun(lane);
+    let Some(floor) = floor else {
         return Some(format!(
-            "Iris 3B training declares no memory floor for {artifact} at {resolution}px on the \
-             {lane} lane, so it is refused rather than admitted without a bound."
+            "Iris 3B training declares no memory floor for {shape} on the {lane} lane, so it is \
+             refused rather than admitted without a bound."
         ));
     };
     let Some(capacity) = capacity_gb else {
         return Some(format!(
-            "Iris 3B training needs at least {floor} GB of {noun} for {artifact} at \
-             {resolution}px (a declared floor, not yet measured), but this machine's {noun} could \
-             not be read, so the run is refused rather than admitted without a bound."
+            "Iris 3B training needs at least {floor} GB of {noun} for {shape} (a declared floor, \
+             not yet measured), but this machine's {noun} could not be read, so the run is \
+             refused rather than admitted without a bound."
         ));
     };
     // Unified memory is shared with macOS and the other apps, so an MLX floor is judged against the
@@ -116,10 +195,10 @@ pub(crate) fn iris_memory_refusal(
             String::new()
         };
         format!(
-            "Iris 3B training needs at least {floor} GB of {noun} for {artifact} at \
-             {resolution}px (a declared floor, not yet measured), but this machine has ~{} GB\
-             {reserve_note}. Lower the training resolution, train a LoRA/LoKr adapter instead of \
-             a full fine-tune, or run on a machine with more memory.",
+            "Iris 3B training needs at least {floor} GB of {noun} for {shape} (a declared floor, \
+             not yet measured), but this machine has ~{} GB{reserve_note}. Lower the training \
+             resolution, train a LoRA/LoKr adapter instead of a full fine-tune, run fewer ranks \
+             on one device, or run on a machine with more memory.",
             capacity.round() as i64
         )
     })
@@ -278,6 +357,7 @@ mod job_tests {
         request: Option<TrainingRequest>,
         weights: Option<PathBuf>,
         text_encoder: Option<PathBuf>,
+        teacher: Option<PathBuf>,
         loads: u32,
     }
 
@@ -463,6 +543,12 @@ mod job_tests {
         for file in ["config.yaml", "model.safetensors"] {
             backbone = stage(data, BACKBONE_REPO, BACKBONE_REVISION, file);
         }
+        // The worker resolves the engine plan against the backbone's real architecture (sc-25689).
+        std::fs::write(
+            backbone.join("config.yaml"),
+            crate::iris_test_weights::RELEASE_CONFIG_YAML,
+        )
+        .unwrap();
         let mut text_encoder = PathBuf::new();
         for file in [
             "config.json",
@@ -520,6 +606,17 @@ mod job_tests {
         items: usize,
         configure: impl FnOnce(&mut sceneworks_core::training::TrainingConfig),
     ) -> TrainingPlan {
+        plan_with_dataset(data, backbone, items, |_| {}, configure)
+    }
+
+    /// [`plan`] with the dataset adjusted before the plan is built (e.g. holdout items).
+    fn plan_with_dataset(
+        data: &Path,
+        backbone: &Path,
+        items: usize,
+        adjust: impl FnOnce(&mut TrainingDataset),
+        configure: impl FnOnce(&mut sceneworks_core::training::TrainingConfig),
+    ) -> TrainingPlan {
         let target = builtin_training_targets()
             .targets
             .into_iter()
@@ -527,7 +624,8 @@ mod job_tests {
             .expect("the Iris target is registered");
         let mut config = target.defaults.clone();
         configure(&mut config);
-        let (dataset, root) = dataset(data, items);
+        let (mut dataset, root) = dataset(data, items);
+        adjust(&mut dataset);
         let output = data.join("loras/lora_iris");
         build_training_plan(BuildTrainingPlan {
             job_id: "job-iris-train",
@@ -596,6 +694,9 @@ mod job_tests {
                 }
                 if let Some(WeightsSource::Dir(dir)) = spec.components.get("text_encoder") {
                     seen.text_encoder = Some(dir.clone());
+                }
+                if let Some(WeightsSource::Dir(dir)) = spec.components.get("repa_teacher") {
+                    seen.teacher = Some(dir.clone());
                 }
                 Ok(Box::new(FakeIrisTrainer {
                     descriptor,
@@ -950,5 +1051,505 @@ mod job_tests {
         let last = terminal(&posts);
         assert_eq!(last["status"], "canceled", "{last:#}");
         assert!(last["result"].is_null(), "{last:#}");
+    }
+
+    // ---- S11 (sc-25689): curricula, REPA, holdout, fp16 and multi-rank execution -------------
+
+    const TEACHER_BYTES: &[u8] = b"a stand-in dinov2-base model.safetensors";
+
+    fn stage_teacher(data: &Path) -> PathBuf {
+        let snapshot = stage(
+            data,
+            sceneworks_core::training::iris::curricula::IRIS_REPA_TEACHER_REPO,
+            sceneworks_core::training::iris::curricula::IRIS_REPA_TEACHER_REVISION,
+            "model.safetensors",
+        );
+        std::fs::write(snapshot.join("model.safetensors"), TEACHER_BYTES).unwrap();
+        snapshot
+    }
+
+    /// Every S11 option the Studio offers reaches the trainer: the curriculum, shape, RoPE, REPA,
+    /// activation-checkpointing, validation, logging, retention, global-batch and preview keys in
+    /// the bag verbatim, fp16 as the engine dtype, the holdout flag on its item, and the REPA
+    /// teacher staged as the `repa_teacher` component after its integrity check.
+    #[test]
+    fn every_offered_s11_option_reaches_the_trainer_with_the_teacher_staged() {
+        let _env = isolated_env("64");
+        let _pin = crate::iris_curricula::test_teacher_integrity(Some(TEACHER_BYTES));
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        let teacher = stage_teacher(&data);
+        let iris = json!({
+            "stage": "stage1_256",
+            "run_name": "iris s1",
+            "tracking": {"project": "iris", "tags": ["s1"]},
+            "shape_policy": "area",
+            "shape_align": 32,
+            "shape_max_ratio": 2.0,
+            "rope_aspect": "square",
+            "repa": {"weight": 0.5, "variant": "irepa", "spatial_norm_gamma": 0.8,
+                     "proj_hidden_dim": 512, "teacher_image_size": 224,
+                     "teacher_match_student": true, "layer": 10},
+            "activation_checkpointing": "selective_layer",
+            "ac_selective_every": 3,
+            "val_every_steps": 5,
+            "val_samples": 2,
+            "log_every": 5,
+            "log_block_grad_norms": true,
+            "save_every_epochs": 1,
+            "expected_global_batch": 4,
+            "scale_warmup_by_world": false,
+            "perf": {"lazy_sync": true},
+            "dist": {"strategy": "ddp"},
+            "preview_at_step_one": true,
+            "preview_order": 1,
+            "upstream_validation_prompts": ["a lighthouse at dusk"]
+        });
+        let plan = plan_with_dataset(
+            &data,
+            &install.backbone,
+            3,
+            |dataset| {
+                dataset.items[2]
+                    .extra
+                    .insert("split".into(), json!("holdout"));
+            },
+            |config| {
+                config.batch_size = 2;
+                config.gradient_accumulation = 2;
+                config.steps = 40;
+                config.save_every = 10;
+                config
+                    .advanced
+                    .insert("mixedPrecision".into(), json!("fp16"));
+                config.advanced.insert("sampleEvery".into(), json!(10));
+                config.advanced.insert("samplePrompts".into(), json!([]));
+                config.advanced.insert("iris".into(), iris.clone());
+            },
+        );
+        let run = run(Behavior::Completes, plan, &data);
+        assert!(run.outcome.is_ok(), "{:?}\n{:#?}", run.outcome, run.posts);
+        assert_eq!(
+            run.seen.teacher.as_deref(),
+            Some(teacher.as_path()),
+            "the verified teacher is the trainer's repa_teacher component"
+        );
+        let request = run.seen.request.expect("the trainer ran");
+        assert_eq!(request.config.train_dtype, "fp16");
+        assert_eq!(request.config.model_options.get("iris"), Some(&iris));
+        assert_eq!(
+            request.items[2].model_options.get("split"),
+            Some(&json!("holdout"))
+        );
+        assert!(request.items[0].model_options.get("split").is_none());
+        // The engine-resolved receipts ride on the result.
+        let result = &terminal(&run.posts)["result"];
+        let resolved = &result["irisPlan"];
+        assert_eq!(resolved["stage"], json!("stage1_256"));
+        assert_eq!(resolved["globalBatch"], json!(4));
+        assert_eq!(
+            resolved["activationCheckpointing"],
+            json!("selective_layer")
+        );
+        assert_eq!(resolved["repa"]["variant"], json!("irepa"));
+        assert_eq!(resolved["holdout"]["items"], json!(1));
+        assert_eq!(resolved["mixedPrecision"], json!("fp16"));
+        assert!(resolved["shapePolicy"]
+            .as_str()
+            .unwrap()
+            .starts_with("area:"));
+        assert!(resolved["dataIdentity"]
+            .as_str()
+            .unwrap()
+            .contains("shape=area"));
+    }
+
+    /// REPA without the installed teacher is refused before the loader runs, naming the Model
+    /// Manager install; a teacher whose bytes are not the pinned ones is refused the same way.
+    #[test]
+    fn repa_needs_the_installed_verified_teacher() {
+        let _env = isolated_env("64");
+        let _pin = crate::iris_curricula::test_teacher_integrity(Some(TEACHER_BYTES));
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        let repa = |config: &mut sceneworks_core::training::TrainingConfig| {
+            config
+                .advanced
+                .insert("iris".into(), json!({"repa": {"weight": 0.5}}));
+        };
+        let run_missing = run(
+            Behavior::Completes,
+            plan(&data, &install.backbone, 2, repa),
+            &data,
+        );
+        match &run_missing.outcome {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("Model Manager"), "{message}")
+            }
+            other => panic!("REPA without a teacher must be refused, got {other:?}"),
+        }
+        assert_eq!(run_missing.seen.loads, 0);
+        let teacher = stage_teacher(&data);
+        let mut tampered = TEACHER_BYTES.to_vec();
+        tampered[0] ^= 1;
+        std::fs::write(teacher.join("model.safetensors"), &tampered).unwrap();
+        let run_tampered = run(
+            Behavior::Completes,
+            plan(&data, &install.backbone, 2, repa),
+            &data,
+        );
+        match &run_tampered.outcome {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("sha256"), "{message}")
+            }
+            other => panic!("a tampered teacher must be refused, got {other:?}"),
+        }
+        assert_eq!(run_tampered.seen.loads, 0);
+    }
+
+    /// The engine's own plan resolution refuses what only it knows (a REPA capture block outside
+    /// the 24-block trunk) before anything loads.
+    #[test]
+    fn the_engine_plan_refusals_arrive_before_load() {
+        let _env = isolated_env("64");
+        let _pin = crate::iris_curricula::test_teacher_integrity(Some(TEACHER_BYTES));
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        stage_teacher(&data);
+        let plan = plan(&data, &install.backbone, 2, |config| {
+            config
+                .advanced
+                .insert("iris".into(), json!({"repa": {"weight": 0.5, "layer": 99}}));
+        });
+        let run = run(Behavior::Completes, plan, &data);
+        match &run.outcome {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("capture block"), "{message}")
+            }
+            other => panic!("an out-of-trunk REPA layer must be refused, got {other:?}"),
+        }
+        assert_eq!(run.seen.loads, 0);
+    }
+
+    fn fleet_records_dir() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    /// Drive the REAL job path with fake rank processes. The in-process loader must never run.
+    fn run_fleet(
+        behavior: &'static str,
+        plan: TrainingPlan,
+        data: &Path,
+        records: &Path,
+        cancel_on_training: bool,
+    ) -> Run {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (outcome, posts) = runtime.block_on(async {
+            let user_cancel = CancelSwitch::default();
+            let (base_url, posts) = spawn_job_api(Arc::clone(&user_cancel)).await;
+            if cancel_on_training {
+                let posts = Arc::clone(&posts);
+                let user_cancel = Arc::clone(&user_cancel);
+                tokio::spawn(async move {
+                    loop {
+                        let training = posts.lock().unwrap().iter().any(|post: &Value| {
+                            post["message"]
+                                .as_str()
+                                .is_some_and(|message| message.starts_with("Training step"))
+                        });
+                        if training {
+                            user_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                });
+            }
+            let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
+            settings.api_url = base_url;
+            settings.data_dir = data.to_path_buf();
+            settings.heartbeat_seconds = 5;
+            let api = ApiClient::new(&settings);
+            let job: JobSnapshot =
+                serde_json::from_value(crate::tests::job_snapshot_json("job-iris-train", false))
+                    .unwrap();
+            let loader = |_: &str, _: &LoadSpec| -> gen_core::Result<Box<dyn Trainer>> {
+                panic!("a multi-rank run never loads a trainer in the worker process")
+            };
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(120),
+                crate::training_jobs::run_training_execution_drive(
+                    &api,
+                    &settings,
+                    &job,
+                    &plan,
+                    loader,
+                    Arc::new(crate::iris_dist::test_support::FakeRankLauncher {
+                        behavior,
+                        record_dir: records.to_path_buf(),
+                    }),
+                ),
+            )
+            .await
+            .expect("the training job finished");
+            let posts = posts.lock().unwrap().clone();
+            (outcome, posts)
+        });
+        for record in crate::iris_dist::test_support::records(records) {
+            assert!(
+                !crate::iris_dist::test_support::alive(record["pid"].as_u64().unwrap()),
+                "rank {} outlived the job",
+                record["rank"]
+            );
+        }
+        Run {
+            outcome,
+            posts,
+            seen: Seen::default(),
+        }
+    }
+
+    fn two_ranks(
+        share_device: bool,
+    ) -> impl FnOnce(&mut sceneworks_core::training::TrainingConfig) {
+        move |config| {
+            config.advanced.insert(
+                "iris".into(),
+                json!({"dist": {"strategy": "ddp",
+                                "world": {"world_size": 2, "share_device": share_device}}}),
+            );
+        }
+    }
+
+    /// A two-rank run: the worker coordinates two rank processes, rank 0's progress drives the job
+    /// and its export completes it, with the topology recorded on the result.
+    #[test]
+    fn a_two_rank_run_is_coordinated_and_rank_zero_completes_the_job() {
+        let _env = isolated_env("128");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        let records = fleet_records_dir();
+        let plan = plan(&data, &install.backbone, 2, two_ranks(true));
+        let run = run_fleet("complete", plan, &data, records.path(), false);
+        assert!(run.outcome.is_ok(), "{:?}\n{:#?}", run.outcome, run.posts);
+        assert_eq!(
+            crate::iris_dist::test_support::records(records.path()).len(),
+            2
+        );
+        assert!(run.posts.iter().any(|post| post["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Training step 4 of 4"))));
+        assert!(
+            !run.posts.iter().any(|post| post["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("step 99"))),
+            "rank 1's progress is not the job's"
+        );
+        let done = terminal(&run.posts);
+        assert_eq!(done["status"], "completed", "{done:#}");
+        let dist = &done["result"]["irisDistributed"];
+        assert_eq!(dist["worldSize"], json!(2));
+        assert_eq!(dist["shareDevice"], json!(true));
+        assert_eq!(dist["topology"], json!("single_host"));
+        assert_eq!(done["result"]["irisPlan"]["globalBatch"], json!(2));
+        assert_eq!(done["result"]["irisPlan"]["dist"]["world_size"], json!(2));
+    }
+
+    /// More ranks than the worker's devices without the share-device opt-in is a typed refusal
+    /// before any rank process starts; two ranks on one device need twice the declared floor.
+    #[test]
+    fn unsupported_topologies_are_refused_before_any_rank_starts() {
+        let _env = isolated_env("128");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        let records = fleet_records_dir();
+        let run = run_fleet(
+            "complete",
+            plan(&data, &install.backbone, 2, two_ranks(false)),
+            &data,
+            records.path(),
+            false,
+        );
+        match &run.outcome {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("share device"), "{message}")
+            }
+            other => panic!("2 ranks on 1 device without share_device: {other:?}"),
+        }
+        assert!(crate::iris_dist::test_support::records(records.path()).is_empty());
+        drop(_env);
+        // One adapter rank fits a 32 GB host; two on its one device do not.
+        let _small = isolated_env("32");
+        let run = run_fleet(
+            "complete",
+            plan(&data, &install.backbone, 2, two_ranks(true)),
+            &data,
+            records.path(),
+            false,
+        );
+        match &run.outcome {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("2 ranks"), "{message}")
+            }
+            other => panic!("two ranks need twice the floor: {other:?}"),
+        }
+        assert!(crate::iris_dist::test_support::records(records.path()).is_empty());
+    }
+
+    /// A rank that dies fails the job with a typed message naming it; the survivor is stopped.
+    #[test]
+    fn a_lost_rank_fails_the_job_typed() {
+        let _env = isolated_env("128");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        let records = fleet_records_dir();
+        let run = run_fleet(
+            "rank1_dies",
+            plan(&data, &install.backbone, 2, two_ranks(true)),
+            &data,
+            records.path(),
+            false,
+        );
+        match &run.outcome {
+            Err(WorkerError::Engine(message)) => {
+                assert!(message.contains("[rank_lost] on rank 1 of 2"), "{message}")
+            }
+            other => panic!("a lost rank must fail the job: {other:?}"),
+        }
+    }
+
+    /// A user cancel reaches every rank; rank 0 finishes durably, so the job ends Canceled with the
+    /// export reported for registration.
+    #[test]
+    fn a_user_cancel_fans_out_to_every_rank() {
+        let _env = isolated_env("128");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        let records = fleet_records_dir();
+        let run = run_fleet(
+            "wait_cancel",
+            plan(&data, &install.backbone, 2, two_ranks(true)),
+            &data,
+            records.path(),
+            true,
+        );
+        assert!(
+            matches!(run.outcome, Err(WorkerError::Canceled(_))),
+            "{:?}",
+            run.outcome
+        );
+        for rank in 0..2 {
+            assert!(
+                records.path().join(format!("cancel-{rank}")).is_file(),
+                "rank {rank} saw the cancel"
+            );
+        }
+        let last = terminal(&run.posts);
+        assert_eq!(last["status"], "canceled", "{last:#}");
+        assert_eq!(last["result"]["trainedArtifactExported"], json!(true));
+    }
+
+    /// The rank process itself: the SAME preflight and trainer inputs as the job, its world stamped
+    /// onto the request, progress and the export written as protocol lines, and a typed distributed
+    /// failure reported with its kind.
+    #[test]
+    fn the_rank_process_trains_with_its_world_stamped() {
+        let _env = isolated_env("64");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        let plan = plan(&data, &install.backbone, 2, two_ranks(true));
+        let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
+        settings.data_dir = data.clone();
+        let spec = crate::iris_dist::RankSpec {
+            job_id: "job-iris-train".to_owned(),
+            plan,
+        };
+        let world = crate::iris_dist::RankWorld {
+            rank: 1,
+            world_size: 2,
+            master_addr: "127.0.0.1".to_owned(),
+            master_port: 41000,
+        };
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let descriptor = crate::inference_runtime::trainer_descriptor("iris_3b").unwrap();
+        let loader_seen = Arc::clone(&seen);
+        let loader = move |_: &str, spec: &LoadSpec| {
+            if let Some(WeightsSource::Dir(dir)) = spec.components.get("text_encoder") {
+                loader_seen.lock().unwrap().text_encoder = Some(dir.clone());
+            }
+            Ok(Box::new(FakeIrisTrainer {
+                descriptor,
+                behavior: Behavior::Completes,
+                seen: Arc::clone(&loader_seen),
+                user_cancel: Arc::default(),
+            }) as Box<dyn Trainer>)
+        };
+        let mut out = Vec::new();
+        let code = crate::iris_dist::run_rank_process_using(
+            &spec,
+            &world,
+            &settings,
+            loader,
+            std::io::empty(),
+            &mut out,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&out));
+        let seen = seen.lock().unwrap();
+        let request = seen.request.as_ref().expect("the rank trained");
+        let stamped = &request.config.model_options["iris"]["dist"]["world"];
+        assert_eq!(stamped["rank"], json!(1));
+        assert_eq!(stamped["master_port"], json!(41000));
+        assert_eq!(stamped["share_device"], json!(true));
+        assert_eq!(
+            seen.text_encoder.as_deref(),
+            Some(install.text_encoder.as_path())
+        );
+        let lines: Vec<_> = String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .filter_map(crate::iris_dist::parse_message)
+            .collect();
+        assert!(matches!(
+            lines.last(),
+            Some(crate::iris_dist::RankMessage::Done { steps: 1000, .. })
+        ));
+        assert!(lines.iter().any(|line| matches!(
+            line,
+            crate::iris_dist::RankMessage::Progress {
+                progress: crate::iris_dist::WireProgress::Training { .. }
+            }
+        )));
+
+        // A launcher world that disagrees with the plan is a split world, reported typed.
+        let wrong = crate::iris_dist::RankWorld {
+            world_size: 3,
+            ..world
+        };
+        let mut out = Vec::new();
+        let code = crate::iris_dist::run_rank_process_using(
+            &spec,
+            &wrong,
+            &settings,
+            |_: &str, _: &LoadSpec| -> gen_core::Result<Box<dyn Trainer>> {
+                panic!("a split world never loads")
+            },
+            std::io::empty(),
+            &mut out,
+        );
+        assert_eq!(code, 1);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("split world"), "{text}");
     }
 }

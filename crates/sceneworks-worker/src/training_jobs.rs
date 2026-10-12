@@ -214,7 +214,7 @@ const PREPARED_BUNDLE_COORDINATOR_LOCK: &str = ".prepared-bundles.lock";
 /// Owns every verified prepared-bundle snapshot used by one preflight/run. Request paths point
 /// inside `directory`; keeping this guard alive therefore keeps the exact verified copies alive.
 #[derive(Default)]
-struct PreparedTrainingInputs {
+pub(crate) struct PreparedTrainingInputs {
     directory: Option<tempfile::TempDir>,
     ownership_lock: Option<FileLock>,
     snapshots: BTreeMap<PreparedBundleKey, PathBuf>,
@@ -690,7 +690,7 @@ fn training_error_with_prepared_cleanup(error: WorkerError, cleanup: WorkerError
     }
 }
 
-fn finish_prepared_input_operation<T>(
+pub(crate) fn finish_prepared_input_operation<T>(
     operation: WorkerResult<T>,
     prepared_inputs: PreparedTrainingInputs,
 ) -> WorkerResult<T> {
@@ -709,10 +709,10 @@ fn finish_prepared_input_operation<T>(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[derive(Debug)]
-struct PreparedTrainingRun {
-    engine_id: &'static str,
-    request: TrainingRequest,
-    prepared_inputs: PreparedTrainingInputs,
+pub(crate) struct PreparedTrainingRun {
+    pub(crate) engine_id: &'static str,
+    pub(crate) request: TrainingRequest,
+    pub(crate) prepared_inputs: PreparedTrainingInputs,
 }
 
 #[cfg(any(
@@ -728,7 +728,7 @@ impl PreparedTrainingRun {
 
     /// Drop the typed request before snapshot cleanup, preserving a primary operation error if the
     /// cleanup independently fails.
-    fn finish<T>(self, operation: WorkerResult<T>) -> WorkerResult<T> {
+    pub(crate) fn finish<T>(self, operation: WorkerResult<T>) -> WorkerResult<T> {
         let Self {
             request,
             prepared_inputs,
@@ -746,7 +746,7 @@ impl PreparedTrainingRun {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn preflight_training_run(
+pub(crate) fn preflight_training_run(
     settings: &Settings,
     plan: &TrainingPlan,
 ) -> WorkerResult<PreparedTrainingRun> {
@@ -922,7 +922,7 @@ fn training_request_from_plan(
         .collect::<WorkerResult<Vec<_>>>()?;
     Ok(TrainingRequest {
         items,
-        config: finalize_training_config(map_training_config(&plan.config), plan),
+        config: engine_training_config(plan),
         output_dir: resolve_training_output_dir(
             settings,
             &plan.output.output_dir,
@@ -1643,6 +1643,20 @@ fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> 
     config
 }
 
+/// The engine [`TrainingConfig`] a plan trains with: the shared mapping, the backend finalization
+/// and the Iris dtype passthrough. The one source for the real request, the Iris plan resolution and
+/// every rank process (sc-25689).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn engine_training_config(plan: &TrainingPlan) -> TrainingConfig {
+    crate::iris_curricula::apply_iris_train_dtype(
+        finalize_training_config(map_training_config(&plan.config), plan),
+        plan,
+    )
+}
+
 /// One progress event streamed from the blocking training thread to the async side.
 #[cfg(any(
     target_os = "macos",
@@ -1764,6 +1778,85 @@ fn resolve_trainer_components(
     )
 }
 
+/// Everything a trainer's [`LoadSpec`] is built from, resolved from the plan before any weights
+/// load: the base weights directory, LTX-2.3's bundled Gemma-3 text encoder, and the caller-staged
+/// components (the base model's pinned `coRequisite`s and, for an Iris REPA run, the integrity-checked
+/// DINOv2 teacher TRAINING resource). Shared by the in-process trainer and every Iris rank process
+/// (sc-25689), so they can never load different inputs.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) struct TrainerLoadInputs {
+    weights_dir: PathBuf,
+    text_encoder: Option<WeightsSource>,
+    components: std::collections::BTreeMap<String, WeightsSource>,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl TrainerLoadInputs {
+    pub(crate) fn resolve(
+        settings: &Settings,
+        plan: &TrainingPlan,
+        engine_id: &str,
+    ) -> WorkerResult<Self> {
+        let weights_dir = resolve_app_managed_model_dir(
+            settings,
+            &plan.target.base_model_path,
+            "Training baseModelPath",
+        )?;
+        // LTX-2.3's Gemma-3 text encoder lives OUTSIDE `weights_dir` — thread the bundled sibling onto
+        // the trainer `LoadSpec` so a self-contained install trains without a separate gemma download
+        // (sc-9989).
+        let text_encoder = training_text_encoder(engine_id, &weights_dir);
+        // Caller-staged model components (epic 13657, sc-13682): the base model's pinned
+        // `coRequisite` downloads the trainer's engine consumes — SDXL's CLIP-L/bigG tokenizers +
+        // fp16-fix VAE on candle, Iris' Qwen3-VL text encoder. A missing one fails the job with an
+        // actionable error naming the component id + repo.
+        let mut components =
+            resolve_trainer_components(engine_id, &plan.target.base_model, settings)?;
+        // Iris REPA (sc-25689): the frozen teacher is a separately installed TRAINING resource,
+        // re-verified (size + sha256) before every run and never downloaded here.
+        if let Some(teacher) = crate::iris_curricula::repa_teacher_component(settings, plan)? {
+            components.insert(
+                gen_core::iris::train::repa::TEACHER_COMPONENT.to_owned(),
+                teacher,
+            );
+        }
+        Ok(Self {
+            weights_dir,
+            text_encoder,
+            components,
+        })
+    }
+
+    /// The trainer `LoadSpec`. Load precision tracks the requested `train_dtype` (advanced
+    /// `mixedPrecision`, default bf16). The MLX Lens trainer loads its DiT at this precision and
+    /// enforces `train_dtype` against it (sc-5148), so f32 training must load at Fp32; the
+    /// cast-based MLX trainers (z-image/kolors/sdxl/wan/ltx) load dense and ignore `precision`, so
+    /// this is inert for them — the default bf16 path is byte-identical to before. The candle
+    /// trainers are lazy (sc-7817): they build the frozen base inside `train()` at the request's
+    /// `train_dtype`, so `LoadSpec.precision` is likewise inert for them and this mapping stays
+    /// harmless.
+    pub(crate) fn load_spec(self, train_dtype: &str) -> LoadSpec {
+        let load_precision = if train_dtype.trim().eq_ignore_ascii_case("f32") {
+            Precision::Fp32
+        } else {
+            Precision::Bf16
+        };
+        let mut spec = LoadSpec::new(WeightsSource::Dir(self.weights_dir));
+        spec.precision = load_precision;
+        // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family.
+        spec.text_encoder = self.text_encoder;
+        self.components
+            .into_iter()
+            .fold(spec, |spec, (id, source)| spec.with_component(id, source))
+    }
+}
+
 /// The tier a training run resolves its base + shared components from. Dense by definition: the
 /// gradient path needs unpacked projections, and the app's `TrainingTierMissing` pre-flight plus the
 /// engine's own packed-weight refusal both key off this same tier.
@@ -1818,6 +1911,35 @@ pub(crate) async fn run_training_execution_using(
         + Send
         + 'static,
 ) -> WorkerResult<()> {
+    run_training_execution_drive(
+        api,
+        settings,
+        job,
+        plan,
+        load_trainer,
+        std::sync::Arc::new(crate::iris_dist::CurrentExeLauncher),
+    )
+    .await
+}
+
+/// [`run_training_execution_using`] with the multi-rank launcher supplied too (sc-25689): an Iris
+/// run that asks for more than one rank never loads a trainer in this process — the worker becomes
+/// the coordinator of `world_size` rank processes ([`crate::iris_dist::drive_rank_fleet`]) whose
+/// rank-0 events feed the very same consumer below. Tests inject fake rank processes here.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) async fn run_training_execution_drive(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &TrainingPlan,
+    load_trainer: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn gen_core::Trainer>>
+        + Send
+        + 'static,
+    launcher: std::sync::Arc<dyn crate::iris_dist::RankLauncher>,
+) -> WorkerResult<()> {
     let backend = backend_label(&settings.gpu_id);
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
@@ -1851,30 +1973,15 @@ pub(crate) async fn run_training_execution_using(
         JsonObject::new()
     };
 
-    let weights_dir = match resolve_app_managed_model_dir(
-        settings,
-        &plan.target.base_model_path,
-        "Training baseModelPath",
-    ) {
-        Ok(weights_dir) => weights_dir,
+    let engine_id = prepared_run.engine_id;
+    // The trainer's load inputs (the base weights, LTX-2.3's bundled TE, the caller-staged
+    // components incl. the Iris REPA teacher) — resolved BEFORE the blocking thread so a missing one
+    // fails the job with an actionable error. A multi-rank run resolves them here too (each rank
+    // re-resolves its own), so a missing resource is refused before any rank process starts.
+    let load_inputs = match TrainerLoadInputs::resolve(settings, plan, engine_id) {
+        Ok(inputs) => inputs,
         Err(error) => return prepared_run.finish(Err(error)),
     };
-    let engine_id = prepared_run.engine_id;
-
-    // LTX-2.3's Gemma-3 text encoder lives OUTSIDE `weights_dir` — thread the bundled sibling onto the
-    // trainer `LoadSpec` so a self-contained install trains without a separate gemma download (sc-9989).
-    let ltx_text_encoder = training_text_encoder(engine_id, &weights_dir);
-
-    // Caller-staged model components (epic 13657, sc-13682): the base model's pinned `coRequisite`
-    // downloads the trainer's engine consumes — SDXL's CLIP-L/bigG tokenizers + fp16-fix VAE on candle.
-    // Resolved BEFORE the blocking thread (a missing one fails the job with an actionable error naming the
-    // component id + repo), then moved into the closure and folded onto the trainer `LoadSpec`. Empty for
-    // the self-contained macOS MLX SDXL trainer (its descriptor advertises none), so a no-op on macOS.
-    let train_components =
-        match resolve_trainer_components(engine_id, &plan.target.base_model, settings) {
-            Ok(components) => components,
-            Err(error) => return prepared_run.finish(Err(error)),
-        };
 
     if let Err(error) = tokio::fs::create_dir_all(&prepared_run.request.output_dir).await {
         return prepared_run.finish(Err(error.into()));
@@ -1911,35 +2018,53 @@ pub(crate) async fn run_training_execution_using(
     let cancel = request.cancel.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<TrainEvent>(64);
 
+    // Multi-rank Iris (sc-25689): this process coordinates the rank processes; it loads no trainer.
+    let fleet_world = crate::iris_dist::fleet_world_size(plan);
+    if fleet_world > 1 {
+        drop(load_inputs);
+        drop(request);
+        if let Err(error) = finish_prepared_input_operation(Ok(()), prepared_inputs) {
+            return Err(error);
+        }
+        let mut run_notes = run_notes;
+        run_notes.insert(
+            "irisDistributed".to_owned(),
+            crate::iris_dist::fleet_receipt(plan, fleet_world),
+        );
+        let fleet_settings = settings.clone();
+        let fleet_job_id = job.id.clone();
+        let fleet_plan = plan.clone();
+        let fleet_cancel = cancel.clone();
+        let blocking = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            crate::iris_dist::drive_rank_fleet(
+                &fleet_settings,
+                &fleet_job_id,
+                &fleet_plan,
+                launcher.as_ref(),
+                &tx,
+                &fleet_cancel,
+            )
+        });
+        return consume_training_events(
+            api,
+            settings,
+            job,
+            plan,
+            sample_config,
+            backend,
+            total_steps,
+            rx,
+            cancel,
+            blocking,
+            run_notes,
+        )
+        .await;
+    }
+    drop(launcher);
+
     let blocking = {
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
-            // Load precision tracks the requested `train_dtype` (advanced `mixedPrecision`, default
-            // bf16). The MLX Lens trainer loads its DiT at this precision and enforces `train_dtype`
-            // against it (sc-5148), so f32 training must load at Fp32; the cast-based MLX trainers
-            // (z-image/kolors/sdxl/wan/ltx) load dense and ignore `precision`, so this is inert for
-            // them — the default bf16 path is byte-identical to before. The candle trainers are lazy
-            // (sc-7817): they build the frozen base inside `train()` at the request's `train_dtype`,
-            // so `LoadSpec.precision` is likewise inert for them and this mapping stays harmless.
-            let load_precision = if request
-                .config
-                .train_dtype
-                .trim()
-                .eq_ignore_ascii_case("f32")
-            {
-                Precision::Fp32
-            } else {
-                Precision::Bf16
-            };
-            let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir));
-            spec.precision = load_precision;
-            // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family (TE lives
-            // inside `weights_dir`) and for legacy/env-override LTX installs.
-            spec.text_encoder = ltx_text_encoder;
-            // Fold the caller-staged components (epic 13657, sc-13682) resolved above onto the spec — the
-            // trainer's load-time gate requires them (SDXL on candle); an empty map is a no-op otherwise.
-            let spec = train_components
-                .into_iter()
-                .fold(spec, |spec, (id, source)| spec.with_component(id, source));
+            let spec = load_inputs.load_spec(&request.config.train_dtype);
             let operation = (|| {
                 let mut trainer = load_trainer(engine_id, &spec).map_err(|error| {
                     WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
@@ -2013,17 +2138,35 @@ async fn iris_training_preflight(
     };
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let capacity = crate::iris_training::candle_training_capacity_gb(&settings.gpu_id).await;
-    let network_type = advanced_str(&plan.config.advanced, "networkType", "lora");
-    if let Some(refusal) = crate::iris_training::iris_memory_refusal(
-        lane,
-        &network_type,
-        plan.config.resolution,
-        capacity,
+    // sc-25689: the topology this worker can host (its own device(s); more ranks than devices need
+    // the explicit `share_device` opt-in), then the declared floor of the busiest device — one
+    // rank's floor (+ the REPA teacher) times the ranks sharing it.
+    let devices = crate::iris_dist::visible_training_devices(settings);
+    if let Some(refusal) = sceneworks_core::training::iris::curricula::iris_topology_refusal(
+        &plan.config,
+        devices,
+        crate::iris_training::device_noun(lane),
     ) {
         return Err(WorkerError::InvalidPayload(refusal));
     }
+    if let Some(refusal) =
+        crate::iris_training::iris_run_memory_refusal(lane, &plan.config, devices, capacity)
+    {
+        return Err(WorkerError::InvalidPayload(refusal));
+    }
+    // The engine's own request resolution (stage lineage aside, which needs the checkpoint): every
+    // typed refusal — an invalid mesh, a global-batch mismatch, a REPA layer outside the trunk, a
+    // shape policy the backbone's patch cannot tile — before anything loads.
+    let backbone = resolve_app_managed_model_dir(
+        settings,
+        &plan.target.base_model_path,
+        "Training baseModelPath",
+    )?;
+    let resolved = crate::iris_curricula::resolve_iris_plan(&backbone, plan)
+        .map_err(|refusal| WorkerError::InvalidPayload(refusal.message()))?;
 
     let mut notes = JsonObject::new();
+    notes.insert("irisPlan".to_owned(), resolved.to_json());
     let Some(report) = crate::iris_training::iris_data_walk_report(
         request.items.len(),
         request.config.batch_size.max(1) as usize,

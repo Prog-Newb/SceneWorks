@@ -2852,6 +2852,7 @@ pub fn build_training_plan(
     }
     if iris::is_iris_training_kernel(&input.target.kernel) {
         iris::validate_iris_dataset_captions(&input.config, input.dataset)?;
+        iris::curricula::validate_iris_holdout(&input.config, input.dataset)?;
     }
 
     let trigger_words = match input.config.trigger_word.as_deref().map(str::trim) {

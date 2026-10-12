@@ -8,7 +8,7 @@
 //!
 //! * [`iris_generation_target`] — the one training target. Its `limits` enumerate every choice the
 //!   trainer honors (optimizer `adamw | muon`, LR scheduler `constant | cosine`, timestep sampler
-//!   `logit_normal | uniform`, train dtype `bf16 | f32`, network `lora | lokr | full`) and pin the
+//!   `logit_normal | uniform`, train dtype `bf16 | fp16 | f32`, network `lora | lokr | full`) and pin the
 //!   refused ones closed (timestep bias `balanced`, loss `mse`, no gradient checkpointing).
 //! * [`validate_iris_training_config`] — the submit-time twin of `IrisTrainPlan::resolve`'s
 //!   request-only refusals, so a bad request is a typed 400 rather than a failure after the
@@ -22,9 +22,11 @@
 //! * [`iris_training_memory_floor_gb`] — the DECLARED (measured: false) per-lane floors, so a routed
 //!   Iris training lane is never admitted unbounded. S6 owns the measured values.
 //!
-//! Out of scope here (S11 sc-25689, and the trainer refuses them typed): official stage presets,
-//! bucket/area shapes, REPA/iREPA, activation-checkpointing policies, holdout validation,
-//! distributed training. None of them is offered.
+//! The S11 surface (sc-25689) — official stage presets, bucket/area shapes, the RoPE law, REPA /
+//! iREPA, activation-checkpointing policies, holdout validation, fp16 and distributed execution —
+//! lives in [`curricula`].
+
+pub mod curricula;
 
 use serde_json::{json, Map, Value};
 
@@ -275,7 +277,8 @@ pub fn iris_generation_target() -> TrainingTarget {
         limits: object(json!({
             "rank": [1, 128],
             "alpha": [1, 128],
-            "steps": [1, 200000],
+            // The official curriculum's horizons are absolute optimizer steps (SFT ends at 665,000).
+            "steps": [1, 5000000],
             "batchSize": [1, 64],
             // Multiples of the backbone's patch size (16); never silently changed by the trainer.
             "resolutions": [256, 512, 1024],
@@ -287,7 +290,8 @@ pub fn iris_generation_target() -> TrainingTarget {
             "timestepTypes": ["logit_normal", "uniform"],
             "timestepBiases": ["balanced"],
             "lossTypes": ["mse"],
-            "mixedPrecisions": ["bf16", "f32"],
+            // fp16 = accelerate's dynamic loss scaling (MLX and CUDA; Candle's CPU backend refuses it).
+            "mixedPrecisions": ["bf16", "fp16", "f32"],
             "gradientCheckpointing": false,
             "microStepFields": ["steps", "saveEvery", "sampleEvery", "lrWarmupSteps"],
             "inits": ["weights", "random"],
@@ -435,10 +439,8 @@ fn validate_option(key: &str, value: &Value) -> Result<(), TrainingPlanError> {
         }
         "shift_base_tokens" | "base_batch_size" | "num_epochs" => whole(key, value, 1).map(drop),
         "nan_loss_tolerance" | "keep_last_checkpoints" => whole(key, value, 0).map(drop),
-        "muon_nesterov"
-        | "ema_enabled"
-        | "override_lr_on_resume"
-        | "upstream_validation_prompts" => boolean(key, value).map(drop),
+        "muon_nesterov" | "ema_enabled" | "override_lr_on_resume" => boolean(key, value).map(drop),
+        "upstream_validation_prompts" => curricula::validate_upstream_validation_prompts(value),
         "caption_field" => {
             let field = value
                 .as_str()
@@ -496,9 +498,11 @@ fn validate_option(key: &str, value: &Value) -> Result<(), TrainingPlanError> {
                 Err(invalid("advanced.iris.betas must both be in [0, 1)."))
             }
         }
-        _ => Err(invalid(format!(
-            "advanced.iris.{key} is not an Iris training option."
-        ))),
+        _ => curricula::validate_curricula_option(key, value).unwrap_or_else(|| {
+            Err(invalid(format!(
+                "advanced.iris.{key} is not an Iris training option."
+            )))
+        }),
     }
 }
 
@@ -547,13 +551,16 @@ pub fn validate_iris_training_config(
                 }
             )));
         }
-        if !IRIS_CLIENT_OPTION_KEYS.contains(&key.as_str()) {
+        if !IRIS_CLIENT_OPTION_KEYS.contains(&key.as_str())
+            && !curricula::IRIS_CURRICULA_OPTION_KEYS.contains(&key.as_str())
+        {
             return Err(TrainingPlanError::TargetLimit(
                 TrainingTargetLimitError::UnsupportedValue {
                     field: "iris".to_owned(),
                     value: key.clone(),
                     allowed: IRIS_CLIENT_OPTION_KEYS
                         .iter()
+                        .chain(curricula::IRIS_CURRICULA_OPTION_KEYS.iter())
                         .map(|key| (*key).to_owned())
                         .collect(),
                 },
@@ -611,10 +618,7 @@ pub fn validate_iris_training_config(
     }
 
     // ---- previews -----------------------------------------------------------------------------
-    let upstream_prompts = options
-        .get("upstream_validation_prompts")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let upstream_prompts = curricula::upstream_prompts_on(&options);
     let prompt_count = config
         .advanced
         .get("samplePrompts")
@@ -642,6 +646,8 @@ pub fn validate_iris_training_config(
             "sampleSteps must be at least 1 when previews are on.",
         ));
     }
+    let previews_on = sample_every > 0 && (prompt_count > 0 || upstream_prompts);
+    curricula::validate_curricula_config(config, &options, previews_on)?;
 
     // ---- the resume knobs only mean something on a resume --------------------------------------
     if !config.advanced.contains_key(RESUME_FROM_JOB_KEY) {
