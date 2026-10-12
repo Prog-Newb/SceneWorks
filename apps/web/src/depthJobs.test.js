@@ -3,10 +3,12 @@ import {
   buildDepthJobBody,
   depthAssetDetails,
   depthAvailability,
+  depthModelFromAsset,
   depthProcessingSize,
   depthResolutionError,
   depthSettingsFromAsset,
 } from "./depthJobs.js";
+import { buildBatchJob } from "./batchOps.js";
 
 const caps = (supported) => ({ features: { imageDepth: { supported } } });
 const installed = [{ id: "iris_3b_depth", installState: "installed" }];
@@ -71,5 +73,19 @@ describe("Iris depth contract (sc-25682)", () => {
     expect(rows.Model).toBe("iris_3b_depth (mlx, bfloat16)");
     expect(rows["Config sha256"]).toBe("ab".repeat(32));
     expect(depthAssetDetails({ type: "image" })).toEqual([]);
+  });
+});
+
+describe("trained depth models (sc-25687)", () => {
+  const project = { id: "p1", name: "P" };
+  it("sends irisModel only for a trained model and reopens it from the recipe", () => {
+    const body = (irisModel) => buildDepthJobBody({ project, sourceAssetId: "a1", irisModel });
+    expect(body("mine_depth").irisModel).toBe("mine_depth");
+    expect(body("")).not.toHaveProperty("irisModel");
+    expect(body("iris_3b_depth")).not.toHaveProperty("irisModel");
+    expect(depthModelFromAsset({ recipe: { rawAdapterSettings: { depth: { irisModel: "mine_depth" } } } })).toBe("mine_depth");
+    expect(depthModelFromAsset({ type: "depth" })).toBe("");
+    const job = buildBatchJob({ op: "depth", asset: { id: "a1" }, params: { irisModel: "mine_depth" }, project, requestedGpu: "auto" });
+    expect(job.body.irisModel).toBe("mine_depth");
   });
 });

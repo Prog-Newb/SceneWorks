@@ -94,3 +94,40 @@ describe("IrisRestoreControls (sc-25683)", () => {
     expect(onStatus).toHaveBeenLastCalledWith(expect.objectContaining({ ready: false, blocked: true }));
   });
 });
+
+describe("IrisRestoreControls trained model (sc-25688)", () => {
+  let container;
+  let root;
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  const release = [{ id: "iris_3b_restore", installState: "installed" }];
+  const trained = { id: "mine", name: "My restorer", installState: "installed", trainedCheckpoint: { task: "restoration" } };
+
+  it("offers a model select only when a trained restoration model is installed", async () => {
+    const onChange = vi.fn();
+    const value = { scale: 4, inputSizing: "budgeted", colorFix: true };
+    await act(async () => root.render(<IrisRestoreControls models={release} onChange={onChange} value={value} />));
+    expect(container.querySelector('select[aria-label="Iris restoration model"]')).toBeNull();
+    const depthOnly = [...release, { ...trained, trainedCheckpoint: { task: "depth" } }];
+    await act(async () => root.render(<IrisRestoreControls models={depthOnly} onChange={onChange} value={value} />));
+    expect(container.querySelector('select[aria-label="Iris restoration model"]')).toBeNull();
+
+    await act(async () => root.render(<IrisRestoreControls models={[...release, trained]} onChange={onChange} value={value} />));
+    const select = container.querySelector('select[aria-label="Iris restoration model"]');
+    expect([...select.options].map((option) => option.value)).toEqual(["", "mine"]);
+    await act(async () => {
+      select.value = "mine";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onChange).toHaveBeenLastCalledWith({ ...value, irisModel: "mine" });
+  });
+});

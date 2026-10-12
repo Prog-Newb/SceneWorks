@@ -240,7 +240,7 @@ fn exif_orientation_is_applied_before_planning_and_restoring() {
 // Admission
 // ---------------------------------------------------------------------------------------------
 
-fn plan_for(width: u32, height: u32, p: IrisRestoreParams) -> RestorationPlan {
+pub(crate) fn plan_for(width: u32, height: u32, p: IrisRestoreParams) -> RestorationPlan {
     plan_restore(width, height, &p, TileGeometry::RELEASE).unwrap()
 }
 
@@ -502,6 +502,22 @@ pub(crate) use job_tests::*;
 ))]
 mod job_tests {
     use super::*;
+
+    /// Stage a TRAINED restoration model the way a Training Studio run leaves it: one complete
+    /// `upscaler/`-layout export inside `<data>/models/finetunes/<id>/`.
+    pub(crate) fn stage_trained_restore(data_dir: &Path, model_id: &str) {
+        let dir = data_dir
+            .join("models")
+            .join("finetunes")
+            .join(model_id)
+            .join("restored");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.yaml"), UPSCALER_CONFIG).unwrap();
+        let weights = crate::iris_test_weights::task_weights(gen_core::iris::IrisTask::Restoration);
+        for file in ["model.safetensors", "empty_prompt.safetensors"] {
+            std::fs::write(dir.join(file), &weights).unwrap();
+        }
+    }
     use gen_core::{Progress, Transform, TransformCapabilities, TransformDescriptor};
 
     /// A plan-faithful stand-in for the engine: validates and plans with the engine's own
@@ -843,6 +859,11 @@ mod job_tests {
         assert_eq!(record["inputSizing"], json!("budgeted"));
         assert_eq!(record["colorFix"], json!(true));
         assert_eq!(record["plan"]["tileCount"], json!(6));
+        assert_eq!(record["model"], json!("iris_3b_restore"));
+        assert!(
+            record.get("irisModel").is_none(),
+            "the release export names no trained model"
+        );
         assert_ne!(asset["assetId"], json!(fixture.source_id));
         // The written file is the planned size, and the source is byte-identical.
         let written = fixture
@@ -851,6 +872,41 @@ mod job_tests {
         let decoded = image::open(&written).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (2048, 1536));
         assert_eq!(source_file_bytes(&fixture), fixture.source_bytes);
+    }
+
+    /// A restore with a TRAINED restoration model (sc-25688) is attributed to that model: the asset's
+    /// `model`, and the applied record's `model` + `irisModel` (what a reopen selects it by).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_trained_model_restore_records_the_trained_model() {
+        let _env = isolate();
+        let fixture = job_fixture(image::RgbImage::from_pixel(64, 48, image::Rgb([9, 9, 9])));
+        stage_trained_restore(&fixture.settings.data_dir, "finetune_restore1");
+        let payload = json!({
+            "projectId": fixture.project_id,
+            "sourceAssetId": fixture.source_id,
+            "engine": "iris",
+            "scale": 1,
+            "irisModel": "finetune_restore1",
+        });
+        let job_value = job_json("job-iris-trained", payload);
+        let (api_url, posts) = spawn_job_api(job_value.clone()).await;
+        let mut settings = fixture.settings.clone();
+        settings.api_url = api_url;
+        let api = crate::ApiClient::new(&settings);
+        let job: sceneworks_core::contracts::JobSnapshot =
+            serde_json::from_value(job_value).unwrap();
+        crate::upscale_jobs::run_iris_restore_job_using(&api, &settings, &job, stub_loader)
+            .await
+            .unwrap();
+        let posts = posts.lock().unwrap().clone();
+        let asset = &posts
+            .iter()
+            .find(|post| post["status"] == "completed")
+            .unwrap()["result"]["assetWrites"][0];
+        assert_eq!(asset["model"], json!("finetune_restore1"));
+        let record = &asset["rawAdapterSettings"]["upscale"];
+        assert_eq!(record["model"], json!("finetune_restore1"));
+        assert_eq!(record["irisModel"], json!("finetune_restore1"));
     }
 
     /// A budget-downscaled restore is recorded and named honestly.
@@ -1084,6 +1140,7 @@ mod job_tests {
             never_loads,
             image::RgbImage::new(512, 384),
             IrisRestoreParams::default(),
+            None,
             |_, _| unreachable!(),
         )
         .await

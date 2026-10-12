@@ -2,34 +2,34 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 111,
+    "modelCount": 114,
     "importedFamilyCount": 4,
-    "cellCount": 1022,
+    "cellCount": 1029,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "040fb5e7c2d2d091adbc52f511fdf1594e1203b25fb7d8b35a9086c8f2a3ea1d",
+    "apiContractEntry": "cf3ea88598adaee2230bf469805aa87ed0fa2aea4becb3911977808bc76b2cdd",
     "apiDto": "197b762bafece03c09a66404fc0021be240a78471d30d07128e0da6e5d398a9e",
     "apiGeneration": "2b2784c851c5d43cfc59db8d43b008a0a3bb1176b9a66b34239c4a02ae9b364d",
-    "apiValidation": "bb76d5dcef7d3799be2ea50eab72aa7135e837548d6270511f7d436f24449d7d",
+    "apiValidation": "10a36112a93d602fbef8fa7952b44c23c26e23af032856bccd2df7669ebb6d3b",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
     "descriptorAudioFacts": "86c0e95ebb67b7a8449725378894774b65d5c11d9271cb7cf06f6d436d8faa96",
     "descriptorCandleFacts": "7389335208e39f10e68fdd4b0aad423f47a978cb40a9b6954c18c6b7beaa1ec7",
-    "descriptorCandleRuntime": "5bfe6f34a404097bfbbcd402f842b6c788270aea5607833f1773cd0c5ad8904f",
+    "descriptorCandleRuntime": "2c1b46ecddcb7ad91ef4cf69ed1b146de215324f940b560562a7e243eeae0956",
     "descriptorMlxFacts": "0c6ccf2a0937b5dc7e5f0e906f4e45a90069c0b83d665799ecbe13f79d1e28b1",
-    "descriptorMlxRuntime": "579ab8b0b2363efad3773f31613150c3b7a5751438ad177d8f5c3626a35c5cf6",
-    "descriptorPreviewFacts": "fa8a482398c5c6d8b6979905444655a645e2a7f9c6fc609cb6e247904017601f",
+    "descriptorMlxRuntime": "0887c7b670bc982b161d152fcf161dde806b03d468ab957aa551b022a5b07e35",
+    "descriptorPreviewFacts": "a358392b01d114ebf71005fb581d2c8852dbeda1492abc005a8104d3204bdb39",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "fe8b6f7c9c94541493e4f31d35ff9461b96082361a50c7b9071a22b423e245b5",
+    "manifest": "2bf230342eb9dbfcf2e9c85f0f0d39684aa16e993ae05c0861f8462a15177a3f",
     "modelImportDefaults": "1316249a2897f775ba4d4645cc5c76bea3ecfa4bbb703ce93160053ef9701e34",
-    "routerCandle": "156af2279f102889749275a2868306f0e789181e6a48e8914fec02864a474650",
+    "routerCandle": "fd5969513913b48b126cf34be5aecbcd581f049f2b14c90f61e989c99dca95c4",
     "routerCatalog": "c930f1e37299214805edb4dcd425b1bde8541393f601fd9ec6b45407c9af7987",
     "routerGaps": "ad24733ac45b8b7abd401440be65017b71a79a006d8084e124824f95e89089cd",
-    "routerMlx": "4bf1d959a93f2c35b8e608aac4e6957807de7dd3749524d06d9139059295f054",
+    "routerMlx": "eae61dab16c18d4c0bbb25029672efc12c5b0888ff687e9a853641a2ed00fc2b",
     "scheduler": "6af81b64a988d199625a8d738e4f018370605b076afeee64216254796d41a7a6",
-    "trainingCatalog": "66df64efedb130a4a39986a202648e1d775c2e3567211d10117986a057d63a82",
+    "trainingCatalog": "df41a016713da4cbdace1c1218596c0769963f21a50c6a9ce5879eb48784d4a2",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
     "webImageAdvanced": "16c4dc222a2ebe6072bfddf445b8d19d9b6bc82ef8f04bdc9313a013f2d17579",
@@ -45,18 +45,18 @@
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
-    "workerDispatch": "84377b437de5c8f08045cd4ef0e8a44ec179f2c128b370f79dd71d61b2a53868",
+    "workerDispatch": "00f0505d9d5a56ef0cbb42150806441c996b232784e2d924b8e8de5d74540cc9",
     "workerEngineTable": "85d32676e6f2ea02fb6ff94a5bf21aa80275c032574219a9c7c7fa6f4a32ebb4",
     "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
-    "workerImageDispatch": "a3c25da9d6245cc70dc9dd6762ea8ec8f8b622cce409c5c19eb125f86f064724",
+    "workerImageDispatch": "56775cc992434dd1e4724fe54e195fcf87d6582a6c97a527665a0db68a67bb2c",
     "workerImageKreaImported": "6fbc8d9a80bc03a295bcbf39c6c11298e7fba33f4d702dc5a06f328ac9eb4c1b",
     "workerImageMageFinetuned": "da5a75e976782f92c6561ad3b7f9e364bb03c74d12e7f77a8658727d8ae85d80",
     "workerImagePulid": "f2ffa16632abb63110c1250412e8517b1e3c3b38f5dde0efb6847e09a2954cdc",
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "e4f2692558a8d83721ce27c754303bd01a31ccad5942146e606807d3bbb82610",
-    "workerUtilityDispatch": "0f487f18a5567ca0ba1680882af07519b767d0049bde929fb8573e014f79d6f3",
+    "workerTrainingDispatch": "85774765dc9eaf238be4f3bb651318e2cb6474d019caeb13f478cbf502cffdbb",
+    "workerUtilityDispatch": "57e78c4855a83400a9f1558da1b22c45aba56245f4bafa2aef3463c61ac35b64",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
     "workerVideoDispatch": "14ebc949a182da1ecc3af1ba5b38c584fd2d629a55e1d16d2e13f10c4ac84697",
@@ -2127,6 +2127,57 @@
           "candle": true
         }
       ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_restore_train_critic_trunk",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_restore_train_lpips_lin",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_restore_train_vgg16",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
       "conditioningShape": [],
       "userAdapters": [],
       "precisionTier": [],
@@ -7871,6 +7922,17 @@
       }
     },
     {
+      "target": "iris_3b_depth",
+      "baseModel": "iris_3b_depth",
+      "kernel": "iris_train",
+      "networkType": "full",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
       "target": "iris_3b_generation",
       "baseModel": "iris_3b",
       "kernel": "iris_train",
@@ -7895,6 +7957,39 @@
     {
       "target": "iris_3b_generation",
       "baseModel": "iris_3b",
+      "kernel": "iris_train",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_restore",
+      "baseModel": "iris_3b_restore",
+      "kernel": "iris_train",
+      "networkType": "full",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_restore",
+      "baseModel": "iris_3b_restore",
+      "kernel": "iris_train",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_restore",
+      "baseModel": "iris_3b_restore",
       "kernel": "iris_train",
       "networkType": "lora",
       "support": {

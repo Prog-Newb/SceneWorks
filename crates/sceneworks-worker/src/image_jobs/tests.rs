@@ -29241,6 +29241,72 @@ async fn inline_iris_restore_appends_a_lineage_linked_restored_variant_per_base_
     );
 }
 
+/// sc-25688: the inline pass with a TRAINED restoration model (`upscale.irisModel`) restores with it
+/// and records it on the restored variant — the record's `model` and `irisModel`, and the embedded
+/// workflow's reopenable `upscale` controls.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inline_iris_restore_with_a_trained_model_records_the_trained_model() {
+    use crate::iris_restore::tests as iris;
+    let _env = iris::isolate();
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    // Only the trained model is installed: the release export is never a fallback.
+    iris::stage_trained_restore(&data_dir, "finetune_restore1");
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "Mist over hills",
+        "count": 1, "width": 64, "height": 48, "seed": 7,
+        "upscale": { "enabled": true, "engine": "iris", "scale": 1, "irisModel": "finetune_restore1" },
+        "modelManifestEntry": { "family": "z-image" }
+    }));
+    let plan = ImagePlan::new(&req);
+    let seed = resolve_seed(&req, 0);
+    let base_fact = write_image_asset(
+        &plan,
+        0,
+        seed,
+        req.width,
+        req.height,
+        stub_rgb8(req.width, req.height, seed),
+        STUB_ADAPTER,
+        stub_raw_settings(&req),
+        &project_path,
+    )
+    .unwrap();
+    let job_value = iris::job_json("job-inline-iris-trained", json!({ "projectId": "p" }));
+    let (api_url, _posts) = iris::spawn_job_api(job_value.clone()).await;
+    let mut settings = Settings::for_test(data_dir);
+    settings.api_url = api_url;
+    let api = ApiClient::new(&settings);
+    let job: JobSnapshot = serde_json::from_value(job_value).unwrap();
+    let mut asset_writes = vec![Value::Object(base_fact)];
+    apply_inline_iris_restore(
+        &api,
+        &settings,
+        &job,
+        &plan,
+        &project_path,
+        "mlx",
+        &mut asset_writes,
+        iris::stub_loader,
+    )
+    .await
+    .expect("inline restore with the trained model completes");
+    let record = &asset_writes[1]["rawAdapterSettings"]["upscale"];
+    assert_eq!(record["model"], json!("finetune_restore1"));
+    assert_eq!(record["irisModel"], json!("finetune_restore1"));
+    let overlay = iris_upscale_overlay(
+        &crate::iris_restore::tests::plan_for(64, 48, Default::default()),
+        Some("finetune_restore1"),
+    );
+    assert_eq!(overlay["irisModel"], json!("finetune_restore1"));
+}
+
 /// sc-25683: a cancel requested after the inline pass's last per-tile progress reply (no flag sees
 /// it) is caught by the re-check before the restored variant is written: the pass ends canceled with
 /// no restored variant appended and no new PNG on disk.

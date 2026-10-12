@@ -1138,15 +1138,17 @@ pub(crate) fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if matches!(kernel, "wan_lora" | "wan_moe_lora") && training_plan_is_lokr(plan) {
         return false;
     }
-    // Iris (sc-25685): the one `mlx-gen-iris` trainer trains the generation install only; a forged
-    // or stale plan naming another base must not be claimed (the worker repeats this identity gate).
+    // Iris (sc-25685 / sc-25687 / sc-25688): `mlx-gen-iris` registers one trainer per task install
+    // (generation, depth, restoration); a forged or stale plan naming another base must not be
+    // claimed (the worker repeats this identity gate).
     if kernel == "iris_train" {
-        return plan
-            .get("target")
-            .and_then(Value::as_object)
-            .and_then(|target| target.get("baseModel"))
-            .and_then(Value::as_str)
-            == Some("iris_3b");
+        return matches!(
+            plan.get("target")
+                .and_then(Value::as_object)
+                .and_then(|target| target.get("baseModel"))
+                .and_then(Value::as_str),
+            Some("iris_3b" | "iris_3b_depth" | "iris_3b_restore")
+        );
     }
     true
 }

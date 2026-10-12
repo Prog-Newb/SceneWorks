@@ -125,6 +125,89 @@ pub(crate) fn iris_memory_refusal(
     })
 }
 
+/// [`iris_memory_refusal`] for any Iris objective: the plan's base model selects the objective's
+/// declared floor table (generation: network type × resolution; depth: micro-batch pixels of the
+/// training size; restoration: artifact × micro-batch crop pixels). Same refusal discipline: no
+/// declared row or no capacity reading refuses; an MLX floor is judged against unified memory minus
+/// the macOS/app reserve.
+pub(crate) fn iris_plan_memory_refusal(
+    lane: &str,
+    base_model: &str,
+    config: &sceneworks_core::training::TrainingConfig,
+    capacity_gb: Option<f64>,
+) -> Option<String> {
+    use sceneworks_core::training::iris::{
+        iris_objective_memory_floor_gb, iris_objective_shape, IrisObjective,
+    };
+    let objective = IrisObjective::from_base_model(base_model)?;
+    if objective == IrisObjective::Generation {
+        let network_type = config
+            .advanced
+            .get("networkType")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("lora");
+        return iris_memory_refusal(lane, network_type, config.resolution, capacity_gb);
+    }
+    let shape = iris_objective_shape(objective, config);
+    let noun = capacity_noun(lane);
+    let Some(floor) = iris_objective_memory_floor_gb(objective, lane, config) else {
+        return Some(format!(
+            "Iris 3B training declares no memory floor for {shape} on the {lane} lane, so it is \
+             refused rather than admitted without a bound. Lower the batch size or the training \
+             size (raise gradient accumulation to keep the global batch), or train a LoRA/LoKr \
+             where the objective offers one."
+        ));
+    };
+    let Some(capacity) = capacity_gb else {
+        return Some(format!(
+            "Iris 3B training needs at least {floor} GB of {noun} for {shape} (a declared floor, not \
+             yet measured), but this machine's {noun} could not be read, so the run is refused \
+             rather than admitted without a bound."
+        ));
+    };
+    let reserve = if lane == "mlx" {
+        crate::mlx_fit_gate::OS_APP_RESERVE_GB
+    } else {
+        0.0
+    };
+    let usable = capacity - reserve;
+    (usable + 0.05 < f64::from(floor)).then(|| {
+        let reserve_note = if reserve > 0.0 {
+            format!(
+                " (~{} GB once the {} GB macOS/app reserve is held out)",
+                usable.max(0.0).round() as i64,
+                reserve.round() as i64
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            "Iris 3B training needs at least {floor} GB of {noun} for {shape} (a declared floor, not \
+             yet measured), but this machine has ~{} GB{reserve_note}. Lower the batch size or the \
+             training size, train a LoRA/LoKr where the objective offers one, or run on a machine \
+             with more memory.",
+            capacity.round() as i64
+        )
+    })
+}
+
+/// The submit-time twin of [`iris_plan_memory_refusal`] for the co-located macOS API. `None` off
+/// macOS (a Candle worker's card is not visible to the API; the worker gate decides there).
+pub fn iris_plan_memory_error(
+    base_model: &str,
+    config: &sceneworks_core::training::TrainingConfig,
+) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        iris_plan_memory_refusal("mlx", base_model, config, mlx_training_capacity_gb())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (base_model, config);
+        None
+    }
+}
+
 /// This Mac's unified-memory training budget (GiB), honoring the `SCENEWORKS_MLX_MEMORY_CAP_GB`
 /// small-Mac emulation. `None` off macOS.
 #[cfg(target_os = "macos")]
@@ -221,6 +304,49 @@ mod tests {
         assert!(iris_memory_refusal("mlx", "lora", 256, None).is_some());
         assert!(iris_memory_refusal("mlx", "lora", 4096, Some(512.0)).is_some());
     }
+
+    /// The depth and restoration floors (sc-25687 / sc-25688): per objective and lane, with the MLX
+    /// OS reserve, refusing beyond the declared table and without a capacity reading.
+    #[test]
+    fn task_objective_floors_gate_per_lane() {
+        use sceneworks_core::training::iris::{depth, restore};
+        let depth = depth::iris_depth_target().defaults;
+        // 480×640, batch 1: MLX 80 (+4 reserve), CUDA 84.
+        assert!(iris_plan_memory_refusal("mlx", "iris_3b_depth", &depth, Some(84.0)).is_none());
+        let under = iris_plan_memory_refusal("mlx", "iris_3b_depth", &depth, Some(83.0))
+            .expect("83 GB − 4 GB reserve < 80");
+        assert!(
+            under.contains("80 GB") && under.contains("reserve"),
+            "{under}"
+        );
+        assert!(iris_plan_memory_refusal("candle", "iris_3b_depth", &depth, Some(84.0)).is_none());
+        assert!(iris_plan_memory_refusal("candle", "iris_3b_depth", &depth, Some(83.0)).is_some());
+        assert!(iris_plan_memory_refusal("mlx", "iris_3b_depth", &depth, None).is_some());
+        let mut big = depth.clone();
+        big.batch_size = 32;
+        big.gradient_accumulation = 1;
+        let refused = iris_plan_memory_refusal("mlx", "iris_3b_depth", &big, Some(512.0))
+            .expect("no declared row for 32 × 480×640");
+        assert!(refused.contains("declares no memory floor"), "{refused}");
+
+        let mut restore = restore::iris_restore_target().defaults;
+        restore.resolution = 256;
+        // Full recipe at 256²: MLX 92 (+4), CUDA 94 (the measured peak on the 96 GB card).
+        assert!(iris_plan_memory_refusal("mlx", "iris_3b_restore", &restore, Some(96.0)).is_none());
+        assert!(iris_plan_memory_refusal("mlx", "iris_3b_restore", &restore, Some(95.0)).is_some());
+        assert!(
+            iris_plan_memory_refusal("candle", "iris_3b_restore", &restore, Some(95.6)).is_none()
+        );
+        restore
+            .advanced
+            .insert("networkType".into(), serde_json::json!("lora"));
+        assert!(iris_plan_memory_refusal("mlx", "iris_3b_restore", &restore, Some(32.0)).is_none());
+        let lora = iris_plan_memory_refusal("candle", "iris_3b_restore", &restore, Some(24.0))
+            .expect("24 < 32");
+        assert!(lora.contains("VRAM") && lora.contains("32 GB"), "{lora}");
+        // Non-Iris base models are not this gate's.
+        assert!(iris_plan_memory_refusal("mlx", "sdxl", &restore, Some(1.0)).is_none());
+    }
 }
 
 /// The REAL training job path — `training_jobs::run_training_execution_using`: plan preflight, the
@@ -278,6 +404,8 @@ mod job_tests {
         request: Option<TrainingRequest>,
         weights: Option<PathBuf>,
         text_encoder: Option<PathBuf>,
+        /// Every staged component as `(id, path)` (depth / restoration task runs).
+        components: Vec<(String, PathBuf)>,
         loads: u32,
     }
 
@@ -566,6 +694,15 @@ mod job_tests {
     }
 
     fn run(behavior: Behavior, plan: TrainingPlan, data: &Path) -> Run {
+        run_as("iris_3b", behavior, plan, data)
+    }
+
+    fn run_as(
+        expected_engine: &'static str,
+        behavior: Behavior,
+        plan: TrainingPlan,
+        data: &Path,
+    ) -> Run {
         let seen = Arc::new(Mutex::new(Seen::default()));
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -583,14 +720,20 @@ mod job_tests {
             let job: JobSnapshot =
                 serde_json::from_value(crate::tests::job_snapshot_json("job-iris-train", false))
                     .unwrap();
-            let descriptor = crate::inference_runtime::trainer_descriptor("iris_3b")
+            let descriptor = crate::inference_runtime::trainer_descriptor(expected_engine)
                 .expect("this backend links the Iris trainer");
             let loader_seen = Arc::clone(&seen);
             let user_cancel = Arc::clone(&user_cancel);
             let loader = move |engine: &str, spec: &LoadSpec| {
-                assert_eq!(engine, "iris_3b");
+                assert_eq!(engine, expected_engine);
                 let mut seen = loader_seen.lock().unwrap();
                 seen.loads += 1;
+                for (id, source) in &spec.components {
+                    let path = match source {
+                        WeightsSource::Dir(path) | WeightsSource::File(path) => path.clone(),
+                    };
+                    seen.components.push((id.clone(), path));
+                }
                 if let WeightsSource::Dir(dir) = &spec.weights {
                     seen.weights = Some(dir.clone());
                 }
@@ -950,5 +1093,543 @@ mod job_tests {
         let last = terminal(&posts);
         assert_eq!(last["status"], "canceled", "{last:#}");
         assert!(last["result"].is_null(), "{last:#}");
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Iris DEPTH (S9 sc-25687) and RESTORATION (S10 sc-25688) task runs through the same executor.
+    // ------------------------------------------------------------------------------------------
+
+    /// Serializes the tests that substitute the pinned training-resource table.
+    static RESOURCE_TABLE: Mutex<()> = Mutex::new(());
+
+    fn stage_bytes(root: &Path, repo: &str, revision: &str, file: &str, bytes: &[u8]) -> PathBuf {
+        let path = stage(root, repo, revision, file).join(file);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// The task export folder (`depth/` or `upscaler/`) of the pinned snapshot.
+    fn stage_task_export(data: &Path, subdir: &str) -> PathBuf {
+        let mut dir = PathBuf::new();
+        for file in [
+            "config.yaml",
+            "model.safetensors",
+            "empty_prompt.safetensors",
+        ] {
+            dir = stage(
+                data,
+                BACKBONE_REPO,
+                BACKBONE_REVISION,
+                &format!("{subdir}/{file}"),
+            );
+        }
+        dir.join(subdir)
+    }
+
+    /// A task dataset of `items` images; each depth item has its depth map (+ a mask on item 0),
+    /// each restoration item its aligned degraded input when `paired`.
+    fn task_dataset(
+        data: &Path,
+        objective: &str,
+        items: usize,
+        paired: bool,
+    ) -> (TrainingDataset, PathBuf) {
+        let root = data.join("projects/p1/training/datasets/ds_task");
+        std::fs::create_dir_all(root.join("images")).unwrap();
+        std::fs::create_dir_all(root.join("sidecars")).unwrap();
+        let entries: Vec<Value> = (0..items)
+            .map(|index| {
+                let path = format!("images/item{index}.png");
+                std::fs::write(root.join(&path), b"png").unwrap();
+                let mut item = json!({
+                    "id": format!("item{index}"), "path": path,
+                    "displayName": format!("item{index}"),
+                    // A caption the task runs never read (and never send).
+                    "caption": {"text": "ignored caption", "source": "manual", "triggerWords": []},
+                    "addedAt": "2026-10-11T00:00:00Z"
+                });
+                if objective == "depth" {
+                    let depth = format!("sidecars/item{index}.depth.npy");
+                    std::fs::write(root.join(&depth), b"npy").unwrap();
+                    item["irisDepth"] = json!({"path": depth, "scale": 0.001, "maxDepth": 80.0});
+                    if index == 0 {
+                        std::fs::write(root.join("sidecars/item0.mask.png"), b"png").unwrap();
+                        item["irisDepth"]["maskPath"] = json!("sidecars/item0.mask.png");
+                    }
+                } else if paired {
+                    let degraded = format!("sidecars/item{index}.degraded.png");
+                    std::fs::write(root.join(&degraded), b"png").unwrap();
+                    item["irisDegradedImage"] = json!(degraded);
+                }
+                item
+            })
+            .collect();
+        let dataset: TrainingDataset = serde_json::from_value(json!({
+            "schemaVersion": 1, "id": "ds_task", "version": 1, "projectId": "p1", "name": "ds",
+            "modality": "image", "status": "ready", "createdAt": "2026-10-11T00:00:00Z",
+            "updatedAt": "2026-10-11T00:00:00Z", "items": entries
+        }))
+        .unwrap();
+        (dataset, root)
+    }
+
+    fn task_plan(
+        data: &Path,
+        base_model: &str,
+        dataset: (TrainingDataset, PathBuf),
+        configure: impl FnOnce(&mut sceneworks_core::training::TrainingConfig),
+    ) -> TrainingPlan {
+        let target = builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.base_model == base_model)
+            .expect("the Iris task target is registered");
+        let mut config = target.defaults.clone();
+        configure(&mut config);
+        let backbone =
+            sceneworks_core::hf_home::huggingface_repo_cache_path(data, BACKBONE_REPO).unwrap();
+        let output = data.join("models/finetunes/finetune_task");
+        build_training_plan(BuildTrainingPlan {
+            job_id: "job-iris-train",
+            target: &target,
+            dataset: &dataset.0,
+            config,
+            preset: None,
+            lora_id: "finetune_task",
+            base_model_path: backbone.display().to_string(),
+            dataset_root: &dataset.1,
+            output_dir: &output,
+            file_name: "task_model.safetensors".to_owned(),
+            created_at: "2026-10-11T00:00:00Z".to_owned(),
+        })
+        .expect("the task plan builds")
+    }
+
+    /// Every depth option the Studio offers reaches the depth trainer: the shared fields (a FULL
+    /// fine-tune, L1) and the `iris` bag verbatim as the ONLY `model_options` key; each item is its
+    /// image + its depth target resolved under the dataset root, with no caption. The run loads the
+    /// installed `depth/` export alone — no text encoder, no generation backbone.
+    #[test]
+    fn every_depth_option_reaches_the_depth_trainer_from_the_depth_export() {
+        let _env = isolated_env("128");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let export = stage_task_export(&data, "depth");
+        let iris = json!({
+            "depth_size": [352, 1216], "resize": "none", "crop": "random", "hflip_prob": 0.25,
+            "gradient_weight": 4.0, "low_percentile": 1.0, "high_percentile": 99.0,
+            "clip_target": true, "loss_reduction": "per_image", "invalid_examples": "skip",
+            "min_valid_pixels": 16, "betas": [0.9, 0.99], "gradient_clip": 0.5,
+            "muon_momentum": 0.9, "muon_nesterov": false, "muon_adjust_lr": "none",
+            "auto_lr": "sqrt", "base_batch_size": 64, "ema_enabled": true, "ema_decay": 0.999,
+            "num_epochs": 2, "nan_loss_tolerance": 3, "keep_last_checkpoints": 1,
+            "milestone_steps": [5], "preview_items": 2, "preview_weights": "ema",
+            "export_weights": "ema"
+        });
+        let plan = task_plan(
+            &data,
+            "iris_3b_depth",
+            task_dataset(&data, "depth", 2, false),
+            |c| {
+                c.optimizer = "muon".to_owned();
+                c.gradient_accumulation = 4;
+                c.steps = 40;
+                c.save_every = 8;
+                c.resolution = 1216;
+                c.advanced.insert("sampleEvery".into(), json!(8));
+                c.advanced.insert("lrWarmupSteps".into(), json!(4));
+                c.advanced.insert("lrScheduler".into(), json!("cosine"));
+                c.advanced.insert("mixedPrecision".into(), json!("f32"));
+                c.advanced.insert("iris".into(), iris.clone());
+            },
+        );
+        let run = run_as("iris_3b_depth", Behavior::Completes, plan, &data);
+        assert!(run.outcome.is_ok(), "{:?}\n{:#?}", run.outcome, run.posts);
+        assert_eq!(run.seen.weights.as_deref(), Some(export.as_path()));
+        assert!(run.seen.components.is_empty(), "{:?}", run.seen.components);
+        let request = run.seen.request.expect("the trainer ran");
+        let config = &request.config;
+        assert!(config.full_finetune);
+        assert_eq!(config.loss_type, "l1");
+        assert_eq!(config.optimizer, "muon");
+        assert_eq!(
+            (config.steps, config.save_every, config.sample_every),
+            (40, 8, 8)
+        );
+        assert_eq!(
+            (config.gradient_accumulation, config.lr_warmup_steps),
+            (4, 4)
+        );
+        assert_eq!(config.train_dtype, "f32");
+        assert_eq!(config.lr_scheduler, gen_core::LrSchedule::Cosine);
+        assert!(config.sample_prompts.is_empty() && config.trigger_word.is_none());
+        assert_eq!(
+            Value::Object(config.model_options.clone()),
+            json!({ "iris": iris }),
+            "the depth bag is the only model option"
+        );
+        assert!(request.trigger_words.is_empty());
+        let root = data.join("projects/p1/training/datasets/ds_task");
+        let item = &request.items[0];
+        assert_eq!(item.caption, "", "the depth task reads no caption");
+        assert_eq!(
+            Value::Object(item.model_options.clone()),
+            json!({"depth": {
+                "path": root.join("sidecars").join("item0.depth.npy"),
+                "mask_path": root.join("sidecars").join("item0.mask.png"),
+                "scale": 0.001, "max_depth": 80.0
+            }})
+        );
+        assert!(request.items[1].model_options["depth"]
+            .get("mask_path")
+            .is_none());
+        let done = terminal(&run.posts);
+        assert_eq!(done["status"], "completed", "{done:#}");
+        assert_eq!(done["result"]["dataWalk"]["items"], 2);
+    }
+
+    /// The paper's start (`depthInit: parent`): the generation backbone, conditioned on the depth
+    /// export's SHIPPED empty prompt (no text encoder at all); without a depth install, the generation
+    /// install's text encoder encodes it once.
+    #[test]
+    fn a_parent_depth_run_prefers_the_shipped_empty_prompt_over_the_encoder() {
+        let _env = isolated_env("128");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        let export = stage_task_export(&data, "depth");
+        let parent = |c: &mut sceneworks_core::training::TrainingConfig| {
+            c.gradient_accumulation = 1;
+            c.steps = 4;
+            c.save_every = 2;
+            c.advanced.insert("sampleEvery".into(), json!(2));
+            c.advanced.insert("depthInit".into(), json!("parent"));
+            c.advanced["iris"]["reducer_init"] = json!("channel_mean");
+        };
+        let plan = task_plan(
+            &data,
+            "iris_3b_depth",
+            task_dataset(&data, "depth", 1, false),
+            parent,
+        );
+        let run = run_as("iris_3b_depth", Behavior::Completes, plan, &data);
+        assert!(run.outcome.is_ok(), "{:?}", run.outcome);
+        assert_eq!(
+            run.seen.weights.as_deref(),
+            Some(install.backbone.as_path())
+        );
+        assert_eq!(
+            run.seen.components,
+            vec![(
+                "empty_prompt".to_owned(),
+                export.join("empty_prompt.safetensors")
+            )]
+        );
+
+        // No depth install: the generation text encoder (its complete pinned closure), once.
+        std::fs::remove_dir_all(&export).unwrap();
+        let entry = crate::training_jobs::builtin_model_manifest_entry("iris_3b").unwrap();
+        let encoder = entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|download| download["componentId"] == "text_encoder")
+            .unwrap();
+        // The declared shard glob resolves against the shard actually present.
+        for file in encoder["files"].as_array().unwrap() {
+            let file = file.as_str().unwrap().replace('*', "00001-of-00002");
+            stage(&data, TE_REPO, TE_REVISION, &file);
+        }
+        let plan = task_plan(
+            &data,
+            "iris_3b_depth",
+            task_dataset(&data, "depth", 1, false),
+            parent,
+        );
+        let run = run_as("iris_3b_depth", Behavior::Completes, plan, &data);
+        assert!(run.outcome.is_ok(), "{:?}", run.outcome);
+        assert_eq!(
+            run.seen.components,
+            vec![("text_encoder".to_owned(), install.text_encoder.clone())]
+        );
+    }
+
+    /// Without the depth export an `export` run is refused BEFORE load, naming the install.
+    #[test]
+    fn a_depth_run_without_its_install_is_refused_before_load() {
+        let _env = isolated_env("128");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        stage_install(&data);
+        let plan = task_plan(
+            &data,
+            "iris_3b_depth",
+            task_dataset(&data, "depth", 1, false),
+            |c| {
+                c.gradient_accumulation = 1;
+                c.steps = 4;
+                c.save_every = 2;
+                c.advanced.insert("sampleEvery".into(), json!(2));
+            },
+        );
+        let run = run_as("iris_3b_depth", Behavior::Completes, plan, &data);
+        match &run.outcome {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(
+                    message.contains("Iris 3B Depth is not installed"),
+                    "{message}"
+                )
+            }
+            other => panic!("refused before load, got {other:?}"),
+        }
+        assert_eq!(run.seen.loads, 0);
+    }
+
+    /// The declared depth floor refuses an undersized host before load (MLX: unified memory minus
+    /// the OS reserve; CUDA: VRAM).
+    #[test]
+    fn a_host_under_the_depth_floor_is_refused_before_load() {
+        let _env = isolated_env("64");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        stage_task_export(&data, "depth");
+        let plan = task_plan(
+            &data,
+            "iris_3b_depth",
+            task_dataset(&data, "depth", 1, false),
+            |_| {},
+        );
+        let run = run_as("iris_3b_depth", Behavior::Completes, plan, &data);
+        match &run.outcome {
+            Err(WorkerError::InvalidPayload(message)) => assert!(
+                message.contains("depth full fine-tune at 480×640") && message.contains("GB"),
+                "{message}"
+            ),
+            other => panic!("a 64 GB host must be refused for the 480×640 depth run: {other:?}"),
+        }
+        assert_eq!(run.seen.loads, 0);
+    }
+
+    /// A depth cancel after the first optimizer step publishes the export like a generation run
+    /// (Iris-only durable cancel): the terminal Canceled carries the result the API registers from.
+    #[test]
+    fn a_depth_cancel_after_the_first_step_reports_the_published_export() {
+        let _env = isolated_env("128");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        stage_task_export(&data, "depth");
+        let plan = task_plan(
+            &data,
+            "iris_3b_depth",
+            task_dataset(&data, "depth", 1, false),
+            |c| {
+                c.gradient_accumulation = 1;
+                c.steps = 4;
+                c.save_every = 2;
+                c.advanced.insert("sampleEvery".into(), json!(2));
+            },
+        );
+        let run = run_as("iris_3b_depth", Behavior::CancelAfterFirstStep, plan, &data);
+        assert!(
+            matches!(run.outcome, Err(WorkerError::Canceled(_))),
+            "{:?}",
+            run.outcome
+        );
+        let last = terminal(&run.posts);
+        assert_eq!(last["status"], "canceled", "{last:#}");
+        assert_eq!(last["result"]["trainedArtifactExported"], true, "{last:#}");
+    }
+
+    fn fixture_resource(
+        data: &Path,
+        component: &'static str,
+        repo: &'static str,
+        file: &'static str,
+        bytes: &[u8],
+    ) -> gen_core::iris::restoration_train::TrainingResource {
+        use sha2::Digest;
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        stage_bytes(data, repo, revision, file, bytes);
+        gen_core::iris::restoration_train::TrainingResource {
+            component,
+            name: component,
+            url: "https://example.invalid/fixture",
+            repo,
+            revision,
+            file,
+            sha256: Box::leak(format!("{:x}", sha2::Sha256::digest(bytes)).into_boxed_str()),
+            bytes: bytes.len() as u64,
+            license: "fixture",
+        }
+    }
+
+    /// Every restoration option reaches the trainer: HYPIR's LoRA arm (the recipe's full fine-tune
+    /// is the default), the `iris_restore` bag as the ONLY model option, aligned pairs as each item's
+    /// `degraded_image`, the three training-only resources staged as components after their pinned
+    /// size + sha256 verify, and the generation backbone as `parent_backbone` under `init: parent`.
+    #[test]
+    fn every_restoration_option_reaches_the_trainer_with_verified_resources() {
+        let _table = RESOURCE_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = isolated_env("128");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        let export = stage_task_export(&data, "upscaler");
+        let resources = vec![
+            fixture_resource(
+                &data,
+                "lpips_vgg16",
+                "fixture/vgg",
+                "model.safetensors",
+                b"vgg",
+            ),
+            fixture_resource(&data, "lpips_lin", "fixture/lin", "lin.safetensors", b"lin"),
+            fixture_resource(
+                &data,
+                "critic_trunk",
+                "fixture/trunk",
+                "trunk.bin",
+                b"trunk",
+            ),
+        ];
+        *crate::iris_task_training::TEST_TRAINING_RESOURCES
+            .lock()
+            .unwrap() = Some(resources.clone());
+        let bag = json!({
+            "loss_l2": 1.0, "loss_lpips": 4.0, "loss_gan": 0.25, "gan_real_label": 0.9,
+            "lr_critic": 2e-5, "betas": [0.9, 0.99], "critic_betas": [0.5, 0.99],
+            "critic_weight_decay": 0.0, "gradient_clip": 0.5, "critic_gradient_clip": 2.0,
+            "ema_enabled": true, "ema_decay": 0.99, "crop": "center",
+            "degradation": {"use_hflip": false}, "critic_dtype": "fp32", "init": "parent",
+            "num_epochs": 3, "nan_loss_tolerance": 5, "keep_last_checkpoints": 1,
+            "milestone_steps": [2], "export_weights": "raw", "export_dtype": "bf16",
+            "preview_weights": "ema", "lora_init": "kaiming"
+        });
+        let plan = task_plan(
+            &data,
+            "iris_3b_restore",
+            task_dataset(&data, "restoration", 2, true),
+            |c| {
+                c.rank = 8;
+                c.alpha = 4;
+                c.gradient_accumulation = 2;
+                c.steps = 40;
+                c.save_every = 8;
+                c.resolution = 512;
+                c.advanced.insert("networkType".into(), json!("lokr"));
+                c.advanced.insert("decomposeFactor".into(), json!(4));
+                c.advanced.insert("sampleEvery".into(), json!(8));
+                c.advanced.insert("iris_restore".into(), bag.clone());
+            },
+        );
+        let run = run_as("iris_3b_restore", Behavior::Completes, plan, &data);
+        *crate::iris_task_training::TEST_TRAINING_RESOURCES
+            .lock()
+            .unwrap() = None;
+        assert!(run.outcome.is_ok(), "{:?}\n{:#?}", run.outcome, run.posts);
+        assert_eq!(run.seen.weights.as_deref(), Some(export.as_path()));
+        let mut components = run.seen.components.clone();
+        components.sort();
+        let resource_path = |resource: &gen_core::iris::restoration_train::TrainingResource| {
+            crate::model_jobs::huggingface_pinned_snapshot_dir(
+                &data,
+                resource.repo,
+                resource.revision,
+            )
+            .unwrap()
+            .join(resource.file)
+        };
+        assert_eq!(
+            components,
+            vec![
+                ("critic_trunk".to_owned(), resource_path(&resources[2])),
+                ("lpips_lin".to_owned(), resource_path(&resources[1])),
+                ("lpips_vgg16".to_owned(), resource_path(&resources[0])),
+                ("parent_backbone".to_owned(), install.backbone.clone()),
+            ]
+        );
+        let request = run.seen.request.expect("the trainer ran");
+        let config = &request.config;
+        assert!(!config.full_finetune);
+        assert_eq!(config.network_type, gen_core::NetworkType::Lokr);
+        assert_eq!(
+            (config.rank, config.alpha, config.decompose_factor),
+            (8, 4.0, 4)
+        );
+        assert_eq!(
+            (config.steps, config.save_every, config.sample_every),
+            (40, 8, 8)
+        );
+        assert_eq!(config.resolution, 512);
+        assert_eq!(config.loss_type, "mse");
+        assert!(config.sample_prompts.is_empty());
+        assert_eq!(
+            Value::Object(config.model_options.clone()),
+            json!({ "iris_restore": bag })
+        );
+        let root = data.join("projects/p1/training/datasets/ds_task");
+        assert_eq!(request.items[1].caption, "");
+        assert_eq!(
+            Value::Object(request.items[1].model_options.clone()),
+            json!({"degraded_image": root.join("sidecars").join("item1.degraded.png")})
+        );
+    }
+
+    /// A staged training resource that does not match its pin (here: the real pins against stand-in
+    /// bytes) is refused BEFORE load, naming the Model Manager install to repair.
+    #[test]
+    fn a_restoration_resource_failing_its_pin_is_refused_before_load() {
+        let _table = RESOURCE_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = isolated_env("128");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        stage_task_export(&data, "upscaler");
+        for resource in gen_core::iris::restoration_train::TRAINING_RESOURCES {
+            stage(&data, resource.repo, resource.revision, resource.file);
+        }
+        let plan = task_plan(
+            &data,
+            "iris_3b_restore",
+            task_dataset(&data, "restoration", 1, false),
+            |c| {
+                c.resolution = 256;
+                c.advanced.insert("networkType".into(), json!("lora"));
+                c.steps = 4;
+                c.save_every = 2;
+                c.advanced.insert("sampleEvery".into(), json!(2));
+            },
+        );
+        let run = run_as("iris_3b_restore", Behavior::Completes, plan, &data);
+        match &run.outcome {
+            Err(WorkerError::InvalidPayload(message)) => assert!(
+                message.contains("re-install") && message.contains("iris_restore_train_vgg16"),
+                "{message}"
+            ),
+            other => panic!("a resource failing its pin must be refused: {other:?}"),
+        }
+        assert_eq!(run.seen.loads, 0);
+
+        // A missing resource is named before anything is hashed.
+        let missing = sceneworks_core::hf_home::huggingface_repo_cache_path(
+            &data,
+            gen_core::iris::restoration_train::CRITIC_TRUNK_RESOURCE.repo,
+        )
+        .unwrap();
+        std::fs::remove_dir_all(missing).unwrap();
+        let refusal = crate::iris_task_training::iris_task_training_unavailable(
+            &data,
+            sceneworks_core::training::iris::IrisObjective::Restoration,
+            &builtin_training_targets()
+                .targets
+                .into_iter()
+                .find(|t| t.base_model == "iris_3b_restore")
+                .unwrap()
+                .defaults,
+        )
+        .expect("the trunk is missing");
+        assert!(
+            refusal.contains("iris_restore_train_critic_trunk"),
+            "{refusal}"
+        );
     }
 }

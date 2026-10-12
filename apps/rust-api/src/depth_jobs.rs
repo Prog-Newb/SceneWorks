@@ -26,6 +26,15 @@ pub(crate) async fn create_image_depth_job(
         requested_gpu,
     } = body;
     request.validate().map_err(ApiError::bad_request)?;
+    // A trained depth model (sc-25687) must be a registered depth model, never another task's.
+    if let Some(model) = request.trained_model() {
+        crate::iris_training::validate_trained_task_model(
+            &state,
+            model,
+            sceneworks_core::training::iris::IrisObjective::Depth,
+        )
+        .await?;
+    }
     ensure_depth_source_is_an_image(&state, &request.project_id, &request.source_asset_id).await?;
     let payload = to_json_object(&request)?;
     let job = create_generation_job(

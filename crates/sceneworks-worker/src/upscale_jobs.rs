@@ -1311,6 +1311,7 @@ const IRIS_CANCEL_MESSAGE: &str = "Iris restoration canceled by user.";
 /// it through the cached transform while forwarding per-tile progress (built by `progress_for`) and
 /// keeping the heartbeat + cancel poll alive. Shared by the standalone job and the inline pass, so
 /// both refuse, plan and progress identically. Returns no image on cancel or refusal.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn restore_with_progress(
     api: &ApiClient,
     settings: &Settings,
@@ -1318,13 +1319,32 @@ pub(crate) async fn restore_with_progress(
     loader: crate::iris_restore::TransformLoader,
     source: RgbImage,
     params: sceneworks_core::image_restoration::IrisRestoreParams,
+    trained_model: Option<String>,
     progress_for: impl Fn(u32, u32) -> sceneworks_core::contracts::ProgressRequest + Send + 'static,
 ) -> WorkerResult<crate::iris_restore::RestoreOutcome> {
     use crate::iris_restore::{
         admission_error, live_total_gb, plan_restore, resolve_restore_export_dir,
         restore_image_using, RestoreLane,
     };
-    let (export_dir, resources) = resolve_restore_export_dir(settings)?;
+    // A trained restoration model (sc-25688) replaces the release export; its task is checked and
+    // it plans with its own export geometry.
+    let (export_dir, resources) = match trained_model.as_deref() {
+        Some(model) => {
+            let dir = crate::iris_task_training::trained_task_export_dir(
+                &settings.data_dir,
+                model,
+                gen_core::iris::IrisTask::Restoration,
+            )
+            .map_err(|detail| WorkerError::InvalidPayload(format!("Iris restoration: {detail}")))?;
+            let resources = gen_core::iris::restoration::RestorationResources::from_dir(
+                &dir,
+                sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID,
+            )
+            .map_err(|error| WorkerError::InvalidPayload(format!("Iris restoration: {error}")))?;
+            (dir, resources)
+        }
+        None => resolve_restore_export_dir(settings)?,
+    };
     let geometry = resources.settings.geometry(resources.config());
     let plan = plan_restore(source.width(), source.height(), &params, geometry)
         .map_err(WorkerError::InvalidPayload)?;
@@ -1444,6 +1464,8 @@ pub(crate) async fn run_iris_restore_job_using(
         )));
     }
     let params = parse_iris_restore_params(payload).map_err(WorkerError::InvalidPayload)?;
+    let trained_model = sceneworks_core::image_restoration::parse_iris_restore_model(payload)
+        .map_err(WorkerError::InvalidPayload)?;
     update_job(
         api,
         &job.id,
@@ -1521,6 +1543,7 @@ pub(crate) async fn run_iris_restore_job_using(
         loader,
         source_image,
         params,
+        trained_model.clone(),
         |current, total| {
             progress_payload(
                 JobStatus::Running,
@@ -1536,7 +1559,7 @@ pub(crate) async fn run_iris_restore_job_using(
     .await?;
     let plan = outcome.plan;
     let (out_w, out_h) = (outcome.image.width(), outcome.image.height());
-    let record = crate::iris_restore::applied_settings_record(&plan);
+    let record = crate::iris_restore::applied_settings_record(&plan, trained_model.as_deref());
 
     let source_name = payload
         .get("displayName")
@@ -1544,13 +1567,21 @@ pub(crate) async fn run_iris_restore_job_using(
         .map(str::to_owned)
         .or(source_display)
         .unwrap_or_else(|| "Image".to_owned());
-    let workflow = crate::image_jobs::workflow_source(settings, &job.payload)
-        .and_then(|payload| crate::image_jobs::standalone_restore_workflow_share(&payload, &plan));
+    let workflow = crate::image_jobs::workflow_source(settings, &job.payload).and_then(|payload| {
+        crate::image_jobs::standalone_restore_workflow_share(
+            &payload,
+            &plan,
+            trained_model.as_deref(),
+        )
+    });
     let written = match crate::image_jobs::reattach_alpha(outcome.image, source_alpha.as_ref()) {
         crate::image_jobs::GeneratedPixels::Rgb(rgb) => image::DynamicImage::ImageRgb8(rgb),
         crate::image_jobs::GeneratedPixels::Rgba(rgba) => image::DynamicImage::ImageRgba8(rgba),
     };
-    let model = crate::iris_restore::IRIS_RESTORE_MODEL_ID;
+    // A trained restoration model (sc-25688) is the asset's model, like a trained depth model.
+    let model = trained_model
+        .as_deref()
+        .unwrap_or(crate::iris_restore::IRIS_RESTORE_MODEL_ID);
     let display_name = format!(
         "{source_name} ({})",
         crate::iris_restore::display_suffix(&plan)

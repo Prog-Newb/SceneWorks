@@ -1079,6 +1079,12 @@ fn expected_backend_local_trainer_id(
         // Iris-3B generation (sc-25685/sc-25686): both backends register one trainer under the
         // generation install's id.
         ("iris_3b_generation", "iris_3b", "iris_train") => ("iris_3b", "iris_3b"),
+        // Iris-3B depth (sc-25687) / restoration (sc-25688): one trainer per task install, same id
+        // on both backends.
+        ("iris_3b_depth", "iris_3b_depth", "iris_train") => ("iris_3b_depth", "iris_3b_depth"),
+        ("iris_3b_restore", "iris_3b_restore", "iris_train") => {
+            ("iris_3b_restore", "iris_3b_restore")
+        }
         _ => {
             return Err(format!(
                 "production training target {:?} (base {:?}, kernel {:?}) has no explicit backend-local trainer identity contract",

@@ -25225,6 +25225,126 @@
       }
     },
     {
+      // sc-25688 — LPIPS VGG16 trunk (torchvision IMAGENET1K_V1 `features.*`, bit-identical in timm's safetensors).
+      "id": "iris_restore_train_vgg16",
+      "name": "Iris Restoration Training — VGG16 (LPIPS trunk)",
+      "family": "iris",
+      "type": "utility",
+      // TRAINING-ONLY resource of Iris 3B restoration training (epic sc-25678, S10 sc-25688): read by
+      // the `iris_3b_restore` TRAINER only (`gen_core::iris::restoration_train::TRAINING_RESOURCES`),
+      // staged as a trainer component after the worker re-checks the pinned size + sha256
+      // (`verify_resource`). Never part of the restoration inference closure (`iris_3b_restore`
+      // installs and runs without it) and never a routable `model` of any job.
+      "componentOnly": true,
+      "capabilities": [],
+      "license": "BSD-3-Clause",
+      "licenseUrl": "https://github.com/pytorch/vision/blob/main/LICENSE",
+      "downloads": [
+        {
+          // Upstream, pinned to an immutable revision, not re-hosted. EXACT bytes (553432986).
+          "provider": "huggingface",
+          "repo": "timm/vgg16.tv_in1k",
+          "revision": "b8d8aa2dd860af9233c8c67385a8097fd6c35d3f",
+          "files": ["model.safetensors"],
+          "estimatedSizeBytes": 553432986
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/timm/vgg16.tv_in1k"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Iris Restoration Training — VGG16 (LPIPS trunk)",
+        "description": "Training-only: the frozen torchvision ImageNet VGG16 trunk (timm safetensors, ~553 MB) of the LPIPS perceptual loss used by Iris 3B restoration training in the Training Studio. Not needed for restoration itself. torchvision BSD-3-Clause; the VGG weights are credited to Simonyan & Zisserman.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // sc-25688 — LPIPS v0.1 VGG linear heads (bit-identical to lpips==0.1.4's vgg.pth lin layers).
+      "id": "iris_restore_train_lpips_lin",
+      "name": "Iris Restoration Training — LPIPS linear heads",
+      "family": "iris",
+      "type": "utility",
+      // TRAINING-ONLY resource of Iris 3B restoration training (epic sc-25678, S10 sc-25688): read by
+      // the `iris_3b_restore` TRAINER only (`gen_core::iris::restoration_train::TRAINING_RESOURCES`),
+      // staged as a trainer component after the worker re-checks the pinned size + sha256
+      // (`verify_resource`). Never part of the restoration inference closure (`iris_3b_restore`
+      // installs and runs without it) and never a routable `model` of any job.
+      "componentOnly": true,
+      "capabilities": [],
+      "license": "BSD-2-Clause",
+      "licenseUrl": "https://github.com/richzhang/PerceptualSimilarity/blob/master/LICENSE",
+      "downloads": [
+        {
+          // Upstream, pinned to an immutable revision, not re-hosted. EXACT bytes (6264).
+          "provider": "huggingface",
+          "repo": "vivym/lpips",
+          "revision": "270571f1fb2a2c4c5f920cec96cd87838c345982",
+          "files": ["vgg_lpips_linear.safetensors"],
+          "estimatedSizeBytes": 6264
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/vivym/lpips"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Iris Restoration Training — LPIPS linear heads",
+        "description": "Training-only: the LPIPS v0.1 VGG linear heads (6 KB) of the perceptual loss used by Iris 3B restoration training. Not needed for restoration itself. BSD-2-Clause.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // sc-25688 — HYPIR's critic trunk (open_clip convnext_xxlarge, laion2b_s34b_b82k_augreg_soup); only `visual.*` is read.
+      "id": "iris_restore_train_critic_trunk",
+      "name": "Iris Restoration Training — OpenCLIP ConvNeXt-XXL critic trunk",
+      "family": "iris",
+      "type": "utility",
+      // TRAINING-ONLY resource of Iris 3B restoration training (epic sc-25678, S10 sc-25688): read by
+      // the `iris_3b_restore` TRAINER only (`gen_core::iris::restoration_train::TRAINING_RESOURCES`),
+      // staged as a trainer component after the worker re-checks the pinned size + sha256
+      // (`verify_resource`). Never part of the restoration inference closure (`iris_3b_restore`
+      // installs and runs without it) and never a routable `model` of any job.
+      "componentOnly": true,
+      "capabilities": [],
+      "license": "MIT",
+      "licenseUrl": "https://github.com/mlfoundations/open_clip/blob/main/LICENSE",
+      "downloads": [
+        {
+          // Upstream, pinned to an immutable revision, not re-hosted. EXACT bytes (4802571739).
+          "provider": "huggingface",
+          "repo": "laion/CLIP-convnext_xxlarge-laion2B-s34B-b82K-augreg-soup",
+          "revision": "9f3e8ee3f383c672388d9178afe70af9e63ac9df",
+          "files": ["open_clip_pytorch_model.bin"],
+          "estimatedSizeBytes": 4802571739
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/laion/CLIP-convnext_xxlarge-laion2B-s34B-b82K-augreg-soup"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Iris Restoration Training — OpenCLIP ConvNeXt-XXL critic trunk",
+        "description": "Training-only: the frozen OpenCLIP ConvNeXt-XXLarge image trunk (LAION laion2B-s34B-b82K-augreg-soup, ~4.8 GB) of the adversarial critic used by Iris 3B restoration training. Not needed for restoration itself. OpenCLIP / LAION model card licence: MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
       // sc-17627 / sc-17629 — SAM3 was a JOB-TIME auto-download with no install-flow
       // representation at all: the repo and its pinned revision existed only as hardcoded
       // constants in `person_segment_sam3_common.rs`, and the weights landed in
