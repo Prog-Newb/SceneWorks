@@ -188,6 +188,15 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             entrypoint: TypedResolverEntrypoint::PinnedComponent,
         },
     },
+    // sc-25689: Iris generation training stages its pinned TRAINING-only REPA teacher
+    // (`facebook/dinov2-base`) cache-only from the pinned snapshot, after a size + sha256 check.
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/iris_curricula.rs"],
+        categories: &[Category::Image, Category::OptionalComponent],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
+        },
+    },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/person_jobs.rs"],
         categories: &[Category::CaptioningUtility, Category::OptionalComponent],
