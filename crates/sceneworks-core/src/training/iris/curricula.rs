@@ -27,13 +27,14 @@
 //! * holdout items are dataset items whose `extra.split` is `"holdout"` (the engine's
 //!   `TrainingItem.model_options.split`); they never enter the training walk.
 //! * the declared memory floor of a run adds the REPA teacher and multiplies by the ranks that
-//!   share one device ([`iris_run_memory_floor_gb`]).
+//!   share one device ([`iris_run_memory_floor`]).
 
 use serde_json::{Map, Value};
 
+use super::floors::IrisMemoryFloor;
 use super::{
-    boolean, finite_in, invalid, iris_full_activation_checkpointing,
-    iris_generation_memory_floor_gb, iris_options, one_of, string_list, whole, RESUME_FROM_JOB_KEY,
+    boolean, finite_in, invalid, iris_full_activation_checkpointing, iris_generation_memory_floor,
+    iris_options, one_of, string_list, whole, RESUME_FROM_JOB_KEY,
 };
 use crate::training::{
     TrainingConfig, TrainingDataset, TrainingPlanError, TrainingTargetLimitError,
@@ -170,11 +171,11 @@ pub const IRIS_REPA_TEACHER_SHA256: &str =
 /// The only teacher the provisioned resource is.
 pub const IRIS_REPA_TEACHER_ENTRYPOINT: &str = "dinov2_vitb14";
 
-/// Declared (NOT measured) extra GB a REPA run holds on top of its run floor: the frozen fp32
+/// Declared (NOT measured) extra GiB a REPA run holds on top of its run floor: the frozen fp32
 /// DINOv2-B/14 (0.35 GB), the projector + its AdamW state and the teacher's activations. Evidence:
 /// the MLX stage-1 curriculum with REPA (full model, 256²) peaked at 68.2 GB, inside the 80 GB full
 /// floor; an adapter run's floor has no such slack, so the teacher is added explicitly.
-pub const REPA_EXTRA_FLOOR_GB: u32 = 4;
+pub const REPA_EXTRA_FLOOR_GIB: u32 = 4;
 
 fn validate_stage_id(key: &str, value: &Value) -> Result<(), TrainingPlanError> {
     let text = value
@@ -726,9 +727,14 @@ pub fn validate_iris_holdout(
     Ok(())
 }
 
-/// The declared floor (GB) of ONE rank of an Iris generation run on `lane`: the run-shape floor
-/// plus the REPA teacher when alignment is on. `None` when no floor is declared (refuse).
-pub fn iris_rank_memory_floor_gb(lane: &str, config: &TrainingConfig) -> Option<u32> {
+/// The floor row (GiB + provenance) of ONE rank of a generation run: its artifact × resolution row
+/// plus the REPA teacher when alignment is on. `None` when no row covers the shape (refuse).
+pub fn iris_rank_memory_floor(lane: &str, config: &TrainingConfig) -> Option<IrisMemoryFloor> {
+    iris_run_floor(lane, config, 1)
+}
+
+/// The run's floor row with `ranks` ranks on one device (the REPA teacher added per rank).
+fn iris_run_floor(lane: &str, config: &TrainingConfig, ranks: u64) -> Option<IrisMemoryFloor> {
     let network = config
         .advanced
         .get("networkType")
@@ -736,20 +742,19 @@ pub fn iris_rank_memory_floor_gb(lane: &str, config: &TrainingConfig) -> Option<
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("lora");
-    let base = iris_generation_memory_floor_gb(
+    let base = iris_generation_memory_floor(
         lane,
         network,
         config.resolution,
         iris_full_activation_checkpointing(config),
     )?;
     let options = iris_options(config).ok()?;
-    Some(
-        base + if iris_repa_enabled(&options) {
-            REPA_EXTRA_FLOOR_GB
-        } else {
-            0
-        },
-    )
+    let extra = if iris_repa_enabled(&options) {
+        REPA_EXTRA_FLOOR_GIB
+    } else {
+        0
+    };
+    base.for_run(u32::try_from(ranks).ok()?, extra)
 }
 
 /// How many ranks share each device when `world_size` ranks run on `devices` devices (ranks are
@@ -758,12 +763,20 @@ pub fn ranks_per_device(world_size: u64, devices: u64) -> u64 {
     world_size.max(1).div_ceil(devices.max(1))
 }
 
-/// The declared floor (GB) one DEVICE needs for a run: one rank's floor times the ranks sharing
-/// the busiest device. Never admitted unbounded: `None` refuses.
-pub fn iris_run_memory_floor_gb(lane: &str, config: &TrainingConfig, devices: u64) -> Option<u32> {
-    let per_rank = iris_rank_memory_floor_gb(lane, config)?;
-    let ranks = ranks_per_device(iris_world_size(config), devices);
-    u32::try_from(ranks).ok()?.checked_mul(per_rank)
+/// The floor row (GiB + provenance) one DEVICE needs for a run: one rank's floor times the ranks
+/// sharing the busiest device. Only a single rank without the teacher IS a table row; anything
+/// else is arithmetic on one, so a measured row becomes an extrapolation. Never admitted unbounded:
+/// `None` refuses.
+pub fn iris_run_memory_floor(
+    lane: &str,
+    config: &TrainingConfig,
+    devices: u64,
+) -> Option<IrisMemoryFloor> {
+    iris_run_floor(
+        lane,
+        config,
+        ranks_per_device(iris_world_size(config), devices),
+    )
 }
 
 /// How many accelerators a worker with `gpu_id` owns (`"1"` → 1, `"0,1"` → 2, `"mlx"` → 1; the
@@ -1069,17 +1082,39 @@ mod tests {
 
     #[test]
     fn the_memory_floor_adds_the_teacher_and_multiplies_by_ranks_per_device() {
+        use super::super::floors::FloorProvenance;
         let plain = config_with(json!({}));
-        let base = iris_rank_memory_floor_gb("mlx", &plain).unwrap();
-        assert_eq!(base, 16);
+        let base = iris_rank_memory_floor("mlx", &plain).unwrap();
+        assert_eq!(
+            Some(base),
+            iris_generation_memory_floor("mlx", "lora", plain.resolution, false)
+        );
         let repa = config_with(json!({"repa": {"weight": 0.5}}));
         assert_eq!(
-            iris_rank_memory_floor_gb("mlx", &repa),
-            Some(base + REPA_EXTRA_FLOOR_GB)
+            iris_rank_memory_floor("mlx", &repa).map(|floor| floor.gib),
+            Some(base.gib + REPA_EXTRA_FLOOR_GIB)
         );
         let two = config_with(json!({"dist": {"world": {"world_size": 2, "share_device": true}}}));
-        assert_eq!(iris_run_memory_floor_gb("candle", &two, 1), Some(2 * 24));
-        assert_eq!(iris_run_memory_floor_gb("candle", &two, 2), Some(24));
+        let one_rank = iris_rank_memory_floor("candle", &two).unwrap().gib;
+        assert_eq!(
+            iris_run_memory_floor("candle", &two, 1).map(|floor| floor.gib),
+            Some(2 * one_rank)
+        );
+        assert_eq!(
+            iris_run_memory_floor("candle", &two, 2).map(|floor| floor.gib),
+            Some(one_rank)
+        );
+        // sc-25690: a measured row times two ranks, or plus the teacher, is arithmetic on a
+        // measurement — never reported as measured; one rank without the teacher is the row.
+        let mut full = config_with(json!({}));
+        full.resolution = 512;
+        full.advanced.insert("networkType".into(), json!("full"));
+        let row = iris_run_memory_floor("mlx", &full, 1).unwrap();
+        assert_eq!(row.provenance, FloorProvenance::Measured);
+        full.advanced["iris"]["repa"] = json!({"weight": 0.5});
+        let with_teacher = iris_run_memory_floor("mlx", &full, 1).unwrap();
+        assert_eq!(with_teacher.gib, row.gib + REPA_EXTRA_FLOOR_GIB);
+        assert_eq!(with_teacher.provenance, FloorProvenance::Extrapolated);
         assert_eq!(ranks_per_device(3, 2), 2);
         assert!(iris_topology_refusal(&two, 1, "GPU").is_none());
         let unshared = config_with(json!({"dist": {"world": {"world_size": 2}}}));

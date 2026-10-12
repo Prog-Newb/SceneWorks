@@ -242,11 +242,7 @@ pub(crate) async fn iris_plan_check(
         "worldSize": world_size,
         "shareDevice": share_device,
         "timeoutSecs": timeout_secs,
-        "memory": {
-            "lane": lane,
-            "measured": false,
-            "perRankFloorGb": curricula::iris_rank_memory_floor_gb(lane, &config),
-        },
+        "memory": iris_rank_memory_json(lane, &config),
         "teacher": teacher,
         "receipt": iris_curriculum_receipt(&config),
         "engineChecked": engine_checked,
@@ -256,6 +252,18 @@ pub(crate) async fn iris_plan_check(
             .map(|(id, parent)| json!({ "id": id, "parentStage": parent }))
             .collect::<Vec<_>>(),
     })))
+}
+
+/// One rank's floor on `lane` for the curriculum check: GiB, with the provenance of the row it was
+/// read from (never a blanket "measured" flag). A null floor = no row covers the shape (refused).
+fn iris_rank_memory_json(lane: &str, config: &TrainingConfig) -> Value {
+    let floor = curricula::iris_rank_memory_floor(lane, config);
+    json!({
+        "lane": lane,
+        "unit": sceneworks_core::training::iris::floors::FLOOR_UNIT,
+        "perRankFloorGib": floor.map(|floor| floor.gib),
+        "provenance": floor.map(|floor| floor.provenance),
+    })
 }
 
 fn plan_stage(plan: &TrainingPlan) -> Option<String> {

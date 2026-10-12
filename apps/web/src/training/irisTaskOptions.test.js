@@ -170,10 +170,10 @@ describe("task memory floors and previous runs", () => {
     const target = irisDepthTarget();
     const draft = draftFor(target);
     expect(irisFloorSize(target, draft)).toBe(480 * 640);
-    expect(irisMemoryFloors(target, "full", irisFloorSize(target, draft), "mlx")).toEqual([{ lane: "mlx", gb: 80 }]);
+    expect(irisMemoryFloors(target, "full", irisFloorSize(target, draft), "mlx")).toEqual([{ lane: "mlx", gib: 80, provenance: "declared" }]);
     // Batch 2 doubles the pixels: the next row up on Candle; beyond the table → no floor (refused).
     const small = { ...draft, irisTask: { ...draft.irisTask, depth_size: ["384", "384"] }, batchSize: "2" };
-    expect(irisMemoryFloors(target, "full", irisFloorSize(target, small), "candle")).toEqual([{ lane: "candle", gb: 84 }]);
+    expect(irisMemoryFloors(target, "full", irisFloorSize(target, small), "candle")).toEqual([{ lane: "candle", gib: 84, provenance: "extrapolated" }]);
     expect(irisMemoryFloors(target, "full", irisFloorSize(target, { ...draft, batchSize: "2" }), "candle")).toEqual([]);
   });
 
@@ -181,8 +181,8 @@ describe("task memory floors and previous runs", () => {
     const target = irisRestoreTarget();
     const draft = draftFor(target);
     expect(irisFloorSize(target, draft)).toBe(1024 * 1024);
-    expect(irisMemoryFloors(target, "lora", irisFloorSize(target, draft), "mlx")).toEqual([{ lane: "mlx", gb: 56 }]);
-    expect(irisMemoryFloors(target, "full", irisFloorSize(target, draft), "mlx")).toEqual([{ lane: "mlx", gb: 128 }]);
+    expect(irisMemoryFloors(target, "lora", irisFloorSize(target, draft), "mlx")).toEqual([{ lane: "mlx", gib: 56, provenance: "declared" }]);
+    expect(irisMemoryFloors(target, "full", irisFloorSize(target, draft), "mlx")).toEqual([{ lane: "mlx", gib: 128, provenance: "lower_bound" }]);
   });
 
   it("lists a task's previous runs by the plan's base model", () => {

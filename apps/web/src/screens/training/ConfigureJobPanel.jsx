@@ -72,7 +72,7 @@ import {
   targetSupportsFaceLandmarkLoss,
   targetSupportsIdentityLoss,
 } from "../../training/trainingConfig.js";
-import { irisMemoryFloors, irisObjective, irisUpstreamPromptsOn } from "../../training/irisOptions.js";
+import { irisFloorSummary, irisMemoryFloors, irisObjective, irisUpstreamPromptsOn } from "../../training/irisOptions.js";
 import { irisFloorSize } from "../../training/irisTaskOptions.js";
 
 // A number input bound to the config-draft key `field` (`draft` = { configDraft, configValidity,
@@ -559,7 +559,13 @@ export function ConfigureJobPanel({
   const floorSize = irisFloorSize(selectedTarget, configDraft);
   const pixelFloors = selectedTarget?.memoryFloors?.key === "microBatchPixels";
   const memoryFloors = objective
-    ? irisMemoryFloors(selectedTarget, configDraft.networkType, floorSize, irisContext.trainingLane ?? null)
+    ? irisMemoryFloors(
+        selectedTarget,
+        configDraft.networkType,
+        floorSize,
+        irisContext.trainingLane ?? null,
+        configDraft.iris?.activation_checkpointing,
+      )
     : [];
   const laneNames = { mlx: "MLX (Apple Silicon unified memory)", candle: "Candle/CUDA (GPU memory)" };
   // Restoration's paper default is a FULL fine-tune with the highest floors; the lighter LoRA arm is
@@ -747,9 +753,8 @@ export function ConfigureJobPanel({
           </div>
 
           {memoryFloors.length ? (
-            <p className="training-field-hint" aria-label="Declared memory floor">
-              Memory floor (declared, not yet measured):{" "}
-              {memoryFloors.map((floor) => `${laneNames[floor.lane] ?? floor.lane} ${floor.gb} GB`).join(" · ")} for a{" "}
+            <p className="training-field-hint" aria-label="Memory floor">
+              Memory floor: {irisFloorSummary(memoryFloors, laneNames)} for a{" "}
               {pixelFloors ? `${floorSize}-pixel micro-batch` : `${floorSize}px`} {isFullFinetune ? "full fine-tune" : "adapter"} run. On a Mac the floor must fit
               after the macOS/app memory reserve. A machine under its floor is refused before the model loads.
               {irisTask && selectedTarget.memoryFloors?.basis ? ` ${selectedTarget.memoryFloors.basis}` : null}
@@ -758,7 +763,7 @@ export function ConfigureJobPanel({
           {restoreLoraFloors.length ? (
             <p className="training-field-hint" aria-label="Lighter restoration option">
               The paper&apos;s full fine-tune is the default. A LoRA run (merged into the export) needs{" "}
-              {restoreLoraFloors.map((floor) => `${laneNames[floor.lane] ?? floor.lane} ${floor.gb} GB`).join(" · ")}.{" "}
+              {irisFloorSummary(restoreLoraFloors, laneNames)}.{" "}
               <button className="secondary-action" onClick={() => updateConfigDraft("networkType", "lora")} type="button">
                 Use LoRA instead
               </button>

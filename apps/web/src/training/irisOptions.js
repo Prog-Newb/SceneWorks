@@ -329,28 +329,55 @@ export function trainingLaneFromCapabilities(caps) {
   return null;
 }
 
-// The DECLARED floor(s) for this run, `[{ lane, gb }]`. `size` is the row key the target's table
-// is keyed by (`memoryFloors.key`: the resolution, or the micro-batch pixels for depth /
-// restoration). A size between two declared rows takes the next row up (iris.rs
-// `iris_training_memory_floor_gb`); none above the table. With an unknown lane, both lanes' floors.
-// A depth table has no artifact level (always a full fine-tune).
-export function irisMemoryFloors(target, networkType, size, lane) {
+// The floor row(s) this run reads, `[{ lane, gib, provenance }]`, from the target's published
+// `memoryFloors` (floors.rs): `lanes` holds GiB and `provenance` — the same nesting — holds each
+// row's own evidence ("measured" | "extrapolated" | "lower_bound" | "declared"; a table that
+// publishes none is declared). `size` is the row key the table is keyed by (`memoryFloors.key`:
+// the resolution, or the micro-batch pixels for depth / restoration). A size between two rows
+// takes the next row up (iris.rs `iris_generation_memory_floor`); none above the table. With an
+// unknown lane, both lanes' floors. A depth table has no artifact level (always a full
+// fine-tune). A full run that recomputes every region (`activationCheckpointing` "full" /
+// "selective_op") reads the `full_ac` rows where the table has them, exactly as the gate does.
+export function irisMemoryFloors(target, networkType, size, lane, activationCheckpointing) {
   const lanes = target?.memoryFloors?.lanes;
   if (!lanes || typeof lanes !== "object") return [];
-  const artifact = asText(networkType).trim().toLowerCase() === "full" ? "full" : "adapter";
+  const full = asText(networkType).trim().toLowerCase() === "full";
+  const checkpointed = ["full", "selective_op"].includes(asText(activationCheckpointing).trim());
   const wanted = Number(size);
   const laneNames = lane ? [lane] : ["mlx", "candle"];
   return laneNames
     .map((name) => {
+      const artifact = !full ? "adapter" : checkpointed && lanes[name]?.full_ac ? "full_ac" : "full";
       const rows = lanes[name]?.[artifact] ?? lanes[name];
       if (!rows) return null;
       const match = Object.entries(rows)
-        .map(([row, gb]) => [Number(row), Number(gb)])
-        .filter(([row, gb]) => Number.isFinite(wanted) && Number.isFinite(gb) && row >= wanted)
-        .sort((left, right) => left[0] - right[0])[0];
-      return match ? { lane: name, gb: match[1] } : null;
+        .map(([row, gib]) => [row, Number(row), Number(gib)])
+        .filter(([, row, gib]) => Number.isFinite(wanted) && Number.isFinite(gib) && row >= wanted)
+        .sort((left, right) => left[1] - right[1])[0];
+      if (!match) return null;
+      const evidence = target.memoryFloors.provenance?.[name];
+      const provenance = (evidence?.[artifact] ?? evidence)?.[match[0]];
+      return { lane: name, gib: match[2], provenance: typeof provenance === "string" ? provenance : "declared" };
     })
     .filter(Boolean);
+}
+
+// How the Studio names a floor row's evidence (floors.rs `FloorProvenance`).
+export const IRIS_FLOOR_PROVENANCE_LABELS = {
+  measured: "measured",
+  extrapolated: "extrapolated from measured runs",
+  lower_bound: "declared above a measured lower bound",
+  declared: "declared, not yet measured",
+};
+
+// "MLX … 79 GiB (measured) · Candle … 93 GiB (measured)": each floor with its own evidence.
+export function irisFloorSummary(floors, laneNames = {}) {
+  return floors
+    .map(
+      (floor) =>
+        `${laneNames[floor.lane] ?? floor.lane} ${floor.gib} GiB (${IRIS_FLOOR_PROVENANCE_LABELS[floor.provenance] ?? floor.provenance})`,
+    )
+    .join(" · ");
 }
 
 // ---- Captions -----------------------------------------------------------------------------

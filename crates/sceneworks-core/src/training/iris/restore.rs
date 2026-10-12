@@ -15,7 +15,7 @@
 //!   generator window plus a critic window, so `steps`, `saveEvery`, `sampleEvery` and
 //!   `lrWarmupSteps` are whole multiples of `2 × gradientAccumulation` micro-batches;
 //! * [`validate_restore_dataset`] — all aligned pairs or all clean images;
-//! * the declared memory floors ([`restore_memory_floor_gb`]).
+//! * the memory floors, GiB with per-row provenance ([`restore_memory_floor`]).
 //!
 //! The run reads three TRAINING-ONLY resources (VGG16 + LPIPS lin heads, the OpenCLIP critic trunk),
 //! each its own pinned Model Manager install ([`RESTORE_TRAINING_RESOURCE_MODELS`]) — never pulled
@@ -27,6 +27,7 @@ use super::super::{
     object, ContractNumber, ExtraFields, TrainingConfig, TrainingDataset, TrainingModality,
     TrainingOutputKind, TrainingPlanError, TrainingTarget, TrainingTargetLimitError,
 };
+use super::floors::{IrisMemoryFloor, Peak, CAMPAIGN_CUDA_CARD, CANDLE_RESERVE_GIB};
 use super::{
     boolean, finite_in, invalid, one_of, validate_micro_steps, whole, IRIS_BASE_MODEL_REPO,
     IRIS_FAMILY, IRIS_TRAINING_KERNEL, LOAD_FROM_JOB_KEY, RESUME_FROM_JOB_KEY,
@@ -102,35 +103,81 @@ const UNREAD_ADVANCED_KEYS: [&str; 6] = [
     "timestepBias",
 ];
 
-/// Declared (NOT measured) floors, GB, per `(lane, artifact, micro-batch pixels ≤, floor)` with a
-/// micro-batch's pixels = `batchSize × resolution²`.
+// ---- Measured inputs of the restoration full fine-tune rows ----------------------------------------
+// The ONLY numbers to edit when a campaign re-measures: whole-process peaks of the paper's full
+// recipe (batch 1, bf16, EMA, two steps + export), in the unit the probe printed.
+//
+// 256² crop: Candle device VRAM ~93.7 GiB on an RTX PRO 6000 (inference run 38149768393).
+// 512² crop (sc-25690 terminal campaign, `train_memory_probe`, DECIMAL GB): MLX phys_footprint
+// 101.13 on nax-macos-2 (run 38292137908); Candle device VRAM 101.8 over the idle baseline (run
+// 38291037726).
+// 1024² crop: MLX was stopped by its guard at 116.75 GB — a LOWER bound, not a peak — and Candle
+// ran out of memory on the campaign card, so the card's whole capacity is its lower bound.
+const CANDLE_RESTORE_FULL_256_PEAK: Peak = Peak::Gib(93.7);
+const MLX_RESTORE_FULL_512_PEAK: Peak = Peak::DecimalGb(101.13);
+const CANDLE_RESTORE_FULL_512_PEAK: Peak = Peak::DecimalGb(101.8);
+const MLX_RESTORE_FULL_1024_LOWER_BOUND: Peak = Peak::DecimalGb(116.75);
+const CANDLE_RESTORE_FULL_1024_LOWER_BOUND: Peak = CAMPAIGN_CUDA_CARD;
+
+/// Memory floors, **GiB** ([`super::floors`]), per `(lane, artifact, micro-batch pixels ≤, floor)`
+/// with a micro-batch's pixels = `batchSize × resolution²`; each row carries its own provenance.
 ///
-/// Evidence (inference real-weight runs of the full recipe on the 3B restoration export, 256² crop,
-/// batch 1, bf16, EMA, two steps): LoRA rank 8 — MLX guard peak 25.2 GB (nax-macos-2, run
-/// 38140601912), CUDA VRAM peak 29.3 GB (run 38137202298); the paper's FULL fine-tune — MLX 87.5 GB,
-/// CUDA ~93.7 GiB. The 65 536-pixel rows are those peaks rounded up (Candle adapter adding the 2 GB
-/// allocator reserve; the Candle full row is the measured peak itself, which ran on the 96 GB card).
-/// The epic-25678 terminal campaign (sc-25690, `train_memory_probe`: the paper recipe, batch 1, two
-/// steps + export, whole-process peak) MEASURED the full fine-tune at a 512² crop (262 144 px): MLX
-/// 101.13 GB (nax-macos-2, inference run 38292137908), Candle 101.8 GB of device VRAM (RTX PRO 6000,
-/// run 38291037726, + the 2 GB reserve). At 1024² MLX passed 115 GB (the guard's stop at 116.75 GB —
-/// a measured LOWER bound) and Candle ran out of memory on a 96 GB card, so the 1 048 576 full rows
-/// stay declared above those bounds. Adapter rows above 65 536 px scale the activation, LPIPS and
-/// critic terms conservatively. A micro-batch above the last row is refused rather than admitted
-/// unbounded.
-const RESTORE_FLOORS_GB: [(&str, &str, u64, u32); 12] = [
-    ("mlx", "full", 65_536, 92),
-    ("mlx", "full", 262_144, 102),
-    ("mlx", "full", 1_048_576, 128),
-    ("mlx", "adapter", 65_536, 28),
-    ("mlx", "adapter", 262_144, 36),
-    ("mlx", "adapter", 1_048_576, 56),
-    ("candle", "full", 65_536, 94),
-    ("candle", "full", 262_144, 104),
-    ("candle", "full", 1_048_576, 140),
-    ("candle", "adapter", 65_536, 32),
-    ("candle", "adapter", 262_144, 40),
-    ("candle", "adapter", 1_048_576, 60),
+/// * MEASURED — the full fine-tune at 262 144 px on both lanes and at 65 536 px on Candle: the
+///   `*_PEAK` constants above converted to GiB, plus the 2 GiB Candle reserve, rounded up; a Candle
+///   row never exceeds the card that held its run.
+/// * LOWER BOUND — the full fine-tune at 1 048 576 px: declared above the measured lower bounds.
+/// * DECLARED — the MLX full row at 65 536 px (the paper's full fine-tune peaked at 87.5 GB there,
+///   nax-macos-2; padded) and every adapter row: LoRA rank 8 at a 256² crop peaked at 25.2 GB on
+///   MLX (run 38140601912) and 29.3 GB of VRAM on CUDA (run 38137202298), padded (Candle adding the
+///   reserve); adapter rows above 65 536 px scale the activation, LPIPS and critic terms
+///   conservatively.
+///
+/// A micro-batch above the last row is refused rather than admitted unbounded.
+const RESTORE_FLOORS_GIB: [(&str, &str, u64, IrisMemoryFloor); 12] = [
+    ("mlx", "full", 65_536, IrisMemoryFloor::declared(92)),
+    (
+        "mlx",
+        "full",
+        262_144,
+        IrisMemoryFloor::measured(MLX_RESTORE_FULL_512_PEAK, 0),
+    ),
+    (
+        "mlx",
+        "full",
+        1_048_576,
+        IrisMemoryFloor::above_lower_bound(MLX_RESTORE_FULL_1024_LOWER_BOUND, 128),
+    ),
+    ("mlx", "adapter", 65_536, IrisMemoryFloor::declared(28)),
+    ("mlx", "adapter", 262_144, IrisMemoryFloor::declared(36)),
+    ("mlx", "adapter", 1_048_576, IrisMemoryFloor::declared(56)),
+    (
+        "candle",
+        "full",
+        65_536,
+        IrisMemoryFloor::measured(CANDLE_RESTORE_FULL_256_PEAK, CANDLE_RESERVE_GIB)
+            .held_on(CAMPAIGN_CUDA_CARD.gib()),
+    ),
+    (
+        "candle",
+        "full",
+        262_144,
+        IrisMemoryFloor::measured(CANDLE_RESTORE_FULL_512_PEAK, CANDLE_RESERVE_GIB)
+            .held_on(CAMPAIGN_CUDA_CARD.gib()),
+    ),
+    (
+        "candle",
+        "full",
+        1_048_576,
+        IrisMemoryFloor::above_lower_bound(CANDLE_RESTORE_FULL_1024_LOWER_BOUND, 140),
+    ),
+    ("candle", "adapter", 65_536, IrisMemoryFloor::declared(32)),
+    ("candle", "adapter", 262_144, IrisMemoryFloor::declared(40)),
+    (
+        "candle",
+        "adapter",
+        1_048_576,
+        IrisMemoryFloor::declared(60),
+    ),
 ];
 
 fn network_type(config: &TrainingConfig) -> String {
@@ -144,9 +191,9 @@ fn network_type(config: &TrainingConfig) -> String {
         .to_ascii_lowercase()
 }
 
-/// The declared floor (GB) of a restoration run on `lane`, or `None` above the table / for an unknown
-/// lane (callers refuse).
-pub fn restore_memory_floor_gb(lane: &str, config: &TrainingConfig) -> Option<u32> {
+/// The floor row (GiB + provenance) of a restoration run on `lane`, or `None` above the table / for
+/// an unknown lane (callers refuse).
+pub fn restore_memory_floor(lane: &str, config: &TrainingConfig) -> Option<IrisMemoryFloor> {
     let artifact = if network_type(config) == "full" {
         "full"
     } else {
@@ -154,7 +201,7 @@ pub fn restore_memory_floor_gb(lane: &str, config: &TrainingConfig) -> Option<u3
     };
     let side = u64::from(config.resolution);
     let pixels = u64::from(config.batch_size.max(1)) * side * side;
-    RESTORE_FLOORS_GB
+    RESTORE_FLOORS_GIB
         .iter()
         .filter(|(row_lane, row_artifact, row_pixels, _)| {
             *row_lane == lane && *row_artifact == artifact && *row_pixels >= pixels
@@ -164,34 +211,21 @@ pub fn restore_memory_floor_gb(lane: &str, config: &TrainingConfig) -> Option<u3
 }
 
 fn memory_floors_json() -> Value {
-    let mut lanes = Map::new();
-    for (lane, artifact, pixels, floor) in RESTORE_FLOORS_GB {
-        lanes
-            .entry(lane.to_owned())
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()
-            .expect("lane is an object")
-            .entry(artifact.to_owned())
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()
-            .expect("artifact rows are an object")
-            .insert(pixels.to_string(), json!(floor));
-    }
-    json!({
-        "measured": false,
-        "unit": "GB",
-        "key": "microBatchPixels",
-        "basis": "Declared floors (no measurement campaign) keyed by the pixels of one micro-batch \
-                  (batch size × crop²). Evidence at a 256² crop, batch 1: LoRA peaked at 25.2 GB on \
-                  MLX and 29.3 GB on CUDA; the paper's full fine-tune at 87.5 GB on MLX and ~93.7 GB \
-                  on CUDA, and at a 512² crop 101.1 GB on MLX and 101.8 GB on CUDA. At 1024² it \
-                  needs more than 115 GB on MLX and more than a 96 GB card on CUDA (measured \
-                  lower bounds), so the 1024² rows stay declared above them. An MLX floor is judged against \
-                  unified memory minus the macOS/app reserve. A machine under its floor is refused \
-                  before the model loads, and a micro-batch above the last row is refused rather than \
-                  admitted without a bound.",
-        "lanes": Value::Object(lanes),
-    })
+    super::floors::memory_floors_json(
+        Some("microBatchPixels"),
+        "Keyed by artifact and the pixels of one micro-batch (batch size × crop²). Measured rows \
+         are the whole-process peak of the paper's full recipe at batch 1 (two steps + export), \
+         converted to GiB, plus a 2 GiB allocator reserve on Candle.",
+        RESTORE_FLOORS_GIB
+            .iter()
+            .map(|(lane, artifact, pixels, floor)| {
+                (
+                    *lane,
+                    vec![(*artifact).to_owned(), pixels.to_string()],
+                    *floor,
+                )
+            }),
+    )
 }
 
 /// The Iris-3B restoration training target.
@@ -658,21 +692,103 @@ mod tests {
 
     #[test]
     fn floors_distinguish_the_full_recipe_from_an_adapter() {
+        let row = |lane: &str, artifact: &str, pixels: u64| {
+            RESTORE_FLOORS_GIB
+                .iter()
+                .find(|(row_lane, row_artifact, row_pixels, _)| {
+                    *row_lane == lane && *row_artifact == artifact && *row_pixels == pixels
+                })
+                .map(|(_, _, _, floor)| *floor)
+        };
         let mut config = config();
         // The recipe (full, 1024², batch 1) is the 1 048 576-pixel row.
-        assert_eq!(restore_memory_floor_gb("mlx", &config), Some(128));
+        assert_eq!(
+            restore_memory_floor("mlx", &config),
+            row("mlx", "full", 1_048_576)
+        );
         config.resolution = 256;
-        assert_eq!(restore_memory_floor_gb("mlx", &config), Some(92));
-        assert_eq!(restore_memory_floor_gb("candle", &config), Some(94));
+        for lane in ["mlx", "candle"] {
+            assert_eq!(
+                restore_memory_floor(lane, &config),
+                row(lane, "full", 65_536)
+            );
+        }
+        let full = restore_memory_floor("mlx", &config).unwrap();
         config.advanced.insert("networkType".into(), json!("lora"));
-        assert_eq!(restore_memory_floor_gb("mlx", &config), Some(28));
-        assert_eq!(restore_memory_floor_gb("candle", &config), Some(32));
+        for lane in ["mlx", "candle"] {
+            assert_eq!(
+                restore_memory_floor(lane, &config),
+                row(lane, "adapter", 65_536)
+            );
+        }
+        assert!(
+            restore_memory_floor("mlx", &config).unwrap().gib < full.gib,
+            "an adapter needs far less than the full recipe"
+        );
         config.resolution = 1024;
         config.batch_size = 2;
         assert_eq!(
-            restore_memory_floor_gb("mlx", &config),
+            restore_memory_floor("mlx", &config),
             None,
             "beyond the table"
+        );
+    }
+
+    /// sc-25690: provenance is per row. The full rows measured at their own shape say measured; the
+    /// 1024² full rows — whose runs were stopped before their peak — say lower bound and sit above
+    /// it; the adapter rows say declared. The published table carries the same, with no
+    /// table-wide `measured` flag, and floors only grow with the micro-batch.
+    #[test]
+    fn floor_rows_publish_their_own_provenance() {
+        use super::super::floors::{ceil_gib, FloorProvenance};
+        let published = &iris_restore_target().extra["memoryFloors"];
+        assert_eq!(published["unit"], json!("GiB"));
+        assert!(published.get("measured").is_none());
+        for (lane, artifact, pixels, floor) in RESTORE_FLOORS_GIB {
+            let expected = match (lane, artifact, pixels) {
+                (_, "adapter", _) | ("mlx", "full", 65_536) => FloorProvenance::Declared,
+                (_, "full", 1_048_576) => FloorProvenance::LowerBound,
+                _ => FloorProvenance::Measured,
+            };
+            assert_eq!(floor.provenance, expected, "{lane} {artifact} {pixels}");
+            assert_eq!(
+                published["provenance"][lane][artifact][pixels.to_string()],
+                json!(expected.as_str())
+            );
+            assert_eq!(
+                published["lanes"][lane][artifact][pixels.to_string()],
+                json!(floor.gib)
+            );
+        }
+        for (lane, bound) in [
+            ("mlx", MLX_RESTORE_FULL_1024_LOWER_BOUND),
+            ("candle", CANDLE_RESTORE_FULL_1024_LOWER_BOUND),
+        ] {
+            let floor = RESTORE_FLOORS_GIB
+                .iter()
+                .find(|row| row.0 == lane && row.1 == "full" && row.2 == 1_048_576)
+                .unwrap()
+                .3;
+            assert!(floor.gib > ceil_gib(bound.gib()), "{lane}: {floor:?}");
+        }
+        for lane in ["mlx", "candle"] {
+            for artifact in ["full", "adapter"] {
+                let rows: Vec<_> = RESTORE_FLOORS_GIB
+                    .iter()
+                    .filter(|row| row.0 == lane && row.1 == artifact)
+                    .collect();
+                assert!(
+                    rows.windows(2)
+                        .all(|pair| pair[0].2 < pair[1].2 && pair[0].3.gib <= pair[1].3.gib),
+                    "{lane} {artifact}: {rows:?}"
+                );
+            }
+        }
+        let basis = published["basis"].as_str().unwrap();
+        assert!(!basis.contains("no measurement campaign"), "{basis}");
+        assert!(
+            basis.contains("Declared above a measured lower bound: mlx full 1048576"),
+            "{basis}"
         );
     }
 

@@ -662,10 +662,10 @@ describe("ConfigureJobPanel — Iris", () => {
 
   it("shows the declared memory floor for the active lane", () => {
     mount(<ConfigureJobPanel {...irisProps()} />);
-    const hint = container.querySelector('[aria-label="Declared memory floor"]');
-    expect(hint.textContent).toContain("16 GB");
-    expect(hint.textContent).toContain("declared, not yet measured");
-    expect(hint.textContent).not.toContain("24 GB");
+    const hint = container.querySelector('[aria-label="Memory floor"]');
+    expect(hint.textContent).toContain("16 GiB");
+    expect(hint.textContent).toContain("16 GiB (declared, not yet measured)");
+    expect(hint.textContent).not.toContain("24 GiB");
   });
 
   it("renders the data-walk warning when the preflight returns one", () => {
@@ -721,9 +721,9 @@ describe("Iris depth / restoration (sc-25687 / sc-25688)", () => {
       updateConfigDraft: (key, value) => calls.push([key, value]),
       irisContext: { trainingLane: "mlx" },
     });
-    expect(container.querySelector('[aria-label="Declared memory floor"]').textContent).toContain("128 GB");
+    expect(container.querySelector('[aria-label="Memory floor"]').textContent).toContain("128 GiB");
     const offer = container.querySelector('[aria-label="Lighter restoration option"]');
-    expect(offer.textContent).toContain("56 GB");
+    expect(offer.textContent).toContain("56 GiB");
     expect(calls).toEqual([]);
     act(() => [...offer.querySelectorAll("button")].find((button) => button.textContent === "Use LoRA instead").click());
     expect(calls).toEqual([["networkType", "lora"]]);

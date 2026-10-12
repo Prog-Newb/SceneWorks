@@ -1,24 +1,33 @@
 #!/usr/bin/env bash
 # sc-25690 (epic 25678 terminal evidence): the Iris-3B SceneWorks worker real-weight smokes on the
 # SECOND Mac (nax-macos-2) through the production job path — generation, depth and restoration
-# jobs, and the generation (LoRA / LoKr cancel→resume / two-rank DDP), depth and restoration
-# training jobs with their trained artifacts used by a follow-up job. Dispatch-only, gates nothing
+# jobs, and the generation (LoRA / LoKr cancel→resume / two-rank DDP / FULL fine-tune
+# cancel→resume), depth and restoration (LoRA and the paper's FULL fine-tune) training jobs with
+# their trained artifacts used by a follow-up job. Dispatch-only, gates nothing
 # (FEATURE_DEVELOPMENT.md "Gate teardown").
 #
 # Safety, in order, before any GPU work:
 #   * the runner must be nax-macos-2 — the dev Mac (nax-macos) is never used, whatever label routed
 #     the job here;
-#   * >= 128 GB unified memory, and `memory_pressure` free GB >= the test's cap + 10 GB headroom
+#   * >= 128 GiB unified memory, and `memory_pressure` free GiB >= the test's cap + 10 GiB headroom
 #     right before EACH test;
 #   * every test binary runs under an external phys_footprint guard summed over its whole process
-#     tree (the two-rank DDP smoke spawns rank processes) that SIGTERMs the tree at a stated cap and
-#     at a wall-clock limit — the only kill path; MLX is never SIGKILLed mid-buffer from here.
+#     tree (tree_guard.py; the two-rank DDP smoke spawns rank processes) that SIGTERMs the tree at a
+#     stated cap and at a wall-clock limit — the only kill path; MLX is never SIGKILLed mid-buffer
+#     from here.
+#
+# ONE unit: every memory figure here is GiB (2^30 bytes) — host memory, free memory, the caps and
+# the peaks — and the guard reads BYTES from the kernel ledger (`proc_pid_rusage`
+# `ri_phys_footprint` / `ri_lifetime_max_phys_footprint`), never `footprint`'s rounded "N GB" text.
 #
 # The depth and restoration jobs (inference AND training) run against an HF hub that holds ONLY
 # the speridlabs/iris-3b snapshot (+ restoration's three training resources): the Qwen3-VL text
 # encoder is provably absent from what they can resolve.
 #
-# Inputs (env): IRIS_SMOKE_FILTER = all | inference | training | <one test name> | cleanup.
+# Inputs (env): IRIS_SMOKE_FILTER = all | inference | training | full_ft | <one test name> | cleanup.
+# `all` / `training` do NOT include the two FULL fine-tune smokes (each is a ~90 GiB run of its
+# own); `full_ft` selects both, and each is selectable by name — one per dispatch fits the job's
+# 60-minute ceiling.
 set -euo pipefail
 
 out="${IRIS_EVIDENCE_DIR:?}"
@@ -29,11 +38,11 @@ target="$HOME/sceneworks-iris-campaign-target/$sha"
 
 # ---- 1. the box -----------------------------------------------------------------------------------
 mem_bytes="$(sysctl -n hw.memsize)"
-mem_gb=$((mem_bytes / 1000000000))
+mem_gib=$((mem_bytes / 1073741824))
 {
   echo "runner=${RUNNER_NAME:-unknown} source_sha=$sha filter=$filter"
   sysctl -n hw.model machdep.cpu.brand_string
-  echo "unified memory: $mem_gb GB"
+  echo "unified memory: $mem_gib GiB ($mem_bytes bytes)"
   /usr/bin/memory_pressure -Q || true
   df -h "$HOME" | tail -1
 } | tee "$out/host.txt"
@@ -41,8 +50,8 @@ if [[ "${RUNNER_NAME:-}" != "nax-macos-2" ]]; then
   echo "::error::refusing: this lane runs only on nax-macos-2 (landed on ${RUNNER_NAME:-unknown}); no GPU work was started"
   exit 1
 fi
-if (( mem_gb < 128 )); then
-  echo "::error::refusing: $mem_gb GB unified memory (< 128 GB)"
+if (( mem_gib < 128 )); then
+  echo "::error::refusing: $mem_gib GiB unified memory (< 128 GiB)"
   exit 1
 fi
 
@@ -55,8 +64,9 @@ fi
 
 # ---- 2. the weights (offline at test time) --------------------------------------------------------
 # The box's task-owned real-weight hub (inference's Iris lanes already materialized the generation
-# backbone, upscaler/, Qwen3-VL and the restoration training resources there). The only Iris task
-# export not yet resident is depth/; it is fetched here, pinned, through the HF cache layout.
+# backbone, upscaler/, Qwen3-VL and the restoration training resources there). Anything pinned
+# below that is not yet resident (depth/, the REPA teacher the stage-1 full fine-tune aligns to) is
+# fetched here through the HF cache layout.
 hub="$HOME/sceneworks-rw-weights/hub"
 iris_rev=7445443349bc9abe3c96f01ff793e2098ca012b3
 iris_repo_dir="$hub/models--speridlabs--iris-3b"
@@ -79,6 +89,8 @@ for repo, rev, patterns in [
     ("laion/CLIP-convnext_xxlarge-laion2B-s34B-b82K-augreg-soup", "9f3e8ee3f383c672388d9178afe70af9e63ac9df", None),
     ("timm/vgg16.tv_in1k", "b8d8aa2dd860af9233c8c67385a8097fd6c35d3f", None),
     ("vivym/lpips", "270571f1fb2a2c4c5f920cec96cd87838c345982", None),
+    # The REPA teacher of the official stage1_256 curriculum (`IRIS_REPA_TEACHER_*`).
+    ("facebook/dinov2-base", "f9e44c814b77203eaa57a6bdbbd535f21ede1415", ["model.safetensors"]),
 ]:
     snap = os.path.join(os.environ["IRIS_HUB"], "models--" + repo.replace("/", "--"), "snapshots", rev)
     # Resident = every literal pattern present and every directory pattern non-empty; a glob-only
@@ -102,26 +114,18 @@ for f in config.yaml model.safetensors depth/config.yaml depth/model.safetensors
   test -s "$snap/$f" || { echo "::error::missing $snap/$f"; exit 1; }
 done
 test -d "$qwen_dir/snapshots/ebb281ec70b05090aa6165b016eac8ec08e71b17"
+test -s "$hub/models--facebook--dinov2-base/snapshots/f9e44c814b77203eaa57a6bdbbd535f21ede1415/model.safetensors"
 
 # The encoder-free hub for the depth / restoration jobs: the Iris repo (+ restoration's training
-# resources), and nothing else. A real directory tree whose files are HARD links to the resolved
-# hub files (same volume, no copy): the worker canonicalizes a training base path and requires it
-# inside the app-managed hub, which a symlink into the shared hub would leave.
+# resources), and nothing else. A real directory tree whose files are APFS CLONES of the resolved
+# hub files (clone_hub.py: `cp -c`, no bytes copied): the worker canonicalizes a training base
+# path and requires it inside the app-managed hub, which a symlink into the shared hub would leave
+# — and a hard link would share the blob's inode, so a write through this hub could mutate the
+# shared one. A clone cannot.
 no_encoder="$RUNNER_TEMP/iris-hub-no-encoder"
 rm -rf "$no_encoder"
 mkdir -p "$no_encoder"
-python3.12 - "$no_encoder" "$iris_repo_dir" "$critic_dir" "$vgg_dir" "$lpips_dir" <<'PY'
-import os, sys
-dest_root = sys.argv[1]
-for repo in sys.argv[2:]:
-    base = os.path.join(dest_root, os.path.basename(repo))
-    for here, dirs, files in os.walk(repo, followlinks=True):
-        rel = os.path.relpath(here, repo)
-        os.makedirs(os.path.join(base, rel), exist_ok=True)
-        for f in files:
-            src = os.path.realpath(os.path.join(here, f))
-            os.link(src, os.path.join(base, rel, f))
-PY
+python3.12 "$(dirname "$0")/clone_hub.py" "$no_encoder" "$iris_repo_dir" "$critic_dir" "$vgg_dir" "$lpips_dir"
 if find -L "$no_encoder" -maxdepth 1 -iname '*qwen*' | grep -q .; then
   echo "::error::the encoder-free hub resolves a Qwen repository"; exit 1
 fi
@@ -147,55 +151,27 @@ test -x "$bin"
 echo "build ${SECONDS}s total, $(( $(date +%s) - build_start ))s cargo; binary $bin" | tee "$out/build.txt"
 
 # ---- 4. guarded runs ------------------------------------------------------------------------------
-tree_pids() { # $1 root pid -> the root and every descendant
-  local p=$1
-  echo "$p"
-  for c in $(pgrep -P "$p" 2>/dev/null || true); do tree_pids "$c"; done
-}
 failed=0
-run_guarded() { # $1 test path, $2 cap GB, $3 wall s, $4 hub
-  local test=$1 cap_gb=$2 limit_s=$3 hub_dir=$4 name="${1##*::}"
-  local log="$out/$name.log" free_pct free_gb
+run_guarded() { # $1 test path, $2 cap GiB, $3 wall s, $4 hub
+  local test=$1 cap_gib=$2 limit_s=$3 hub_dir=$4 name="${1##*::}"
+  local log="$out/$name.log" free_pct free_gib
   free_pct="$(/usr/bin/memory_pressure -Q 2>/dev/null | sed -n 's/.*free percentage: \([0-9]*\)%.*/\1/p')"
-  free_gb=$(( mem_gb * ${free_pct:-0} / 100 ))
-  if [[ -z "$free_pct" || "$free_gb" -lt $((cap_gb + 10)) ]]; then
-    echo "::error::$name not started: ${free_gb} GB free (memory_pressure ${free_pct:-?}%) < cap ${cap_gb} + 10 GB" | tee "$log"
+  free_gib=$(( mem_gib * ${free_pct:-0} / 100 ))
+  if [[ -z "$free_pct" || "$free_gib" -lt $((cap_gib + 10)) ]]; then
+    echo "::error::$name not started: ${free_gib} GiB free (memory_pressure ${free_pct:-?}% of ${mem_gib} GiB) < cap ${cap_gib} + 10 GiB" | tee "$log"
     failed=1
     return
   fi
-  local cap_kb=$((cap_gb * 1000 * 1000)) start pid peak=0 fp total stop=""
-  start=$(date +%s)
-  HF_HUB_CACHE="$hub_dir" HF_HUB_OFFLINE=1 TMPDIR="$RUNNER_TEMP" \
-    "$bin" "$test" --ignored --exact --nocapture --test-threads=1 > "$log" 2>&1 &
-  pid=$!
-  while kill -0 "$pid" 2>/dev/null; do
-    total=0
-    for p in $(tree_pids "$pid"); do
-      fp=$(footprint -p "$p" 2>/dev/null | awk '/phys_footprint:/ {v=$2; u=$3; if (u=="GB") v*=1048576; else if (u=="MB") v*=1024; print int(v); exit}' || true)
-      total=$((total + ${fp:-0}))
-    done
-    (( total > peak )) && peak=$total
-    if [[ -z "$stop" && "$total" -gt "$cap_kb" ]]; then
-      stop="footprint ${total} KB > ${cap_gb} GB cap"
-      echo "GUARD: $stop, SIGTERM" | tee -a "$out/guard.txt"
-      # shellcheck disable=SC2046 # one pid per word
-      kill -TERM $(tree_pids "$pid") 2>/dev/null || true
-    fi
-    if [[ -z "$stop" && $(( $(date +%s) - start )) -gt "$limit_s" ]]; then
-      stop="wall time over ${limit_s}s"
-      echo "GUARD: $stop, SIGTERM" | tee -a "$out/guard.txt"
-      # shellcheck disable=SC2046 # one pid per word
-      kill -TERM $(tree_pids "$pid") 2>/dev/null || true
-    fi
-    sleep 1
-  done
+  local guard rc
   set +e
-  wait "$pid"
-  local rc=$?
+  guard="$(HF_HUB_CACHE="$hub_dir" HF_HUB_OFFLINE=1 TMPDIR="$RUNNER_TEMP" \
+    python3.12 "$(dirname "$0")/tree_guard.py" "$cap_gib" "$limit_s" "$log" -- \
+    "$bin" "$test" --ignored --exact --nocapture --test-threads=1)"
+  rc=$?
   set -e
   cat "$log"
-  echo "[[IRIS_MLX_SMOKE]] $name exit=$rc peak_tree_phys_footprint_gb=$(awk -v k="$peak" 'BEGIN{printf "%.2f", k/1048576}') cap_gb=$cap_gb wall_s=$(( $(date +%s) - start )) hub=$hub_dir ${stop:+stopped=\"$stop\"}" \
-    | tee -a "$out/summary.txt"
+  grep '^GUARD:' <<<"$guard" | tee -a "$out/guard.txt" || true
+  echo "[[IRIS_MLX_SMOKE]] $name $(grep '^exit=' <<<"$guard" | tail -1) hub=$hub_dir" | tee -a "$out/summary.txt"
   if [[ "$rc" != 0 ]] || ! grep -q "test result: ok. 1 passed" "$log"; then
     echo "::error::$test did not run exactly one passing test"
     failed=1
@@ -214,13 +190,23 @@ training_set=(
   "iris_training_gpu_smoke::iris_training_gpu_smoke_depth 90 1200 $no_encoder"
   "iris_training_gpu_smoke::iris_training_gpu_smoke_restore 50 1500 $no_encoder"
 )
+# sc-25690: the FULL fine-tunes through the job path — the admission gate reads the full rows, a
+# real job runs under them. Generation: the official stage1_256 (REPA, Muon) canceled after its
+# first durable checkpoint, resumed, exported, and the registered checkpoint rendered by a
+# generation job. Restoration: the paper's full recipe at a 256² crop, exported and selected by id
+# in a restore job. Each run holds the full-model state (f32 masters + grads + optimizer + EMA).
+full_ft_set=(
+  "iris_training_gpu_smoke::iris_training_gpu_smoke_full_ft_generation_cancel_resume 100 3000 $hub"
+  "iris_training_gpu_smoke::iris_training_gpu_smoke_full_ft_restore 104 2400 $no_encoder"
+)
 case "$filter" in
   all) selected=("${inference_set[@]}" "${training_set[@]}") ;;
   inference) selected=("${inference_set[@]}") ;;
   training) selected=("${training_set[@]}") ;;
+  full_ft) selected=("${full_ft_set[@]}") ;;
   *)
     selected=()
-    for row in "${inference_set[@]}" "${training_set[@]}"; do
+    for row in "${inference_set[@]}" "${training_set[@]}" "${full_ft_set[@]}"; do
       [[ "${row%% *}" == *"::$filter" ]] && selected+=("$row")
     done
     ;;
