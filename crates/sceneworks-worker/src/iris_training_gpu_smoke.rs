@@ -1447,6 +1447,683 @@ async fn run_cancel_resume_smoke(arm: CancelResumeArm) {
     );
 }
 
+// =============================================================================================
+// sc-25690 (epic acceptance 5): REAL two-GPU distributed training through the job path — two rank
+// processes on two DIFFERENT physical cards (`dist.world.share_device` off, a worker that owns
+// both cards: `SCENEWORKS_GPU_ID=0,1` + `CUDA_VISIBLE_DEVICES=0,1`). Which card a rank ran on is
+// read from the run itself — each rank process records its own pid, and `nvidia-smi` says which
+// card's context that pid held — never from the plan the rank was handed.
+//
+// Deliberately NOT named `iris_training_gpu_smoke_*`: the default CUDA training filter runs with
+// one visible card, where this smoke cannot run. Dispatch it by name with both cards exposed.
+// =============================================================================================
+
+/// The `(pid, gpu uuid)` pairs of
+/// `nvidia-smi --query-compute-apps=pid,gpu_uuid --format=csv,noheader`.
+fn parse_compute_apps(csv: &str) -> Vec<(u64, String)> {
+    csv.lines()
+        .filter_map(|line| {
+            let (pid, uuid) = line.split_once(',')?;
+            let uuid = uuid.trim();
+            if uuid.is_empty() {
+                return None;
+            }
+            Some((pid.trim().parse().ok()?, uuid.to_owned()))
+        })
+        .collect()
+}
+
+/// The `(index, uuid, used MiB)` rows of
+/// `nvidia-smi --query-gpu=index,uuid,memory.used --format=csv,noheader,nounits`.
+fn parse_gpu_memory(csv: &str) -> Vec<(u32, String, u64)> {
+    csv.lines()
+        .filter_map(|line| {
+            let mut fields = line.split(',').map(str::trim);
+            let index = fields.next()?.parse().ok()?;
+            let uuid = fields.next().filter(|uuid| !uuid.is_empty())?.to_owned();
+            let used = fields.next()?.parse().ok()?;
+            Some((index, uuid, used))
+        })
+        .collect()
+}
+
+/// What `nvidia-smi` showed while a fleet ran: every `(pid, card)` context seen, and each card's
+/// used memory before the run and at its highest.
+#[derive(Debug, Default, Clone)]
+struct CardObservations {
+    contexts: std::collections::BTreeSet<(u64, String)>,
+    baseline_mib: std::collections::BTreeMap<String, u64>,
+    peak_mib: std::collections::BTreeMap<String, u64>,
+    index: std::collections::BTreeMap<String, u32>,
+}
+
+impl CardObservations {
+    fn record_memory(&mut self, rows: &[(u32, String, u64)]) {
+        for (index, uuid, used) in rows {
+            self.index.insert(uuid.clone(), *index);
+            self.baseline_mib.entry(uuid.clone()).or_insert(*used);
+            let peak = self.peak_mib.entry(uuid.clone()).or_insert(*used);
+            *peak = (*peak).max(*used);
+        }
+    }
+}
+
+/// The card each rank ran on, from the run's own records: `rank_pids` is what the rank processes
+/// recorded about themselves, `contexts` what the driver reported. Every one of the `world` ranks
+/// must have held a context on exactly ONE card, and no two ranks on the same card.
+fn ranks_on_distinct_cards(
+    rank_pids: &[(u64, u64)],
+    contexts: &std::collections::BTreeSet<(u64, String)>,
+    world: u64,
+) -> Result<Vec<(u64, String)>, String> {
+    let mut placed = Vec::new();
+    for rank in 0..world {
+        let pids: Vec<u64> = rank_pids
+            .iter()
+            .filter(|(recorded, _)| *recorded == rank)
+            .map(|(_, pid)| *pid)
+            .collect();
+        let [pid] = pids[..] else {
+            return Err(format!(
+                "rank {rank} of {world} recorded {} processes (records {rank_pids:?})",
+                pids.len()
+            ));
+        };
+        let cards: Vec<&String> = contexts
+            .iter()
+            .filter(|(context_pid, _)| *context_pid == pid)
+            .map(|(_, uuid)| uuid)
+            .collect();
+        match cards[..] {
+            [card] => placed.push((rank, card.clone())),
+            [] => {
+                return Err(format!(
+                    "rank {rank} (pid {pid}) never held a GPU context (contexts {contexts:?})"
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "rank {rank} (pid {pid}) held contexts on several cards: {cards:?}"
+                ))
+            }
+        }
+    }
+    for (index, (rank, card)) in placed.iter().enumerate() {
+        if let Some((other, _)) = placed[..index].iter().find(|(_, seen)| seen == card) {
+            return Err(format!(
+                "ranks {other} and {rank} ran on the SAME card {card}: the run was not distributed \
+                 over two devices"
+            ));
+        }
+    }
+    Ok(placed)
+}
+
+/// Every card in `cards` gained at least `min_mib` of used memory over its pre-run baseline — the
+/// second, pid-independent sign that both cards actually held a rank.
+fn cards_gained_memory(
+    observed: &CardObservations,
+    cards: &[String],
+    min_mib: u64,
+) -> Result<Vec<(String, u64)>, String> {
+    cards
+        .iter()
+        .map(|card| {
+            let gained = observed
+                .peak_mib
+                .get(card)
+                .zip(observed.baseline_mib.get(card))
+                .map(|(peak, baseline)| peak.saturating_sub(*baseline))
+                .ok_or_else(|| format!("card {card} was never sampled"))?;
+            if gained < min_mib {
+                return Err(format!(
+                    "card {card} gained only {gained} MiB (< {min_mib} MiB): no rank trained on it"
+                ));
+            }
+            Ok((card.clone(), gained))
+        })
+        .collect()
+}
+
+fn nvidia_smi(args: &[&str]) -> String {
+    std::process::Command::new("nvidia-smi")
+        .args(args)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+fn sample_cards(observed: &Mutex<CardObservations>) {
+    let contexts = parse_compute_apps(&nvidia_smi(&[
+        "--query-compute-apps=pid,gpu_uuid",
+        "--format=csv,noheader",
+    ]));
+    let memory = parse_gpu_memory(&nvidia_smi(&[
+        "--query-gpu=index,uuid,memory.used",
+        "--format=csv,noheader,nounits",
+    ]));
+    let mut observed = observed.lock().unwrap();
+    observed.contexts.extend(contexts);
+    observed.record_memory(&memory);
+}
+
+/// Sample `nvidia-smi` once a second on a thread of its own until the returned flag is set.
+fn watch_cards() -> (
+    Arc<Mutex<CardObservations>>,
+    Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    let observed: Arc<Mutex<CardObservations>> = Arc::default();
+    sample_cards(&observed); // the baseline, before any rank exists
+    let stop: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+    let handle = {
+        let (observed, stop) = (observed.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                sample_cards(&observed);
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        })
+    };
+    (observed, stop, handle)
+}
+
+fn kill_process(pid: u64) {
+    #[cfg(unix)]
+    {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .status();
+    }
+}
+
+/// The two-card smoke's config: the LoRA smoke's bounded run as two ranks, one per card —
+/// `share_device` OFF, so a rank whose card is missing is refused rather than doubled up — with
+/// the global batch stated (`batch 1 × 2 ranks × accumulation 1`), which the engine checks.
+pub(crate) fn two_card_config(strategy: &str) -> sceneworks_core::training::TrainingConfig {
+    let mut config = sceneworks_core::training::iris::iris_generation_target().defaults;
+    config.rank = 4;
+    config.alpha = 4;
+    config.steps = TWO_CARD_STEPS;
+    config.save_every = 2;
+    config.resolution = RESOLUTION;
+    config.learning_rate =
+        sceneworks_core::contracts::ContractNumber::from_f64(1e-3).expect("finite");
+    config.trigger_word = Some("smoke style".to_owned());
+    config
+        .advanced
+        .insert("sampleEvery".into(), json!(TWO_CARD_STEPS));
+    config.advanced.insert("sampleSteps".into(), json!(10));
+    config.advanced.insert("sampleCount".into(), json!(1));
+    config.advanced.insert(
+        "samplePrompts".into(),
+        json!(["a flat red square, smoke style"]),
+    );
+    let options = config.advanced["iris"]
+        .as_object_mut()
+        .expect("the Iris defaults carry the options bag");
+    options.insert(
+        "dist".into(),
+        json!({"strategy": strategy, "world": {"world_size": TWO_CARD_WORLD, "share_device": false}}),
+    );
+    options.insert("expected_global_batch".into(), json!(TWO_CARD_WORLD));
+    config
+}
+
+const TWO_CARD_WORLD: u64 = 2;
+const TWO_CARD_STEPS: u32 = 8;
+/// A LoRA rank at 256² holds ~20 GiB of VRAM; a card that gained less than this held no rank.
+const TWO_CARD_MIN_GAIN_MIB: u64 = 4096;
+
+struct TwoCardRun {
+    outcome: crate::error::WorkerResult<()>,
+    rank_pids: Vec<(u64, u64)>,
+    observed: CardObservations,
+    seconds: f64,
+}
+
+/// What a two-card fleet does mid-run.
+#[derive(Clone, Copy, PartialEq)]
+enum MidRun {
+    Nothing,
+    /// Request a user cancel once the first durable checkpoint exists.
+    CancelAfterCheckpoint,
+    /// Kill rank 1's process once training has started.
+    KillRankOne,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_two_cards(
+    settings: &Settings,
+    posts: &ProgressPosts,
+    cancel: &CancelSwitch,
+    project_id: &str,
+    job_id: &str,
+    plan: &sceneworks_core::training::TrainingPlan,
+    checkpoint_root: &Path,
+    mid_run: MidRun,
+) -> TwoCardRun {
+    let records = tempfile::tempdir().unwrap();
+    let (observed, stop, sampler) = watch_cards();
+    let actor = {
+        let (posts, cancel) = (posts.clone(), cancel.clone());
+        let (latest, records, job_id) = (
+            checkpoint_root.join("latest"),
+            records.path().to_path_buf(),
+            job_id.to_owned(),
+        );
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                match mid_run {
+                    MidRun::Nothing => return,
+                    MidRun::CancelAfterCheckpoint if latest.is_file() => {
+                        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                        return;
+                    }
+                    MidRun::KillRankOne => {
+                        let training =
+                            !posted_training_steps(&posts.lock().unwrap(), &job_id).is_empty();
+                        let rank_one = crate::iris_dist::test_support::records(&records)
+                            .into_iter()
+                            .find(|record| record["rank"] == 1)
+                            .and_then(|record| record["pid"].as_u64());
+                        if let (true, Some(pid)) = (training, rank_one) {
+                            kill_process(pid);
+                            return;
+                        }
+                    }
+                    MidRun::CancelAfterCheckpoint => {}
+                }
+            }
+        })
+    };
+    let mut snapshot = stub_job_snapshot(job_id, "lora_train", project_id);
+    snapshot["payload"] = json!({ "dryRun": false, "plan": plan });
+    let job: JobSnapshot = serde_json::from_value(snapshot).unwrap();
+    let api = ApiClient::new(settings);
+    let started = std::time::Instant::now();
+    let outcome = crate::training_jobs::run_training_execution_drive(
+        &api,
+        settings,
+        &job,
+        plan,
+        |_: &str, _: &gen_core::LoadSpec| -> gen_core::Result<Box<dyn gen_core::Trainer>> {
+            panic!("a multi-rank run never loads a trainer in the worker process")
+        },
+        Arc::new(crate::iris_dist::test_support::RecordingRankLauncher {
+            record_dir: records.path().to_path_buf(),
+        }),
+    )
+    .await;
+    let seconds = started.elapsed().as_secs_f64();
+    actor.abort();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    sampler.join().unwrap();
+    let rank_pids = crate::iris_dist::test_support::records(records.path())
+        .iter()
+        .filter_map(|record| Some((record["rank"].as_u64()?, record["pid"].as_u64()?)))
+        .collect();
+    let observed = observed.lock().unwrap().clone();
+    TwoCardRun {
+        outcome,
+        rank_pids,
+        observed,
+        seconds,
+    }
+}
+
+/// The cards the ranks of `run` trained on (rank order), proven two ways: by pid → context, and by
+/// each of those cards' memory rising while the fleet ran.
+fn two_card_placement(run: &TwoCardRun, leg: &str) -> Vec<(u64, String)> {
+    let placed = ranks_on_distinct_cards(&run.rank_pids, &run.observed.contexts, TWO_CARD_WORLD)
+        .unwrap_or_else(|error| panic!("{leg}: {error}"));
+    let cards: Vec<String> = placed.iter().map(|(_, card)| card.clone()).collect();
+    let gained = cards_gained_memory(&run.observed, &cards, TWO_CARD_MIN_GAIN_MIB)
+        .unwrap_or_else(|error| panic!("{leg}: {error}"));
+    eprintln!(
+        "TWO_CARD leg={leg} {}",
+        placed
+            .iter()
+            .zip(&gained)
+            .map(|((rank, card), (_, mib))| format!(
+                "rank{rank}=pid:{},card_index:{},uuid:{card},gained_mib:{mib}",
+                run.rank_pids
+                    .iter()
+                    .find(|(recorded, _)| recorded == rank)
+                    .map_or(0, |(_, pid)| *pid),
+                run.observed.index.get(card).copied().unwrap_or(u32::MAX),
+            ))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    placed
+}
+
+fn assert_two_card_receipt(result: &Value, strategy: &str) {
+    let dist = &result["irisDistributed"];
+    assert_eq!(dist["worldSize"], json!(TWO_CARD_WORLD), "{result:#}");
+    assert_eq!(dist["shareDevice"], json!(false), "{result:#}");
+    assert_eq!(dist["rankProcesses"], json!(TWO_CARD_WORLD), "{result:#}");
+    assert_eq!(dist["strategy"], json!(strategy), "{result:#}");
+    assert_eq!(dist["globalBatch"], json!(TWO_CARD_WORLD), "{result:#}");
+    // Global-batch accounting: batch 1 × 2 ranks × accumulation 1, as the engine resolved it.
+    assert_eq!(
+        result["irisPlan"]["globalBatch"],
+        json!(TWO_CARD_WORLD),
+        "{result:#}"
+    );
+}
+
+/// Epic acceptance 5 on real hardware, in four legs through `run_training_execution_drive`:
+///
+/// 1. DDP (replication) on two cards, canceled after its first durable checkpoint;
+/// 2. the same run RESUMED from that checkpoint to the end — the resumed job's own progress must
+///    continue one past the stop ([`resume_continuation`]) — and its adapter applied by a
+///    generation job;
+/// 3. a rank FAILURE: rank 1's process is killed mid-run; the job fails typed, naming the rank, and
+///    no rank process is left holding a card;
+/// 4. FSDP (sharding) on two cards to completion — LAST, with its own RESULT line, so the first
+///    three legs' evidence is printed whatever it does.
+///
+/// In every leg that trains, each rank ran on a different physical card
+/// ([`ranks_on_distinct_cards`], [`cards_gained_memory`]) and the global batch is 2.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "real-weight Iris TWO-CARD distributed smoke; needs two free NVIDIA cards (CUDA_VISIBLE_DEVICES=0,1, CUDA_DEVICE_ORDER=PCI_BUS_ID) and the pinned speridlabs/iris-3b and Qwen3-VL-4B-Instruct snapshots under HF_HUB_CACHE"]
+async fn iris_two_card_distributed_smoke() {
+    const STEPS: u32 = TWO_CARD_STEPS;
+    let visible: Vec<String> = std::env::var("CUDA_VISIBLE_DEVICES")
+        .unwrap_or_default()
+        .split(',')
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty())
+        .collect();
+    assert!(
+        !cfg!(target_os = "macos") && visible.len() >= TWO_CARD_WORLD as usize,
+        "the two-card smoke needs two NVIDIA cards exposed through CUDA_VISIBLE_DEVICES (got \
+         {visible:?}); it never shares a device"
+    );
+    let cancel: CancelSwitch = Arc::default();
+    let temp = tempfile::tempdir().unwrap();
+    let (api_url, posts) = spawn_cancellable_api_stub(cancel.clone()).await;
+    let mut settings = smoke_settings(temp.path(), api_url, "iris-two-card-smoke-worker");
+    // The worker owns BOTH cards (the production multi-GPU worker: SCENEWORKS_GPU_ID=0,1).
+    settings.gpu_id = visible[..TWO_CARD_WORLD as usize].join(",");
+    let data_dir = settings.data_dir.clone();
+    let backbone = crate::model_jobs::huggingface_snapshot_dir(&data_dir, BACKBONE_REPO)
+        .expect("HF_HUB_CACHE must already hold the Iris backbone (no download at training time)");
+    let store = ProjectStore::new(data_dir.clone(), "iris-two-card-smoke");
+    let project = store.create_project("Iris two-card smoke").unwrap();
+    let project_object = serde_json::to_value(&project)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
+    let dataset_root = PathBuf::from(&project.path).join("training/datasets/ds_smoke");
+    let dataset = write_dataset(&dataset_root);
+    let target = sceneworks_core::training::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.kernel == "iris_train")
+        .expect("the Iris target is registered");
+    let build = |job_id: &str, output_id: &str, config| {
+        let output_dir = PathBuf::from(&project.path).join("loras").join(output_id);
+        let plan = sceneworks_core::training::build_training_plan(
+            sceneworks_core::training::BuildTrainingPlan {
+                job_id,
+                target: &target,
+                dataset: &dataset,
+                config,
+                preset: None,
+                lora_id: output_id,
+                base_model_path: backbone.display().to_string(),
+                dataset_root: &dataset_root,
+                output_dir: &output_dir,
+                file_name: "iris_two_card.safetensors".to_owned(),
+                created_at: "2026-10-12T00:00:00Z".to_owned(),
+            },
+        )
+        .expect("the two-card plan builds from the real target");
+        let root = crate::iris_checkpoint_root(&output_dir, "iris_two_card.safetensors");
+        (plan, output_dir, root)
+    };
+    let ddp = two_card_config("ddp");
+    let gate = admitted_two_cards(&settings, &ddp).await;
+
+    // 1. DDP on two cards, canceled after the first durable checkpoint.
+    let (plan, output_dir, checkpoint_root) = build("iris-two-card", "lora_two_card", ddp.clone());
+    let first = drive_two_cards(
+        &settings,
+        &posts,
+        &cancel,
+        &project.id,
+        "iris-two-card",
+        &plan,
+        &checkpoint_root,
+        MidRun::CancelAfterCheckpoint,
+    )
+    .await;
+    assert!(
+        matches!(first.outcome, Err(WorkerError::Canceled(_))),
+        "the canceled two-card run ends Canceled: {:?}",
+        first.outcome
+    );
+    let first_cards = two_card_placement(&first, "ddp_cancel");
+    let canceled = posts
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(id, body)| id == "iris-two-card" && body["status"] == "canceled")
+        .map(|(_, body)| body.clone())
+        .expect("the run posted a terminal canceled update");
+    let stopped_at = canceled["result"]["stepsCompleted"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a durable cancel reports its step: {canceled:#}"));
+    assert!(
+        (2..u64::from(STEPS)).contains(&stopped_at),
+        "canceled after the first checkpoint and before the end: {canceled:#}"
+    );
+    assert!(checkpoint_root.join("latest").is_file());
+
+    // 2. Resumed from that checkpoint, on two cards again, to the end.
+    cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+    let (mut plan, _, _) = build("iris-two-card-resume", "lora_two_card", ddp.clone());
+    apply_resume_translation(&mut plan.config, &checkpoint_root);
+    let resumed = drive_two_cards(
+        &settings,
+        &posts,
+        &cancel,
+        &project.id,
+        "iris-two-card-resume",
+        &plan,
+        &checkpoint_root,
+        MidRun::Nothing,
+    )
+    .await;
+    resumed
+        .outcome
+        .as_ref()
+        .unwrap_or_else(|error| panic!("the resumed two-card run completes: {error}"));
+    let resumed_cards = two_card_placement(&resumed, "ddp_resume");
+    let result = completed_result(&posts, "iris-two-card-resume");
+    assert_eq!(result["stepsCompleted"], STEPS, "{result:#}");
+    assert_two_card_receipt(&result, "ddp");
+    let resumed_steps = posted_training_steps(&posts.lock().unwrap(), "iris-two-card-resume");
+    let resumed_executed = resume_continuation(&resumed_steps, stopped_at, u64::from(STEPS))
+        .unwrap_or_else(|error| panic!("{error}"));
+    let adapter = output_dir.join("iris_two_card.safetensors");
+    assert!(adapter.is_file(), "rank 0 exported the adapter");
+
+    // 3. A rank failure: rank 1 is killed mid-run.
+    let (plan, _, failed_root) = build("iris-two-card-lost", "lora_two_card_lost", ddp);
+    let lost = drive_two_cards(
+        &settings,
+        &posts,
+        &cancel,
+        &project.id,
+        "iris-two-card-lost",
+        &plan,
+        &failed_root,
+        MidRun::KillRankOne,
+    )
+    .await;
+    let failure = match &lost.outcome {
+        Err(error) if !matches!(error, WorkerError::Canceled(_)) => error.to_string(),
+        other => panic!("a run that lost a rank fails typed, got {other:?}"),
+    };
+    assert!(
+        failure.contains("Iris distributed training failed [")
+            && failure.contains("on rank 1 of 2")
+            && failure.contains("Every rank process was stopped"),
+        "the failure names the lost rank: {failure}"
+    );
+    two_card_placement(&lost, "rank_lost");
+    // No rank process outlives the job holding a card.
+    let lost_pids: Vec<u64> = lost.rank_pids.iter().map(|(_, pid)| *pid).collect();
+    let mut holding = lost_pids.clone();
+    for _ in 0..30 {
+        let contexts = parse_compute_apps(&nvidia_smi(&[
+            "--query-compute-apps=pid,gpu_uuid",
+            "--format=csv,noheader",
+        ]));
+        holding = lost_pids
+            .iter()
+            .copied()
+            .filter(|pid| contexts.iter().any(|(context_pid, _)| context_pid == pid))
+            .collect();
+        if holding.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    assert!(
+        holding.is_empty(),
+        "rank processes {holding:?} still hold a GPU context after the failed job returned"
+    );
+
+    // The resumed adapter is applied by a generation job (on the first card alone).
+    let mut render_settings = settings.clone();
+    render_settings.gpu_id = visible[0].clone();
+    let base = render(
+        &render_settings,
+        &posts,
+        &project_object,
+        "iris-two-card-base",
+        json!([]),
+    )
+    .await;
+    let tuned = render(
+        &render_settings,
+        &posts,
+        &project_object,
+        "iris-two-card-tuned",
+        json!([{
+            "id": "lora_two_card", "name": "Iris two-card smoke", "family": "iris",
+            "networkType": "lora", "installedPath": adapter.display().to_string(), "weight": 1.0
+        }]),
+    )
+    .await;
+    let mean_abs_diff = base
+        .pixels
+        .iter()
+        .zip(&tuned.pixels)
+        .map(|(a, b)| (*a as f64 - *b as f64).abs())
+        .sum::<f64>()
+        / base.pixels.len() as f64;
+    assert!(
+        mean_abs_diff > 0.5,
+        "the two-card adapter must change the render at a fixed seed (mean |Δ| {mean_abs_diff:.3})"
+    );
+    eprintln!(
+        "RESULT status=pass trainer=iris_3b smoke=two_card backend=candle cards={} {gate} \
+         ddp_cards={first_cards:?} resume_cards={resumed_cards:?} global_batch={TWO_CARD_WORLD} \
+         canceled_at_step={stopped_at} resumed_first_step={} \
+         resumed_steps_executed={resumed_executed} resumed_to={STEPS} rank_lost=\"{failure}\" \
+         cancel_s={:.1} resume_s={:.1} lost_s={:.1} \
+         adapter_effect_mean_abs_diff={mean_abs_diff:.3}",
+        settings.gpu_id, resumed_steps[0], first.seconds, resumed.seconds, lost.seconds,
+    );
+
+    // 4. FSDP (sharded) on two cards, to completion.
+    let (plan, _, fsdp_root) = build(
+        "iris-two-card-fsdp",
+        "lora_two_card_fsdp",
+        two_card_config("fsdp2"),
+    );
+    let sharded = drive_two_cards(
+        &settings,
+        &posts,
+        &cancel,
+        &project.id,
+        "iris-two-card-fsdp",
+        &plan,
+        &fsdp_root,
+        MidRun::Nothing,
+    )
+    .await;
+    sharded
+        .outcome
+        .as_ref()
+        .unwrap_or_else(|error| panic!("the sharded two-card run completes: {error}"));
+    let sharded_cards = two_card_placement(&sharded, "fsdp");
+    let sharded_result = completed_result(&posts, "iris-two-card-fsdp");
+    assert_eq!(
+        sharded_result["stepsCompleted"], STEPS,
+        "{sharded_result:#}"
+    );
+    assert_two_card_receipt(&sharded_result, "fsdp2");
+    eprintln!(
+        "RESULT status=pass trainer=iris_3b smoke=two_card_fsdp backend=candle cards={} \
+         fsdp_cards={sharded_cards:?} global_batch={TWO_CARD_WORLD} fsdp_steps={} fsdp_s={:.1}",
+        settings.gpu_id, sharded_result["stepsCompleted"], sharded.seconds,
+    );
+}
+
+/// The floor the gate reads for a two-rank run over the worker's TWO cards (one rank per card),
+/// judged against the smaller card. Panics when the gate would refuse.
+async fn admitted_two_cards(
+    settings: &Settings,
+    config: &sceneworks_core::training::TrainingConfig,
+) -> String {
+    use sceneworks_core::training::iris::curricula;
+    let devices = crate::iris_dist::visible_training_devices(settings);
+    assert_eq!(devices, TWO_CARD_WORLD, "the worker owns both cards");
+    assert_eq!(
+        curricula::iris_topology_refusal(config, devices, "GPU"),
+        None
+    );
+    #[cfg(target_os = "macos")]
+    let capacity = crate::iris_training::mlx_training_capacity_gb();
+    #[cfg(not(target_os = "macos"))]
+    let capacity = crate::iris_training::candle_training_capacity_gb(&settings.gpu_id)
+        .await
+        .ok();
+    let lane = crate::iris_training::training_lane();
+    let floor = curricula::iris_run_memory_floor(lane, config, devices)
+        .expect("a floor row covers the two-card shape");
+    assert_eq!(
+        crate::iris_training::iris_plan_memory_refusal(lane, "iris_3b", config, devices, capacity),
+        None,
+        "the gate admits one rank per card"
+    );
+    format!(
+        "gate_floor_gib_per_card={} gate_floor_provenance={} gate_smallest_card_gib={}",
+        floor.gib,
+        floor.provenance.as_str(),
+        capacity.map_or_else(|| "unread".to_owned(), |gib| format!("{gib:.2}"))
+    )
+}
+
 /// What needs no GPU: the continuation rule the resume smokes assert, and that the full-fine-tune
 /// smokes' own configs are valid plans the admission gate admits on the hosts they will run on —
 /// checked here so a real-weight dispatch does not spend its hour discovering a refused config.
@@ -1599,6 +2276,132 @@ mod unit {
                 ),
                 None,
                 "{lane}: restoration full fine-tune at 256²"
+            );
+        }
+    }
+
+    const APPS: &str = "4321, GPU-aaaa\n8765, GPU-bbbb\n999, GPU-aaaa\n";
+
+    fn contexts(csv: &str) -> std::collections::BTreeSet<(u64, String)> {
+        parse_compute_apps(csv).into_iter().collect()
+    }
+
+    /// The driver's per-process listing and per-card memory, as `nvidia-smi` prints them.
+    #[test]
+    fn nvidia_smi_listings_are_parsed() {
+        assert_eq!(
+            parse_compute_apps(APPS),
+            vec![
+                (4321, "GPU-aaaa".to_owned()),
+                (8765, "GPU-bbbb".to_owned()),
+                (999, "GPU-aaaa".to_owned())
+            ]
+        );
+        // Blank output (no compute process), a header-ish or torn line: nothing, never a panic.
+        assert!(parse_compute_apps("").is_empty());
+        assert!(parse_compute_apps("pid, gpu_uuid\n12,\nnot-a-pid, GPU-x\n").is_empty());
+        assert_eq!(
+            parse_gpu_memory("0, GPU-aaaa, 95262\n1, GPU-bbbb, 412\n"),
+            vec![
+                (0, "GPU-aaaa".to_owned(), 95_262),
+                (1, "GPU-bbbb".to_owned(), 412)
+            ]
+        );
+        assert!(parse_gpu_memory("0, GPU-aaaa, [N/A]\n").is_empty());
+    }
+
+    /// Each rank is placed by ITS OWN pid's context; two ranks on one card, a rank with no context,
+    /// a rank on two cards, and a missing or duplicated rank record are all refused.
+    #[test]
+    fn each_rank_must_have_run_on_its_own_card() {
+        let seen = contexts(APPS);
+        assert_eq!(
+            ranks_on_distinct_cards(&[(0, 4321), (1, 8765)], &seen, 2),
+            Ok(vec![(0, "GPU-aaaa".to_owned()), (1, "GPU-bbbb".to_owned())])
+        );
+        // Both ranks on card aaaa: not a two-device run, whatever the plan said.
+        let shared = ranks_on_distinct_cards(&[(0, 4321), (1, 999)], &seen, 2).unwrap_err();
+        assert!(
+            shared.contains("SAME card GPU-aaaa") && shared.contains("ranks 0 and 1"),
+            "{shared}"
+        );
+        assert!(ranks_on_distinct_cards(&[(0, 4321), (1, 5555)], &seen, 2)
+            .unwrap_err()
+            .contains("rank 1 (pid 5555) never held a GPU context"));
+        let both = contexts("4321, GPU-aaaa\n4321, GPU-bbbb\n8765, GPU-bbbb\n");
+        assert!(ranks_on_distinct_cards(&[(0, 4321), (1, 8765)], &both, 2)
+            .unwrap_err()
+            .contains("several cards"));
+        assert!(ranks_on_distinct_cards(&[(0, 4321)], &seen, 2)
+            .unwrap_err()
+            .contains("rank 1 of 2 recorded 0 processes"));
+        assert!(
+            ranks_on_distinct_cards(&[(0, 4321), (0, 8765), (1, 999)], &seen, 2)
+                .unwrap_err()
+                .contains("rank 0 of 2 recorded 2 processes")
+        );
+    }
+
+    /// A card that held a rank gained memory over its pre-run baseline; a tenant's standing
+    /// allocation is baseline, not gain.
+    #[test]
+    fn both_cards_must_have_gained_memory() {
+        let mut observed = CardObservations::default();
+        observed.record_memory(&parse_gpu_memory("0, GPU-aaaa, 500\n1, GPU-bbbb, 90000\n"));
+        observed.record_memory(&parse_gpu_memory(
+            "0, GPU-aaaa, 21000\n1, GPU-bbbb, 90100\n",
+        ));
+        observed.record_memory(&parse_gpu_memory("0, GPU-aaaa, 600\n1, GPU-bbbb, 90000\n"));
+        let cards = ["GPU-aaaa".to_owned(), "GPU-bbbb".to_owned()];
+        assert_eq!(
+            cards_gained_memory(&observed, &cards[..1], 4096),
+            Ok(vec![("GPU-aaaa".to_owned(), 20_500)])
+        );
+        // Card bbbb is full of someone else's 90 GB and gained 100 MiB: no rank trained there.
+        let idle = cards_gained_memory(&observed, &cards, 4096).unwrap_err();
+        assert!(idle.contains("GPU-bbbb gained only 100 MiB"), "{idle}");
+        assert!(cards_gained_memory(&observed, &["GPU-cccc".to_owned()], 1)
+            .unwrap_err()
+            .contains("never sampled"));
+        assert_eq!(observed.index["GPU-bbbb"], 1);
+    }
+
+    /// The two-card configs are valid requests that put ONE rank on each of two devices, state
+    /// their global batch, and are refused on a one-device worker rather than doubled up.
+    #[test]
+    fn the_two_card_configs_need_two_devices_and_never_share_one() {
+        use sceneworks_core::training::iris::floors::CAMPAIGN_CUDA_CARD;
+        use sceneworks_core::training::iris::{curricula, validate_iris_training_config};
+        let target = sceneworks_core::training::iris::iris_generation_target();
+        for strategy in ["ddp", "fsdp2"] {
+            let config = two_card_config(strategy);
+            validate_iris_training_config(&target, &config)
+                .unwrap_or_else(|error| panic!("{strategy}: {error}"));
+            assert_eq!(curricula::iris_world_size(&config), 2);
+            assert_eq!(curricula::iris_global_batch(&config, 2), 2);
+            assert_eq!(config.advanced["iris"]["expected_global_batch"], json!(2));
+            let receipt = curricula::iris_curriculum_receipt(&config);
+            assert_eq!(receipt["dist"]["strategy"], json!(strategy));
+            assert_eq!(receipt["dist"]["shareDevice"], json!(false));
+            assert_eq!(curricula::iris_topology_refusal(&config, 2, "GPU"), None);
+            assert!(
+                curricula::iris_topology_refusal(&config, 1, "GPU").is_some(),
+                "{strategy}: one device cannot host two unshared ranks"
+            );
+            // One rank per card: each card needs ONE rank's floor, and the campaign card has it.
+            assert_eq!(
+                curricula::iris_run_memory_floor("candle", &config, 2),
+                curricula::iris_rank_memory_floor("candle", &config)
+            );
+            assert_eq!(
+                crate::iris_training::iris_plan_memory_refusal(
+                    "candle",
+                    "iris_3b",
+                    &config,
+                    2,
+                    Some(CAMPAIGN_CUDA_CARD.gib())
+                ),
+                None
             );
         }
     }

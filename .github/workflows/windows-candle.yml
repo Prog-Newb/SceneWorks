@@ -231,6 +231,14 @@ on:
         required: false
         type: string
         default: iris_worker_gpu_smoke
+      iris_smoke_cards:
+        description: "Cards the Iris worker smoke job exposes (CUDA_VISIBLE_DEVICES, PCI bus order). '1' (default): the one-card smokes selected by iris_worker_smoke_filter. '0,1' (sc-25690, epic 25678 acceptance 5): ONLY the two-card distributed smoke iris_two_card_distributed_smoke — two rank processes, one per physical card, share_device off. The job checks BEFORE any build that both cards are free and fails fast naming an occupied card; it never shares a card with another tenant. Dispatch-only, gates nothing."
+        required: false
+        type: choice
+        options:
+          - "1"
+          - "0,1"
+        default: "1"
 
 # Cancel superseded PR runs, but never cancel a main-push run: this lane is the
 # ONLY thing that compiles the candle-gated worker code, so a main commit whose
@@ -1691,7 +1699,7 @@ jobs:
     timeout-minutes: 120
     env:
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: "1"
+      CUDA_VISIBLE_DEVICES: ${{ inputs.iris_smoke_cards || '1' }}
       CUDA_COMPUTE_CAP: "120"
       CARGO_NET_OFFLINE: "true"
       HF_HUB_CACHE: 'E:\huggingface\hub'
@@ -1709,6 +1717,14 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+      # SC-25690: the two-card smoke puts one rank on EACH card, so both must be free before
+      # anything is fetched or built. A card another tenant holds (the campaign found card 0 at
+      # 95,262 MiB used) fails the job here, named, in seconds - never by sharing it.
+      - name: Require both cards free for the two-card Iris smoke
+        if: ${{ inputs.iris_smoke_cards == '0,1' }}
+        env:
+          IRIS_TWO_CARD_MAX_USED_MIB: "2048"
+        run: node scripts/ci/iris-two-card-preflight.mjs
       - name: Isolate Cargo dependency checkout for the Iris worker smoke
         shell: powershell
         run: |
@@ -1719,7 +1735,7 @@ jobs:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
       - name: Run the Iris-3B Candle worker smoke
-        if: ${{ !startsWith(inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke', 'iris_training_gpu_smoke') }}
+        if: ${{ inputs.iris_smoke_cards != '0,1' && !startsWith(inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke', 'iris_training_gpu_smoke') }}
         shell: cmd
         env:
           IRIS_SMOKE_FILTER: ${{ inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke' }}
@@ -1737,13 +1753,13 @@ jobs:
       # two ddp rank processes sharing this job's one visible card (`share_device`), over loopback
       # TCP. The card inventory is printed first: the runner exposes one card to CUDA.
       - name: Show the cards the Iris training smoke sees
-        if: ${{ (inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke') == 'iris_worker_gpu_smoke' || startsWith(inputs.iris_worker_smoke_filter, 'iris_training_gpu_smoke') }}
+        if: ${{ inputs.iris_smoke_cards != '0,1' && ((inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke') == 'iris_worker_gpu_smoke' || startsWith(inputs.iris_worker_smoke_filter, 'iris_training_gpu_smoke')) }}
         shell: cmd
         run: |
           nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv
           echo CUDA_VISIBLE_DEVICES=%CUDA_VISIBLE_DEVICES%
       - name: Run the Iris-3B Candle training smoke
-        if: ${{ (inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke') == 'iris_worker_gpu_smoke' || startsWith(inputs.iris_worker_smoke_filter, 'iris_training_gpu_smoke') }}
+        if: ${{ inputs.iris_smoke_cards != '0,1' && ((inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke') == 'iris_worker_gpu_smoke' || startsWith(inputs.iris_worker_smoke_filter, 'iris_training_gpu_smoke')) }}
         shell: cmd
         env:
           IRIS_TRAINING_FILTER: ${{ startsWith(inputs.iris_worker_smoke_filter, 'iris_training_gpu_smoke') && inputs.iris_worker_smoke_filter || 'iris_training_gpu_smoke' }}
@@ -1751,3 +1767,17 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo test -p sceneworks-worker --features backend-candle --release %IRIS_TRAINING_FILTER% -- --ignored --nocapture --test-threads=1
+      # SC-25690 (epic 25678 acceptance 5): REAL two-GPU distributed training through the job path —
+      # DDP on two cards canceled after a durable checkpoint and resumed, a killed rank failing the
+      # job typed, and FSDP on two cards. Each rank's card is read from the run (its own pid's
+      # context in nvidia-smi), not from the plan. Its name is deliberately outside the
+      # `iris_training_gpu_smoke` filter: the one-card dispatches above never select it.
+      - name: Run the Iris-3B two-card distributed smoke
+        if: ${{ inputs.iris_smoke_cards == '0,1' }}
+        shell: cmd
+        run: |
+          nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.used --format=csv
+          echo CUDA_VISIBLE_DEVICES=%CUDA_VISIBLE_DEVICES%
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test -p sceneworks-worker --features backend-candle --release iris_two_card_distributed_smoke -- --ignored --nocapture --test-threads=1

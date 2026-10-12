@@ -1053,6 +1053,42 @@ pub(crate) mod test_support {
         }
     }
 
+    /// The env var naming the directory a REAL rank process records itself in (`rank-<r>.json`:
+    /// its rank and its own process id) — how a smoke learns which process was which rank from the
+    /// ranks themselves rather than from the plan it handed them.
+    pub(crate) const REAL_RANK_RECORD_ENV: &str = "SCENEWORKS_IRIS_REAL_RANK_RECORD";
+
+    /// [`TestBinaryRankLauncher`] whose ranks record themselves under `record_dir`.
+    pub(crate) struct RecordingRankLauncher {
+        pub record_dir: PathBuf,
+    }
+
+    impl RankLauncher for RecordingRankLauncher {
+        fn command(&self) -> Command {
+            let mut command = TestBinaryRankLauncher.command();
+            command.env(REAL_RANK_RECORD_ENV, &self.record_dir);
+            command
+        }
+    }
+
+    /// Record this process as the rank its environment names (no-op without the record dir).
+    pub(crate) fn record_real_rank() {
+        let (Some(dir), Ok(rank)) = (
+            std::env::var_os(REAL_RANK_RECORD_ENV),
+            std::env::var("RANK"),
+        ) else {
+            return;
+        };
+        let Ok(rank) = rank.trim().parse::<u64>() else {
+            return;
+        };
+        let record = json!({ "rank": rank, "pid": std::process::id() });
+        let _ = std::fs::write(
+            PathBuf::from(dir).join(format!("rank-{rank}.json")),
+            record.to_string(),
+        );
+    }
+
     /// The records the fake ranks wrote (`rank-<r>.json`), by rank.
     pub(crate) fn records(dir: &Path) -> Vec<Value> {
         let mut records: Vec<Value> = std::fs::read_dir(dir)
@@ -1418,6 +1454,7 @@ mod tests {
     #[test]
     #[ignore = "a real Iris rank process, launched by the real-weight training smokes"]
     fn real_iris_rank_process() {
+        super::test_support::record_real_rank();
         if let Some(code) = iris_rank_entry() {
             std::process::exit(code);
         }
