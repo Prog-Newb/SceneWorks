@@ -458,7 +458,7 @@ fn run_rank_process_with(
         );
         1
     };
-    let prepared = match crate::training_jobs::preflight_training_run(settings, &spec.plan) {
+    let prepared = match crate::training_jobs::preflight_training_run(settings, &spec.plan, false) {
         Ok(prepared) => prepared,
         Err(error) => return fail(out, error.to_string()),
     };
@@ -504,7 +504,7 @@ fn run_rank_process_with(
         })
         .ok();
 
-    let spec_load = inputs.load_spec(&request.config.train_dtype);
+    let spec_load = inputs.load_spec(engine_id, &request.config.train_dtype);
     let outcome = (|| {
         let mut trainer = load_trainer(engine_id, &spec_load)?;
         trainer.validate(&request)?;

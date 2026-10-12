@@ -1373,6 +1373,7 @@ mod job_tests {
                     gen_core::TrainingConfig::default(),
                     "mlx",
                     40,
+                    None,
                     rx,
                     cancel,
                     blocking,
