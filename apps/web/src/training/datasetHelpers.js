@@ -4,6 +4,7 @@
 // builder. No React, no app state — just data shaping over dataset records.
 
 import { issue } from "../validation/issues.js";
+import { itemSplit } from "./irisCurricula.js";
 
 export function imageAssetName(asset) {
   const path = asset?.file?.path ?? asset?.path ?? asset?.displayName ?? asset?.id ?? "asset";
@@ -176,6 +177,7 @@ export function datasetPayload({
   associatedCharacterId,
   captionDraftById = {},
   namedCaptionsById = {},
+  holdoutById = {},
   name,
   selectedAssetIds,
 }) {
@@ -221,6 +223,8 @@ export function datasetPayload({
           ...(namedCaptionsById[selectionId] && Object.keys(namedCaptionsById[selectionId]).length
             ? { captions: namedCaptionsById[selectionId] }
             : {}),
+          // sc-25689: the Iris holdout flag (validation-only item), edited or kept from the saved item.
+          ...(itemSplit(holdoutById, selectionId, previous) ? { split: itemSplit(holdoutById, selectionId, previous) } : {}),
         };
       })
       .filter(Boolean),

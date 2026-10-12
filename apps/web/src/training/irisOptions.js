@@ -15,6 +15,14 @@
 import { issue } from "../validation/issues.js";
 import { asText, numberFromDraft, numericDraft } from "./drafts.js";
 import { terminalStatuses } from "../jobTypes.js";
+import {
+  IRIS_CURRICULA_KEYS,
+  IRIS_CURRICULA_SPECS,
+  curriculaInPlay,
+  curriculaIssues,
+  dottedValue,
+  nestDotted,
+} from "./irisCurricula.js";
 
 export const IRIS_TRAINING_KERNEL = "iris_train";
 export const IRIS_TRAINING_TARGET_ID = "iris_3b_generation";
@@ -67,6 +75,9 @@ export const IRIS_OPTION_SPECS = Object.freeze({
 });
 
 export const IRIS_OPTION_KEYS = Object.freeze(Object.keys(IRIS_OPTION_SPECS));
+// Every drafted key: the S7 options plus the S11 curricula keys (sc-25689, irisCurricula.js).
+const ALL_SPECS = { ...IRIS_OPTION_SPECS, ...IRIS_CURRICULA_SPECS };
+const ALL_KEYS = [...IRIS_OPTION_KEYS, ...IRIS_CURRICULA_KEYS];
 
 // Draft value for one key: strings for inputs/selects, booleans (or "" = trainer default) for
 // toggles, an array of names for caption_fields, "a, b" text for milestone steps, a pair of
@@ -91,7 +102,7 @@ function draftValue(spec, value) {
 
 export function irisDraftFromDefaults(defaults = {}) {
   const source = defaults && typeof defaults === "object" ? defaults : {};
-  return Object.fromEntries(IRIS_OPTION_KEYS.map((key) => [key, draftValue(IRIS_OPTION_SPECS[key], source[key])]));
+  return Object.fromEntries(ALL_KEYS.map((key) => [key, draftValue(ALL_SPECS[key], dottedValue(source, key))]));
 }
 
 function parseIntList(text) {
@@ -102,7 +113,7 @@ function parseIntList(text) {
 // Parse one draft value. `{ value }` when set, `{}` when empty (= trainer/backbone default),
 // `{ invalid }` when the user typed something outside the key's domain.
 function parseOption(key, raw) {
-  const spec = IRIS_OPTION_SPECS[key];
+  const spec = ALL_SPECS[key];
   const label = spec.label;
   switch (spec.kind) {
     case "choice": {
@@ -180,6 +191,7 @@ function irisRunContext(configDraft = {}) {
 // Whether `key` applies to this run. A key that is not in play is neither rendered as a live
 // control nor sent nor validated.
 export function irisOptionInPlay(key, configDraft) {
+  if (key in IRIS_CURRICULA_SPECS) return curriculaInPlay(key, configDraft);
   const run = irisRunContext(configDraft);
   switch (key) {
     case "init":
@@ -207,14 +219,14 @@ export function irisOptionInPlay(key, configDraft) {
 export function irisOptionsSnapshot(configDraft = {}) {
   const iris = configDraft.iris ?? {};
   const out = {};
-  for (const key of IRIS_OPTION_KEYS) {
+  for (const key of ALL_KEYS) {
     if (!irisOptionInPlay(key, configDraft)) continue;
     const parsed = parseOption(key, iris[key]);
     if (Object.prototype.hasOwnProperty.call(parsed, "value")) {
       out[key] = parsed.value;
     }
   }
-  return out;
+  return nestDotted(out);
 }
 
 // The request-level keys that ride beside `advanced.iris`.
@@ -237,13 +249,14 @@ export function irisValidation(configDraft = {}) {
   const issues = [];
   const iris = configDraft.iris ?? {};
   const run = irisRunContext(configDraft);
-  for (const key of IRIS_OPTION_KEYS) {
+  for (const key of ALL_KEYS) {
     if (!irisOptionInPlay(key, configDraft)) continue;
     const parsed = parseOption(key, iris[key]);
     if (parsed.invalid) {
       issues.push(issue.error(`iris.${key}`, parsed.invalid));
     }
   }
+  for (const [field, message] of curriculaIssues(configDraft)) issues.push(issue.error(field, message));
   if (run.emaOff) {
     for (const key of ["preview_weights", "export_weights"]) {
       if (asText(iris[key]).trim() === "ema") {

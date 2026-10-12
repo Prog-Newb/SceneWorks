@@ -221,6 +221,14 @@ export async function fetchAssetWorkflow(projectId, assetId, { token, signal } =
 // batch size. Iris' upstream ranged sampler walks whole 640-item chunks, so a dataset of
 // 641–1279 items only trains on the first 640; the Studio shows `warning` inline before launch.
 // Resolves to `{ applies, items, covered, unusedItems, chunks, warning }`.
+// Iris curricula (sc-25689): the official stage presets, the pre-launch plan check, a run's metrics.
+export const fetchIrisStagePresets = (token, signal) =>
+  apiFetch("/api/v1/training/iris/stage-presets", token, { signal });
+export const checkIrisPlan = (targetId, config, token, signal) =>
+  apiFetch("/api/v1/training/iris/plan-check", token, { method: "POST", body: JSON.stringify({ targetId, config }), signal });
+export const fetchIrisMetrics = (jobId, token, signal) =>
+  apiFetch(`/api/v1/training/jobs/${encodeURIComponent(jobId)}/iris-metrics`, token, { signal });
+
 export async function fetchTrainingDataWalk({ targetId, items, batchSize }, { token, signal } = {}) {
   const params = new URLSearchParams({
     targetId: String(targetId ?? ""),

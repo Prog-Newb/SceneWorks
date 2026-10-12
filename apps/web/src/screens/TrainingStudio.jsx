@@ -69,6 +69,8 @@ import {
   trainingLaneFromCapabilities,
 } from "../training/irisOptions.js";
 import { useIrisDataWalk } from "../training/useIrisDataWalk.js";
+import { useIrisMetrics, useIrisPlanCheck, useIrisStagePresets } from "../training/useIrisCurricula.js";
+import { IrisRunMetrics } from "./training/IrisCurriculaOptions.jsx";
 import { collectCaptionSidecars, isJsonCaptionSidecar } from "../training/captionSidecars.js";
 import { DatasetEditorPanel } from "./training/DatasetEditorPanel.jsx";
 
@@ -265,7 +267,12 @@ export function trainingSampleGroups(job, projectId) {
     .filter((group) => group.assets.length);
 }
 
-function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview }) {
+// A live Iris run's holdout validation (sc-25689), re-read while it trains.
+function LiveIrisMetrics({ job, token }) {
+  return <IrisRunMetrics metrics={useIrisMetrics(job.id, token, { live: true })} />;
+}
+
+function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview, token }) {
   if (!jobs.length) {
     return null;
   }
@@ -285,15 +292,17 @@ function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview }) {
           // through the whole run rather than just the clicked group.
           const sampleScope = sampleGroups.flatMap((group) => group.assets);
           return (
-            <WorkerProgressCard
-              key={job.id}
-              job={job}
-              thumbnailsVariant="image-grid"
-              thumbnailGroups={sampleGroups}
-              expectedThumbnailCount={4}
-              onCancel={onCancel}
-              onThumbnailClick={onPreview ? (asset) => onPreview(asset, sampleScope) : undefined}
-            />
+            <React.Fragment key={job.id}>
+              <WorkerProgressCard
+                job={job}
+                thumbnailsVariant="image-grid"
+                thumbnailGroups={sampleGroups}
+                expectedThumbnailCount={4}
+                onCancel={onCancel}
+                onThumbnailClick={onPreview ? (asset) => onPreview(asset, sampleScope) : undefined}
+              />
+              {job.payload?.plan?.target?.kernel === "iris_train" ? <LiveIrisMetrics job={job} token={token} /> : null}
+            </React.Fragment>
           );
         })}
       </div>
@@ -467,6 +476,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // keyed by selection id and threaded into the save payload (sc-25685). Saved items carry theirs
   // on the item itself.
   const [namedCaptionsById, setNamedCaptionsById] = useState({});
+  // sc-25689: per-item holdout overrides (`{ [selectionId]: boolean }`) until the dataset is saved.
+  const [holdoutById, setHoldoutById] = useState({});
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
   const [renamePrefix, setRenamePrefix] = useState("");
   const [captionTriggerWords, setCaptionTriggerWords] = useState("");
@@ -567,7 +578,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
       associatedCharacterId !== (activeDataset.characterId ?? "") ||
       selectedAssetIds.length !== originalAssetIds.length ||
       selectedAssetIds.some((id, index) => id !== originalAssetIds[index]) ||
-      captionsDirty);
+      captionsDirty ||
+      Object.keys(holdoutById).length > 0);
   // Refresh awaits the catalog request. Read the current draft state after that
   // await so a rename begun while refresh is in flight is never overwritten by
   // the freshly loaded dataset object.
@@ -786,6 +798,19 @@ export function TrainingStudio({ mode = "training" } = {}) {
     batchSize: Number(configDraft.batchSize),
     token,
   });
+  // sc-25689: the official stage presets, the pre-launch plan check of the config as it would be
+  // submitted, and the parent run's holdout validation.
+  const irisPresets = useIrisStagePresets(irisSelected, token);
+  const irisPlanConfig = useMemo(() => {
+    if (!irisSelected || !activeDataset || !selectedTarget) return null;
+    try {
+      return trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget }).config;
+    } catch {
+      return null;
+    }
+  }, [irisSelected, activeDataset, configDraft, selectedPreset, selectedTarget]);
+  const irisPlanCheck = useIrisPlanCheck({ enabled: irisSelected, targetId: selectedTarget?.id, config: irisPlanConfig, token });
+  const irisResumeMetrics = useIrisMetrics(irisSelected ? configDraft.resumeFromJobId : "", token);
   const irisContext = useMemo(
     () =>
       irisSelected
@@ -795,9 +820,17 @@ export function TrainingStudio({ mode = "training" } = {}) {
             captionFieldOptions: irisCaptionFieldOptions(activeDataset),
             trainingLane: trainingLaneFromCapabilities(macCapabilities),
             dataWalk: irisDataWalk,
+            presets: irisPresets,
+            planCheck: irisPlanCheck,
+            resumeMetrics: irisResumeMetrics,
+            applyPreset: (preset) =>
+              preset &&
+              setConfigDraft((current) =>
+                configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, current.triggerWord ?? "", preset, current),
+              ),
           }
         : {},
-    [irisSelected, jobs, activeProject?.id, activeDataset, macCapabilities, irisDataWalk],
+    [irisSelected, jobs, activeProject?.id, activeDataset, macCapabilities, irisDataWalk, irisPresets, irisPlanCheck, irisResumeMetrics, selectedTarget, gpuOptions],
   );
 
   // The dataset's character kind (person/style/object) — refines the readiness kind
@@ -1699,6 +1732,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       associatedCharacterId,
       captionDraftById,
       namedCaptionsById,
+      holdoutById,
       name: draftName,
       selectedAssetIds: selectionOverride ?? selectedAssetIds,
     });
@@ -1710,6 +1744,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setDraftName(dataset.name ?? draftName.trim());
       setUploadedDatasetAssets([]);
       setNamedCaptionsById({});
+      setHoldoutById({});
       setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
       setAssociatedCharacterId(dataset.characterId ?? "");
       setSelectedDatasetId(dataset.id ?? "");
@@ -2129,7 +2164,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   onDeleteDataset: handleDeleteDataset, deletingDataset,
                 }}
                 captionSession={{
-                  captionDraftById, namedCaptionsById, onPreview, updateCaption, captioning, addDialogOpen,
+                  captionDraftById, namedCaptionsById, holdoutById,
+                  onToggleHoldout: irisSelected ? (id, on) => setHoldoutById((current) => ({ ...current, [id]: on })) : undefined, onPreview, updateCaption, captioning, addDialogOpen,
                   selectedAssetIds, addAssets, handleImport, captionDialog,
                   updateCaptionSetting, runCaptionJob, toggleCaptionExtraOption,
                   displayedCaptionPrompt, captionSettings, captionModelMissing,
@@ -2208,6 +2244,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 <TrainingLiveProgress
                   jobs={activeTrainingJobs}
                   projectId={activeProject?.id}
+                  token={token}
                   onCancel={jobAction ? (job) => jobAction(job, "cancel") : undefined}
                   onPreview={setPreviewAsset}
                 />
