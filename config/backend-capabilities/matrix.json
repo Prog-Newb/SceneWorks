@@ -4,32 +4,32 @@
   "summary": {
     "modelCount": 128,
     "importedFamilyCount": 4,
-    "cellCount": 1030,
+    "cellCount": 1034,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
   },
   "sources": {
     "apiContractEntry": "80c3555220790631bb4967ad1226304ef2dd3d8b5ca03692916f2d7f0fd242c9",
-    "apiDto": "ce0794225b73707a9606e63e238d9fadb2c10a681c57b4c7851ebb3446a6805f",
+    "apiDto": "21aa41cafe6a2d9e47ffeedbc0d902874332e401511d439f44eecef7a904f3ab",
     "apiGeneration": "75e502e31d13ac2018e9bfdc17e6bc939f24704fc04fd4a93008eb9c5cdffa12",
-    "apiValidation": "5338e6006c15973d3f0958322712df20315d6acfe55ebc4b79ce8af946429fee",
+    "apiValidation": "a3509e547a1551e73eccc417fef08e6b118e6d18eb8d4eb717aa7f4214746cbe",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
     "descriptorAudioFacts": "d7109d1b5d52706909cbb2d96b1856efb93973c0f135bb5a5d575238911997b3",
-    "descriptorCandleFacts": "45099f65f53a40c4cbd37aa41e6636201a6b550b3c60a68cfc80394b347a5caa",
-    "descriptorCandleRuntime": "5b6545337e60e1f29ce2f1dd9b33198ce8015fab34403fc606658a9e39a7052b",
-    "descriptorMlxFacts": "03c58c6d8170e08a8569790f337354794f459765eb86ce9736297370581a80cc",
-    "descriptorMlxRuntime": "fb1d7e44b0eb275a8170a29479a211cbfdc61fecf642914ac370cdb7e7e197f7",
+    "descriptorCandleFacts": "98813d747cefc028460b8d9f98205e5be598354e76c66fae12e8c70299d37955",
+    "descriptorCandleRuntime": "928935914e6a01f45ff28cc49b26c3c738f43f0e48f99df988a8eba95cc19f5b",
+    "descriptorMlxFacts": "d9d42af87ac9cd7152fe8706757be9d49ad9fefe2ac9732731df60863b561425",
+    "descriptorMlxRuntime": "4c8f997e48115ab55d42fa152da3bed1501d647997ee54f03c717c2f45cb754a",
     "descriptorPreviewFacts": "442a6e7f82626847ce06f6e17a44d4a6af386efac6db65a8c4f72963e57f3fae",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "f5deb1e964537cf3290c00364a402e91f7e2c7da82deee567d03fd46ad4e3458",
-    "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
-    "routerCandle": "508eb48d36e094770efeb4f374177b872b98b865ac275af3721c33c5c7cbe209",
-    "routerCatalog": "a186a712e0745cf9b99cfde5161470d7b533f93529d28531be1ce67585318743",
+    "manifest": "fb7576185e626b16e9819fddb49149913c3c8227493d8e2ab68f40bcef2ff6e5",
+    "modelImportDefaults": "53f087f4749ef411c44a0b9b57fb1daf7d3b7e642f7512852d2453b24062bfb6",
+    "routerCandle": "b0148c4f70e2cada8e175cc91f3d3c83463f204375fd8dfa93acb56a49ae1a79",
+    "routerCatalog": "8fdeb7cec1a2579ce0d297eb25887a9fbf4d69b2b49b671d5a99151ddf57d4d9",
     "routerGaps": "2d2cc4850415809c97871455b7621cb729958a00fe58cf4c67f73ea691501400",
-    "routerMlx": "8f92e4e8dafeaef7537cb8fad36758ae2f45121959cefb124e4e7baa05347549",
-    "scheduler": "c4428a547eae0b20f50b703543dd906119bcf60e2ca21acacf5c0e556d225cd5",
-    "trainingCatalog": "b93fcf9ff88a84ceb3d96b5fc562d16047fd6db77879196bfeada836b23d3e72",
+    "routerMlx": "c2a7d7a77963ea42bde821ea0c4b4a5929031ec1d583f4f6bc68b194945fb6f9",
+    "scheduler": "546d662a915ffff4411087c6fa1fdb0a641c008804539d6fab452723216a78ad",
+    "trainingCatalog": "2b2206f272892452cb0bcde161043758503c25db7805ac62508fd4a341ea40bc",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
     "webImageAdvanced": "685edcd46c3b986eec15916c31261ec5b18e527d6c70b76a0fbacff7c9487b8d",
@@ -48,14 +48,14 @@
     "workerDispatch": "c74e95af625f5310b759300ba13a4831fda06fd89cce7e6aac7d856395294dc7",
     "workerEngineTable": "cdd10c5672a8a447b67c5b33c341325b9cba015477440c412bd9aca1237573c6",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "6b204f84f5ed168f9211356b39f21233b5d610a02ed0407c47c21d3b36891972",
+    "workerImageDispatch": "ea8f8ff8df8eb2061a77f2bbe2dc028b1c808b6a930afb133bc0e5e816f6db78",
     "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
     "workerImageMageFinetuned": "e00a6ccd9b811cda73073e0bd8270e58ab60c4a8a8e647f18f3fdec9c30a0935",
     "workerImagePulid": "992ac547e891d30ae485411506bb9088961224653a5a89c2699fa2cd879a985f",
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "cf5e5ea513e94fcac91d88170de969c3e5436f6f1cbb19a2c20f9936d91f176d",
+    "workerTrainingDispatch": "0fc102f5f7ff27354da60928069bf94d1a72f13c0283103e770ff8dc562e9904",
     "workerUtilityDispatch": "41899f0a9b7f354c61020aea67904246b3d0084ffeaf20e1d0cb89bf2fc9ed3c",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -8246,6 +8246,50 @@
       "target": "mage_flow_base_lora",
       "baseModel": "mage_flow_base",
       "kernel": "mage_flow_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "qwen_image_2_1_edit_lora",
+      "baseModel": "qwen_image_2_1",
+      "kernel": "qwen_image_2_1_edit_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "qwen_image_2_1_edit_lora",
+      "baseModel": "qwen_image_2_1",
+      "kernel": "qwen_image_2_1_edit_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "qwen_image_2_1_lora",
+      "baseModel": "qwen_image_2_1",
+      "kernel": "qwen_image_2_1_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "qwen_image_2_1_lora",
+      "baseModel": "qwen_image_2_1",
+      "kernel": "qwen_image_2_1_lora",
       "networkType": "lora",
       "support": {
         "capability": "train",

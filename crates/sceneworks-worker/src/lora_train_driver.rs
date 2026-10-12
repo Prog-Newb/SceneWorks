@@ -273,6 +273,7 @@ mod driver {
                 image_path,
                 caption: caption.clone(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 subject_mask_path: None,
             })
@@ -392,6 +393,7 @@ mod driver {
                 image_path,
                 caption: caption.clone(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 subject_mask_path: None,
             })

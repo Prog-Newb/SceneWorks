@@ -249,12 +249,24 @@ test("the checked-in key matches the derivation over the pinned inference source
  * allowance is narrow: these crates only, and only through the trainer module — the case below
  * proves the second half by emptying that one file.
  */
-const TRAINING_AUX_CRATES = new Set([
-  "crates/media/mlx-gen/mlx-gen-perceptual",
+const LTX_SHARED_AUXILIARY_CRATES = new Set([
+  "crates/media/mlx-gen/mlx-gen-body",
   "crates/media/mlx-gen/mlx-gen-depth",
   "crates/media/mlx-gen/mlx-gen-face",
-  "crates/media/mlx-gen/mlx-gen-body",
+  "crates/media/mlx-gen/mlx-gen-perceptual",
 ]);
+
+function unexpectedLtxGeneratorCrates(files) {
+  const crateOf = (file) => file.slice(0, file.indexOf("/src/"));
+  const crates = new Set(files.map(crateOf));
+  return [...crates].filter(
+    (crate) =>
+      /mlx-gen-|candle-gen-/.test(crate) &&
+      crate !== "crates/media/mlx-gen/mlx-gen-ltx" &&
+      !LTX_SHARED_AUXILIARY_CRATES.has(crate),
+  );
+}
+
 const LTX_TRAINER = "crates/media/mlx-gen/mlx-gen-ltx/src/training.rs";
 
 function otherModelCrates(files) {
@@ -266,12 +278,26 @@ function otherModelCrates(files) {
   );
 }
 
-test("the closure is the loader's own crates, not the repository", { skip }, () => {
+test("the closure admits exact shared auxiliaries, never unrelated generator siblings", { skip }, () => {
   const { files } = keyAt(PIN);
-  // Not one other generation-model crate — the whole point of the unit. The training-time
-  // auxiliary stack is the one named exception (see TRAINING_AUX_CRATES).
-  const otherModels = otherModelCrates(files).filter((crate) => !TRAINING_AUX_CRATES.has(crate));
+  const crateOf = (file) => file.slice(0, file.indexOf("/src/"));
+  const crates = new Set(files.map(crateOf));
+  assert.ok(crates.has("crates/media/mlx-gen/mlx-gen-ltx"), [...crates].join(" "));
+  for (const auxiliary of LTX_SHARED_AUXILIARY_CRATES) {
+    assert.ok(crates.has(auxiliary), `required shared LTX auxiliary absent: ${auxiliary}`);
+  }
+  const otherModels = unexpectedLtxGeneratorCrates(files);
   assert.deepEqual(otherModels, [], `sibling model crates leaked into the closure: ${otherModels}`);
+
+  const injected = [
+    ...files,
+    "crates/media/mlx-gen/mlx-gen-qwen-image/src/lib.rs",
+    "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/lib.rs",
+  ];
+  assert.deepEqual(unexpectedLtxGeneratorCrates(injected), [
+    "crates/media/mlx-gen/mlx-gen-qwen-image",
+    "crates/media/mlx-gen/mlx-gen-qwen-image-2-1",
+  ]);
 });
 
 test("the training-time auxiliary crates reach the closure only through the trainer module", { skip }, () => {
