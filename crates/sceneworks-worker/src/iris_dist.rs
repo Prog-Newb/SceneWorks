@@ -725,6 +725,27 @@ pub(crate) fn drive_rank_fleet_with(
             .envs(world.env())
             .env(RANK_SPEC_ENV, &spec_path)
             .env(gen_core::iris::train::dist::DIST_TOKEN_ENV, &token)
+            // The rank resolves the plan's paths against THIS worker's settings, whatever the
+            // ambient environment says (a test worker, an embedded worker with defaulted dirs).
+            .env("SCENEWORKS_DATA_DIR", &settings.data_dir)
+            .env("SCENEWORKS_CONFIG_DIR", &settings.config_dir)
+            .env("SCENEWORKS_GPU_ID", &settings.gpu_id)
+            .env(
+                "SCENEWORKS_BACKEND_MLX_ENABLED",
+                if settings.backend_mlx_enabled {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
+                "SCENEWORKS_BACKEND_CANDLE_ENABLED",
+                if settings.backend_candle_enabled {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
             // A rank never talks to the API.
             .env_remove("SCENEWORKS_ACCESS_TOKEN")
             .stdin(Stdio::piped())
@@ -984,6 +1005,24 @@ pub(crate) mod test_support {
         }
     }
 
+    /// Real rank processes for the real-weight smokes: this test binary re-entered on the ignored
+    /// [`tests::real_iris_rank_process`], which runs the PRODUCTION rank entry.
+    pub(crate) struct TestBinaryRankLauncher;
+
+    impl RankLauncher for TestBinaryRankLauncher {
+        fn command(&self) -> Command {
+            let mut command = Command::new(std::env::current_exe().expect("the test binary"));
+            command.args([
+                "iris_dist::tests::real_iris_rank_process",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ]);
+            command
+        }
+    }
+
     /// The records the fake ranks wrote (`rank-<r>.json`), by rank.
     pub(crate) fn records(dir: &Path) -> Vec<Value> {
         let mut records: Vec<Value> = std::fs::read_dir(dir)
@@ -1090,8 +1129,10 @@ mod tests {
         assert_eq!(stamped["timeout_secs"], json!(60));
         assert_eq!(options["iris"]["dist"]["strategy"], json!("ddp"));
         // The engine's own world parser accepts what the launcher stamped.
-        let mut config = gen_core::TrainingConfig::default();
-        config.model_options = options.clone();
+        let config = gen_core::TrainingConfig {
+            model_options: options.clone(),
+            ..Default::default()
+        };
         let plan = gen_core::iris::train::dist::parse_dist(
             config.model_options["iris"].get("dist"),
             false,
@@ -1183,6 +1224,7 @@ mod tests {
                 "masterPort": world.master_port,
                 "token": token,
                 "accessToken": std::env::var("SCENEWORKS_ACCESS_TOKEN").ok(),
+                "dataDir": std::env::var("SCENEWORKS_DATA_DIR").ok(),
                 "specJob": spec.as_ref().ok().map(|spec| spec.job_id.clone()),
                 "specKernel": spec.as_ref().ok().map(|spec| spec.plan.target.kernel.clone()),
             }))
@@ -1327,6 +1369,16 @@ mod tests {
         std::process::exit(code);
     }
 
+    /// One REAL rank (see [`super::test_support::TestBinaryRankLauncher`]): the production entry,
+    /// in a process of its own. Does nothing when not launched as a rank.
+    #[test]
+    #[ignore = "a real Iris rank process, launched by the real-weight training smokes"]
+    fn real_iris_rank_process() {
+        if let Some(code) = iris_rank_entry() {
+            std::process::exit(code);
+        }
+    }
+
     fn fleet_plan(data: &Path, iris: Value) -> TrainingPlan {
         use sceneworks_core::training::{build_training_plan, BuildTrainingPlan, TrainingDataset};
         let target = sceneworks_core::training::iris::iris_generation_target();
@@ -1455,6 +1507,12 @@ mod tests {
             );
             assert_eq!(record["specJob"], json!("job-fleet"));
             assert_eq!(record["specKernel"], json!("iris_train"));
+            assert!(
+                record["dataDir"]
+                    .as_str()
+                    .is_some_and(|dir| !dir.is_empty()),
+                "the rank gets the worker's data dir"
+            );
         }
         // Rank 0's events only (the other ranks' progress is never forwarded), then the export.
         let trained: Vec<u32> = run

@@ -2035,9 +2035,7 @@ pub(crate) async fn run_training_execution_drive(
     if fleet_world > 1 {
         drop(load_inputs);
         drop(request);
-        if let Err(error) = finish_prepared_input_operation(Ok(()), prepared_inputs) {
-            return Err(error);
-        }
+        finish_prepared_input_operation(Ok(()), prepared_inputs)?;
         let mut run_notes = run_notes;
         run_notes.insert(
             "irisDistributed".to_owned(),

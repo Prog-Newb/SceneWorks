@@ -227,7 +227,7 @@ on:
         type: boolean
         default: false
       iris_worker_smoke_filter:
-        description: "cargo test filter for the Iris worker smoke step (default: every Iris worker smoke + the training smoke). sc-25684: iris_staged_vram_measurement runs only the staged-residency VRAM measurement, alone in a fresh process, and skips the training smoke (the default filter never selects it)"
+        description: "cargo test filter for the Iris worker smoke step (default: every Iris worker smoke + the training smokes). sc-25684: iris_staged_vram_measurement runs only the staged-residency VRAM measurement, alone in a fresh process, and skips the training smoke (the default filter never selects it). sc-25689: a filter starting with iris_training_gpu_smoke skips the worker smokes and runs only the matching training smokes (e.g. iris_training_gpu_smoke_two_rank_ddp)"
         required: false
         type: string
         default: iris_worker_gpu_smoke
@@ -1719,6 +1719,7 @@ jobs:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
       - name: Run the Iris-3B Candle worker smoke
+        if: ${{ !startsWith(inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke', 'iris_training_gpu_smoke') }}
         shell: cmd
         env:
           IRIS_SMOKE_FILTER: ${{ inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke' }}
@@ -1728,10 +1729,21 @@ jobs:
           cargo test -p sceneworks-worker --features backend-candle --release %IRIS_SMOKE_FILTER% -- --ignored --nocapture --test-threads=1
       # SC-25686: one bounded Iris LoRA `lora_train` job through the production executor (8 steps,
       # 256²), then the trained adapter applied by an `image_generate` job (same snapshots, offline).
-      - name: Run the Iris-3B Candle training smoke
-        if: ${{ (inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke') == 'iris_worker_gpu_smoke' }}
+      # SC-25689: the same filter also selects `iris_training_gpu_smoke_two_rank_ddp` — the run as
+      # two ddp rank processes sharing this job's one visible card (`share_device`), over loopback
+      # TCP. The card inventory is printed first: the runner exposes one card to CUDA.
+      - name: Show the cards the Iris training smoke sees
+        if: ${{ (inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke') == 'iris_worker_gpu_smoke' || startsWith(inputs.iris_worker_smoke_filter, 'iris_training_gpu_smoke') }}
         shell: cmd
+        run: |
+          nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv
+          echo CUDA_VISIBLE_DEVICES=%CUDA_VISIBLE_DEVICES%
+      - name: Run the Iris-3B Candle training smoke
+        if: ${{ (inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke') == 'iris_worker_gpu_smoke' || startsWith(inputs.iris_worker_smoke_filter, 'iris_training_gpu_smoke') }}
+        shell: cmd
+        env:
+          IRIS_TRAINING_FILTER: ${{ startsWith(inputs.iris_worker_smoke_filter, 'iris_training_gpu_smoke') && inputs.iris_worker_smoke_filter || 'iris_training_gpu_smoke' }}
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo test -p sceneworks-worker --features backend-candle --release iris_training_gpu_smoke -- --ignored --nocapture --test-threads=1
+          cargo test -p sceneworks-worker --features backend-candle --release %IRIS_TRAINING_FILTER% -- --ignored --nocapture --test-threads=1

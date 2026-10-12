@@ -135,6 +135,7 @@ fn capacity_noun(lane: &str) -> &'static str {
 /// to refuse, `None` to admit. Missing evidence REFUSES (the inverse of the generation fit gate's
 /// fail-open): the floors are the only bound a training lane has, so an unreadable host or an
 /// undeclared shape is never admitted unbounded.
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
 pub(crate) fn iris_memory_refusal(
     lane: &str,
     network_type: &str,

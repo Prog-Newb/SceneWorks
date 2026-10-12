@@ -237,6 +237,21 @@ async fn render(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real-weight Iris training smoke; needs the pinned speridlabs/iris-3b and Qwen3-VL-4B-Instruct snapshots under HF_HUB_CACHE and an Apple-Silicon GPU or a CUDA device"]
 async fn iris_training_gpu_smoke() {
+    run_iris_training_smoke(1).await;
+}
+
+/// sc-25689: the same bounded LoRA run as TWO ddp ranks sharing the worker's one device
+/// (`dist.world.share_device`) — two real rank processes of this test binary re-entered through the
+/// production [`crate::iris_dist::iris_rank_entry`], rendezvousing over loopback TCP with the per-job
+/// token, rank 0's events driving the job — then the adapter is applied by a generation job exactly
+/// as the single-rank smoke's is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "real-weight two-rank Iris training smoke; needs the pinned speridlabs/iris-3b and Qwen3-VL-4B-Instruct snapshots under HF_HUB_CACHE and an Apple-Silicon GPU or a CUDA device"]
+async fn iris_training_gpu_smoke_two_rank_ddp() {
+    run_iris_training_smoke(2).await;
+}
+
+async fn run_iris_training_smoke(ranks: u64) {
     let hub = PathBuf::from(
         std::env::var("HF_HUB_CACHE").expect("set $HF_HUB_CACHE to the real-weights hub"),
     );
@@ -309,6 +324,15 @@ async fn iris_training_gpu_smoke() {
         "samplePrompts".into(),
         json!(["a flat red square, smoke style"]),
     );
+    if ranks > 1 {
+        config.advanced.insert(
+            "iris".into(),
+            json!({
+                "dist": {"strategy": "ddp", "world": {"world_size": ranks, "share_device": true}},
+                "expected_global_batch": ranks,
+            }),
+        );
+    }
     let plan = sceneworks_core::training::build_training_plan(
         sceneworks_core::training::BuildTrainingPlan {
             job_id: TRAIN_JOB,
@@ -331,9 +355,24 @@ async fn iris_training_gpu_smoke() {
     let job: JobSnapshot = serde_json::from_value(snapshot).expect("train job deserializes");
     let api = ApiClient::new(&settings);
     let started = std::time::Instant::now();
-    crate::training_jobs::run_training_execution(&api, &settings, &job, &plan)
+    if ranks > 1 {
+        crate::training_jobs::run_training_execution_drive(
+            &api,
+            &settings,
+            &job,
+            &plan,
+            |_: &str, _: &gen_core::LoadSpec| -> gen_core::Result<Box<dyn gen_core::Trainer>> {
+                panic!("a multi-rank run never loads a trainer in the worker process")
+            },
+            Arc::new(crate::iris_dist::test_support::TestBinaryRankLauncher),
+        )
         .await
-        .expect("the Iris LoRA training job completes");
+        .expect("the two-rank Iris LoRA training job completes");
+    } else {
+        crate::training_jobs::run_training_execution(&api, &settings, &job, &plan)
+            .await
+            .expect("the Iris LoRA training job completes");
+    }
     let train_seconds = started.elapsed().as_secs_f64();
 
     let result = posts
@@ -345,6 +384,16 @@ async fn iris_training_gpu_smoke() {
         .map(|(_, body)| body["result"].clone())
         .expect("the training job posted a completed result");
     assert_eq!(result["stepsCompleted"], TRAIN_STEPS, "{result:#}");
+    if ranks > 1 {
+        let dist = &result["irisDistributed"];
+        assert_eq!(dist["worldSize"], json!(ranks), "{result:#}");
+        assert_eq!(dist["shareDevice"], json!(true), "{result:#}");
+        assert_eq!(
+            result["irisPlan"]["globalBatch"],
+            json!(ranks),
+            "{result:#}"
+        );
+    }
     let final_loss = result["finalLoss"].as_f64().expect("final loss");
     assert!(final_loss.is_finite(), "final loss {final_loss}");
     assert!(
@@ -421,7 +470,7 @@ async fn iris_training_gpu_smoke() {
         "the trained adapter must change the render at a fixed seed (mean |Δ| {mean_abs_diff:.3})"
     );
     eprintln!(
-        "RESULT status=pass trainer=iris_3b backend={} steps={TRAIN_STEPS} resolution={RESOLUTION} \
+        "RESULT status=pass trainer=iris_3b ranks={ranks} backend={} steps={TRAIN_STEPS} resolution={RESOLUTION} \
          final_loss={final_loss:.4} train_s={train_seconds:.1} adapter={} render_std={std:.2} \
          adapter_effect_mean_abs_diff={mean_abs_diff:.3}",
         if cfg!(target_os = "macos") { "mlx" } else { "candle" },
