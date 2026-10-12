@@ -165,6 +165,24 @@ async fn the_plan_check_shows_the_global_batch_and_the_engines_refusal() {
     assert_eq!(check["worldSize"], 2);
     assert_eq!(check["ok"], true, "{check}");
     assert_eq!(check["engineChecked"], cfg!(target_os = "macos"));
+    // sc-25690: one rank's floor in GiB with the provenance of the row it was read from (the
+    // default 256² adapter row is a declaration) — no blanket `measured` flag.
+    let memory = &check["memory"];
+    assert_eq!(memory["unit"], "GiB", "{check}");
+    assert!(memory["perRankFloorGib"].as_u64() > Some(0), "{check}");
+    assert_eq!(memory["provenance"], "declared", "{check}");
+    assert!(memory.get("measured").is_none(), "{check}");
+    let mut full = config.clone();
+    full["resolution"] = json!(512);
+    full["advanced"]["networkType"] = json!("full");
+    full["advanced"]["iris"] = json!({});
+    full["batchSize"] = json!(1);
+    full["gradientAccumulation"] = json!(1);
+    assert_eq!(
+        plan_check(&app, full).await["memory"]["provenance"],
+        "measured",
+        "a single-rank full 512² run reads a measured row"
+    );
     if cfg!(target_os = "macos") {
         assert_eq!(check["resolved"]["globalBatch"], 8, "{check}");
         assert!(check["resolved"]["dataIdentity"].is_string(), "{check}");

@@ -19,7 +19,7 @@ on:
         required: true
         type: string
       filter:
-        description: "all | inference | training | <one smoke test name> | cleanup"
+        description: "all | inference | training | full_ft | <one smoke test name> | cleanup"
         required: false
         type: string
         default: all

@@ -227,7 +227,7 @@ on:
         type: boolean
         default: false
       iris_worker_smoke_filter:
-        description: "cargo test filter for the Iris worker smoke step (default: every Iris worker smoke + the training smokes). sc-25684: iris_staged_vram_measurement runs only the staged-residency VRAM measurement, alone in a fresh process, and skips the training smoke (the default filter never selects it). sc-25689: a filter starting with iris_training_gpu_smoke skips the worker smokes and runs only the matching training smokes (e.g. iris_training_gpu_smoke_two_rank_ddp)"
+        description: "cargo test filter for the Iris worker smoke step (default: every Iris worker smoke + the training smokes). sc-25684: iris_staged_vram_measurement runs only the staged-residency VRAM measurement, alone in a fresh process, and skips the training smoke (the default filter never selects it). sc-25689: a filter starting with iris_training_gpu_smoke skips the worker smokes and runs only the matching training smokes (e.g. iris_training_gpu_smoke_two_rank_ddp). sc-25690: iris_training_gpu_smoke_full_ft runs only the two FULL fine-tune job-path smokes (generation stage1_256 cancel/resume and restoration; the facebook/dinov2-base REPA teacher must be in the hub), and iris_training_gpu_smoke_lokr_cancel_resume only the LoKr cancel/resume smoke; the default filter runs every training smoke including those"
         required: false
         type: string
         default: iris_worker_gpu_smoke

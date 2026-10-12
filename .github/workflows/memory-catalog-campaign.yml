@@ -88,7 +88,7 @@ on:
           - secondary
         default: primary
       iris_smoke_filter:
-        description: "Iris MLX real-weights only (sc-25690): all | inference | training | <one smoke test name> | cleanup."
+        description: "Iris MLX real-weights only (sc-25690): all | inference | training | full_ft | <one smoke test name> | cleanup."
         required: false
         type: string
         default: all
