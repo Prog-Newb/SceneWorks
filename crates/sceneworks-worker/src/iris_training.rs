@@ -14,8 +14,29 @@
 //!   a host under `sceneworks_core::training::iris::iris_training_memory_floor_gb` is refused
 //!   before the model loads (and so is a host whose capacity cannot be read).
 
+use std::path::{Path, PathBuf};
+
 use gen_core::iris::train::{DataWalk, CANONICAL_CHUNKS};
 use serde::Serialize;
+
+/// An Iris training run's checkpoint root, `<output_dir>/<stem>.checkpoints` — the engine's own
+/// `gen_core::iris::train::checkpoint_root`, so resume / load-from / metrics read exactly where the
+/// trainers write.
+pub fn iris_checkpoint_root(output_dir: &Path, file_name: &str) -> PathBuf {
+    gen_core::iris::train::checkpoint_root(output_dir, file_name)
+}
+
+/// Every checkpoint directory an Iris training run leaves beside its export (sc-25690): the
+/// checkpoint root and the single sibling `<root>.prior` the trainers retire foreign or abandoned
+/// checkpoints into (`gen_core::iris::train::lineage::prior_checkpoint_root`). Both are part of the
+/// run's on-disk footprint, so whatever deletes a run's files deletes these too — taken from the
+/// engine contract, never re-derived here.
+pub fn iris_run_checkpoint_dirs(output_dir: &Path, file_name: &str) -> [PathBuf; 2] {
+    [
+        iris_checkpoint_root(output_dir, file_name),
+        gen_core::iris::train::lineage::prior_checkpoint_root(output_dir, file_name),
+    ]
+}
 
 /// The pre-launch view of the trainer's data walk for a dataset of `items` at `batch_size`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -887,6 +908,12 @@ mod job_tests {
             let user_cancel = CancelSwitch::default();
             let (base_url, posts) = spawn_job_api(Arc::clone(&user_cancel)).await;
             let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
+            // Off-Mac the Iris memory gate reads the worker's NVIDIA card; `isolated_env` caps it
+            // (`SCENEWORKS_CUDA_VRAM_CAP_GB`), so the bound is the test's, not the runner's.
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            {
+                settings.gpu_id = "0".to_owned();
+            }
             settings.api_url = base_url;
             settings.data_dir = data.to_path_buf();
             settings.heartbeat_seconds = 5;
@@ -1018,6 +1045,15 @@ mod job_tests {
         });
         let run = run(Behavior::Completes, plan, &data);
         assert!(run.outcome.is_ok(), "{:?}\n{:#?}", run.outcome, run.posts);
+        // The trainer checkpointed, but an Iris checkpoint is not a generic resume bundle: no post
+        // offers the Queue's retry-resume (sc-25785) — the run resumes from the Training Studio.
+        assert!(
+            run.posts
+                .iter()
+                .all(|post| post["result"].get("resumeCheckpointStep").is_none()),
+            "{:#?}",
+            run.posts
+        );
 
         assert_eq!(run.seen.loads, 1);
         assert_eq!(
@@ -1327,6 +1363,12 @@ mod job_tests {
             let user_cancel = CancelSwitch::default();
             let (base_url, posts) = spawn_job_api(Arc::clone(&user_cancel)).await;
             let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
+            // Off-Mac the Iris memory gate reads the worker's NVIDIA card; `isolated_env` caps it
+            // (`SCENEWORKS_CUDA_VRAM_CAP_GB`), so the bound is the test's, not the runner's.
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            {
+                settings.gpu_id = "0".to_owned();
+            }
             settings.api_url = base_url;
             settings.data_dir = data.clone();
             settings.heartbeat_seconds = 5;
@@ -1373,6 +1415,7 @@ mod job_tests {
                     gen_core::TrainingConfig::default(),
                     "mlx",
                     40,
+                    None,
                     rx,
                     cancel,
                     blocking,
@@ -2151,6 +2194,12 @@ mod job_tests {
                 });
             }
             let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
+            // Off-Mac the Iris memory gate reads the worker's NVIDIA card; `isolated_env` caps it
+            // (`SCENEWORKS_CUDA_VRAM_CAP_GB`), so the bound is the test's, not the runner's.
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            {
+                settings.gpu_id = "0".to_owned();
+            }
             settings.api_url = base_url;
             settings.data_dir = data.to_path_buf();
             settings.heartbeat_seconds = 5;
@@ -2349,6 +2398,12 @@ mod job_tests {
         let install = stage_install(&data);
         let plan = plan(&data, &install.backbone, 2, two_ranks(true));
         let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
+        // Off-Mac the Iris memory gate reads the worker's NVIDIA card; `isolated_env` caps it
+        // (`SCENEWORKS_CUDA_VRAM_CAP_GB`), so the bound is the test's, not the runner's.
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        {
+            settings.gpu_id = "0".to_owned();
+        }
         settings.data_dir = data.clone();
         let spec = crate::iris_dist::RankSpec {
             job_id: "job-iris-train".to_owned(),

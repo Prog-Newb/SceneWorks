@@ -107,9 +107,14 @@ fn fixed_runtime_model_ids(job_type: &JobType, payload: &JsonObject) -> Vec<&'st
         JobType::PersonDetect => vec!["person_detector"],
         JobType::PersonTrack => vec!["person_detector", "sam3_person_segment"],
         JobType::PoseDetect => vec!["dwpose_pose_detector"],
-        JobType::ImageSegment => vec!["sam3_person_segment"],
+        JobType::ImageSegment | JobType::DatasetSubjectMask => vec!["sam3_person_segment"],
         // sc-25682: the Iris depth task export — its own resource closure, no text encoder.
         JobType::ImageDepth => vec![sceneworks_core::depth_map::DEPTH_MODEL_ID],
+        // sc-2124: a training run whose images still lack subject masks generates them with SAM3
+        // before it trains (the route's `subjectMaskPrepass`).
+        JobType::LoraTrain if payload.contains_key("subjectMaskPrepass") => {
+            vec!["sam3_person_segment"]
+        }
         JobType::ImageDetail
             if payload
                 .get("model")

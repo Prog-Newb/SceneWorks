@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "1b2737f48e3e42a9bab50627d8f64989dec9c3b2",
+    "inferenceRevision": "25231d15b582dc90d332a1f3a41ff45b8032f5b2",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
@@ -15809,6 +15809,13 @@
       "provider": "qwen_image_2_1",
       "tier": "bf16",
       "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "bf16",
+      "mode": "character_image",
       "overlay": "none",
       "loadProfile": "plain"
     },
@@ -15816,8 +15823,22 @@
       "provider": "qwen_image_2_1",
       "tier": "bf16",
       "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "bf16",
+      "mode": "edit_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_2_1",
@@ -15830,8 +15851,22 @@
       "provider": "qwen_image_2_1",
       "tier": "bf16",
       "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "bf16",
+      "mode": "text_to_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_2_1",
@@ -15844,8 +15879,22 @@
       "provider": "qwen_image_2_1",
       "tier": "q4",
       "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q4",
+      "mode": "edit_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_2_1",
@@ -15858,8 +15907,22 @@
       "provider": "qwen_image_2_1",
       "tier": "q4",
       "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q4",
+      "mode": "text_to_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_2_1",
@@ -15872,6 +15935,13 @@
       "provider": "qwen_image_2_1",
       "tier": "q8",
       "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q8",
+      "mode": "edit_image",
       "overlay": "none",
       "loadProfile": "plain"
     },
@@ -15879,8 +15949,22 @@
       "provider": "qwen_image_2_1",
       "tier": "q8",
       "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q8",
+      "mode": "image_to_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_2_1",

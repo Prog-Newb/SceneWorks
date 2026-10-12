@@ -565,6 +565,17 @@ async fn an_iris_rerun_never_shares_an_output_with_another_run() {
     let checkpoints = output_dir(&first).join(format!("{}.checkpoints", stem(&first)));
     std::fs::create_dir_all(checkpoints.join("step_00000002")).unwrap();
     complete(&app, &job_id, "failed", json!({})).await;
+    // sc-25785's generic retry-resume never applies: an Iris run resumes from the Training Studio
+    // (`resumeFromJobId`), so `resume: true` is refused, typed, before anything is queued.
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({ "resume": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(error.to_string().contains("Training Studio"), "{error}");
     // An INCOMPLETE checkpoint (no state.json) is not a resumable run: the retry is allowed...
     let (status, retried) = rerun(job_id.clone(), "retry").await;
     assert_eq!(status, StatusCode::CREATED, "{retried}");
@@ -697,6 +708,27 @@ async fn iris_adapter_registers_with_task_identity_and_resumes() {
         error.to_string().contains("no complete checkpoint"),
         "{error}"
     );
+    // Deleting the adapter deletes the run's checkpoints AND the one `.prior` sibling the trainer
+    // retires a foreign run's checkpoints into (sc-25690), named by the engine contract.
+    let [root, prior] = sceneworks_worker::iris_run_checkpoint_dirs(&output_dir, &file_name);
+    for dir in [&root, &prior] {
+        std::fs::create_dir_all(dir.join("step_00000004")).unwrap();
+        std::fs::write(dir.join("step_00000004/state.json"), b"{}").unwrap();
+    }
+    assert_eq!(prior, output_dir.join(format!("{stem}.checkpoints.prior")));
+    let lora_id = entry["id"].as_str().unwrap();
+    let scope = entry["scope"].as_str().unwrap();
+    let (status, deleted) = request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/loras/{lora_id}?scope={scope}&projectId={project_id}&permanent=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    for gone in [&output_dir.join(&file_name), &root, &prior] {
+        assert!(!gone.exists(), "orphaned after delete: {}", gone.display());
+    }
 }
 
 /// A full run's export registers as a selectable user image model with its Iris task identity, and
@@ -737,6 +769,15 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
     let checkpoints = output_dir.join(format!("{stem}.checkpoints"));
     std::fs::create_dir_all(checkpoints.join("step_00000001")).unwrap();
     std::fs::write(checkpoints.join("step_00000001/state.json"), b"{}").unwrap();
+    // …and so does the one `.prior` sibling the trainer retires a foreign run's checkpoints into
+    // (sc-25690), named by the engine contract.
+    let [_, prior] = sceneworks_worker::iris_run_checkpoint_dirs(
+        &output_dir,
+        plan["output"]["fileName"].as_str().unwrap(),
+    );
+    assert_eq!(prior, output_dir.join(format!("{stem}.checkpoints.prior")));
+    std::fs::create_dir_all(prior.join("step_00000009")).unwrap();
+    std::fs::write(prior.join("step_00000009/state.json"), b"{}").unwrap();
     let completed = complete(&app, &job_id, "completed", json!({})).await;
     assert_eq!(
         completed["result"]["baseCheckpointRegistered"], true,
@@ -951,6 +992,11 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
         "the run's checkpoints are not orphaned: {}",
         checkpoints.display()
     );
+    assert!(
+        !prior.exists(),
+        "the run's retired checkpoints are not orphaned: {}",
+        prior.display()
+    );
     assert!(!output_dir.exists(), "{}", output_dir.display());
 }
 
@@ -1154,4 +1200,56 @@ async fn a_trained_iris_adapter_is_accepted_by_the_iris_image_job_gate() {
             .is_some_and(|loras| loras.iter().any(|lora| lora["id"] == json!(lora_id))),
         "{generation:#}"
     );
+}
+
+/// sc-25690: the delete seams of a trained Iris adapter and a full / task export NAME the run's
+/// checkpoint root and the `.prior` retirement sibling, from the engine contract — whatever else
+/// the delete removes. Mutation: drop either `iris_run_checkpoint_paths` call ⇒ red; key the
+/// adapter on anything but the file the run named, or the export on anything but its directory's
+/// stem ⇒ red. A builtin, non-training or non-Iris entry names none.
+#[test]
+fn iris_delete_paths_name_the_checkpoint_root_and_its_prior() {
+    let data_dir = std::path::Path::new("/data");
+    let lora_dir = data_dir.join("loras/lora_abc");
+    let adapter = json!({
+        "id": "lora_abc",
+        "irisTask": "generation",
+        "source": { "provider": "training", "path": "loras/lora_abc" },
+        "files": ["iris.style.safetensors"],
+    });
+    let [root, prior] =
+        sceneworks_worker::iris_run_checkpoint_dirs(&lora_dir, "iris.style.safetensors");
+    assert_eq!(prior, lora_dir.join("iris.style.checkpoints.prior"));
+    let paths = crate::loras::lora_artifact_paths(&adapter, data_dir);
+    assert_eq!(paths, vec![lora_dir.clone(), root, prior]);
+
+    let run_dir = data_dir.join("models/finetunes/model_abc");
+    let export = json!({
+        "id": "model_abc",
+        "irisTask": "depth",
+        "trainedCheckpoint": { "task": "depth" },
+        "source": { "provider": "training", "path": "models/finetunes/model_abc" },
+        "paths": { "model": run_dir.join("depth.v2").display().to_string() },
+        "files": ["config.yaml", "model.safetensors", "empty_prompt.safetensors"],
+    });
+    let [root, prior] =
+        sceneworks_worker::iris_run_checkpoint_dirs(&run_dir, "depth.v2.safetensors");
+    assert_eq!(root, run_dir.join("depth.v2.checkpoints"));
+    let paths = crate::models::model_artifact_paths(&export, data_dir);
+    assert!(paths.contains(&root), "{paths:?}");
+    assert!(paths.contains(&prior), "{paths:?}");
+
+    for unrelated in [
+        json!({ "id": "x", "source": { "provider": "training", "path": "loras/x" }, "files": ["x.safetensors"] }),
+        json!({ "id": "y", "irisTask": "generation", "catalogScope": "builtin", "source": { "provider": "training", "path": "loras/y" }, "files": ["y.safetensors"] }),
+        json!({ "id": "z", "irisTask": "generation", "source": { "provider": "local", "path": "loras/z" }, "files": ["z.safetensors"] }),
+    ] {
+        let paths = crate::loras::lora_artifact_paths(&unrelated, data_dir);
+        assert!(
+            paths
+                .iter()
+                .all(|path| !path.to_string_lossy().contains(".checkpoints")),
+            "{unrelated}: {paths:?}"
+        );
+    }
 }

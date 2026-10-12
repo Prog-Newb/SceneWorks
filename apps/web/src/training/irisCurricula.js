@@ -53,6 +53,9 @@ export const IRIS_CURRICULA_SPECS = Object.freeze({
   "dist.world.world_size": int("Ranks"),
   "dist.world.share_device": bool("Share one device between ranks"),
   "dist.world.timeout_secs": int("Rank timeout (s)"),
+  // sc-25690: the engine refuses 0 for both (min 1).
+  "dist.world.rendezvous_timeout_secs": int("Rank start-up timeout (s)"),
+  "dist.world.cancel_grace_secs": int("Cancel grace (s)"),
 });
 
 export const IRIS_CURRICULA_KEYS = Object.freeze(Object.keys(IRIS_CURRICULA_SPECS));

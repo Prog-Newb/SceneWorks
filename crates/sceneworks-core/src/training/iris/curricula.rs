@@ -17,8 +17,10 @@
 //!   `num_train_timesteps` (resource identity checks of a translated upstream YAML — the provisioned
 //!   backbone IS the architecture), the `perf` torch flags other than `lazy_sync` (mapped: they never
 //!   change the update), `dist.ddp.*` (DDP bucketing has no numeric effect), and every
-//!   `dist.world` key except `world_size`, `share_device` and `timeout_secs` — rank numbering,
-//!   rendezvous and transport belong to the worker that launches the ranks.
+//!   `dist.world` key except `world_size`, `share_device` and the three wait bounds
+//!   (`timeout_secs`, `rendezvous_timeout_secs`, `cancel_grace_secs`; each at least 1 s, as the
+//!   engine refuses 0) — rank numbering, rendezvous and transport belong to the worker that
+//!   launches the ranks.
 //! * `repa` offers the release teacher only: `dinov2_vitb14` from the separately installed,
 //!   pinned `facebook/dinov2-base` training resource ([`IRIS_REPA_TEACHER_MODEL_ID`]). The teacher
 //!   path is never client-authored (the worker stages it as the `repa_teacher` component).
@@ -126,7 +128,21 @@ pub const DIST_CLIENT_KEYS: [&str; 8] = [
     "world",
 ];
 /// The `dist.world` keys a client may set; the launching worker owns every other world key.
-pub const DIST_WORLD_CLIENT_KEYS: [&str; 3] = ["world_size", "share_device", "timeout_secs"];
+pub const DIST_WORLD_CLIENT_KEYS: [&str; 5] = [
+    "world_size",
+    "share_device",
+    "timeout_secs",
+    "rendezvous_timeout_secs",
+    "cancel_grace_secs",
+];
+/// The `dist.world` wait bounds a client may set (seconds). The engine refuses `0` for each
+/// (`gen_core::iris::train::dist`, sc-25690: a zero cancel grace would end the cancel agreement's
+/// own wait at its first poll), so each is a whole number of at least 1.
+pub const DIST_WORLD_WAIT_KEYS: [&str; 3] = [
+    "timeout_secs",
+    "rendezvous_timeout_secs",
+    "cancel_grace_secs",
+];
 /// The most ranks one SceneWorks job launches.
 pub const MAX_IRIS_RANKS: u64 = 16;
 /// `dist::DEFAULT_TIMEOUT_SECS` (upstream's process-group timeout).
@@ -300,8 +316,10 @@ fn validate_dist(value: &Value) -> Result<(), TrainingPlanError> {
                 if let Some(share) = world.get("share_device").filter(|v| !v.is_null()) {
                     boolean("dist.world.share_device", share)?;
                 }
-                if let Some(timeout) = world.get("timeout_secs").filter(|v| !v.is_null()) {
-                    whole("dist.world.timeout_secs", timeout, 1)?;
+                for key in DIST_WORLD_WAIT_KEYS {
+                    if let Some(bound) = world.get(key).filter(|v| !v.is_null()) {
+                        whole(&format!("dist.world.{key}"), bound, 1)?;
+                    }
                 }
             }
             _ => unreachable!("refuse_unknown admitted only DIST_CLIENT_KEYS"),
@@ -874,6 +892,12 @@ mod tests {
             json!({"dist": {"strategy": "fsdp"}}),
             json!({"dist": {"world": {"rank": 1}}}),
             json!({"dist": {"world": {"world_size": 99}}}),
+            // sc-25690: the engine refuses a zero wait bound (a zero cancel grace would end the
+            // cancel agreement's own wait at its first poll).
+            json!({"dist": {"world": {"timeout_secs": 0}}}),
+            json!({"dist": {"world": {"rendezvous_timeout_secs": 0}}}),
+            json!({"dist": {"world": {"cancel_grace_secs": 0}}}),
+            json!({"dist": {"world": {"cancel_grace_secs": 1.5}}}),
             json!({"dist": {"ddp": {"bucket_cap_mb": 50}}}),
             json!({"dist": {"reduce_dtype": "fp16"}}),
             json!({"stage": "../x"}),
@@ -971,7 +995,7 @@ mod tests {
             "expected_global_batch": 4,
             "scale_warmup_by_world": true,
             "perf": {"lazy_sync": true},
-            "dist": {"strategy": "fsdp2", "sharding": "full", "world": {"world_size": 2, "share_device": true, "timeout_secs": 600}},
+            "dist": {"strategy": "fsdp2", "sharding": "full", "world": {"world_size": 2, "share_device": true, "timeout_secs": 600, "rendezvous_timeout_secs": 300, "cancel_grace_secs": 60}},
         }));
         config.batch_size = 2;
         config.resolution = 512;

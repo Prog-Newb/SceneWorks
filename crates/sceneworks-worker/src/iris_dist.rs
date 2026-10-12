@@ -286,8 +286,8 @@ pub(crate) fn parse_message(line: &str) -> Option<RankMessage> {
 }
 
 /// Stamp this rank's place in the world onto the request's options bag (`dist.world`): the client's
-/// `world_size` / `share_device` / `timeout_secs` stay; the rank numbering and rendezvous are the
-/// launcher's. A world size that disagrees with the plan is refused (a split world).
+/// `world_size` / `share_device` and wait bounds (`timeout_secs`, `rendezvous_timeout_secs`,
+/// `cancel_grace_secs`) stay; the rank numbering and rendezvous are the launcher's. A world size that disagrees with the plan is refused (a split world).
 pub(crate) fn apply_rank_world(
     model_options: &mut Map<String, Value>,
     world: &RankWorld,
@@ -458,7 +458,7 @@ fn run_rank_process_with(
         );
         1
     };
-    let prepared = match crate::training_jobs::preflight_training_run(settings, &spec.plan) {
+    let prepared = match crate::training_jobs::preflight_training_run(settings, &spec.plan, false) {
         Ok(prepared) => prepared,
         Err(error) => return fail(out, error.to_string()),
     };
@@ -504,7 +504,7 @@ fn run_rank_process_with(
         })
         .ok();
 
-    let spec_load = inputs.load_spec(&request.config.train_dtype);
+    let spec_load = inputs.load_spec(engine_id, &request.config.train_dtype);
     let outcome = (|| {
         let mut trainer = load_trainer(engine_id, &spec_load)?;
         trainer.validate(&request)?;

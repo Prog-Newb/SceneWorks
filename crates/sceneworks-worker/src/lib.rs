@@ -254,7 +254,8 @@ pub use mlx_fit_gate::full_finetune_memory_error;
 )]
 mod iris_training;
 pub use iris_training::{
-    iris_data_walk_report, iris_plan_memory_error, iris_training_memory_error, IrisDataWalkReport,
+    iris_checkpoint_root, iris_data_walk_report, iris_plan_memory_error, iris_run_checkpoint_dirs,
+    iris_training_memory_error, IrisDataWalkReport,
 };
 // Iris-3B depth (sc-25687) / restoration (sc-25688) training seams: task items + load inputs for the
 // executor, and the pre-launch checks the API serves (install availability, sidecar format/alignment,
@@ -301,6 +302,8 @@ pub use iris_curricula::{resolve_iris_config, resolve_iris_plan};
 )]
 mod iris_dist;
 pub use iris_dist::iris_rank_entry;
+// The auxiliary-training-model install check (sc-25213), shared with the rust-api submit gate.
+pub use training_jobs::installed_aux_training_model_dir;
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
 // into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
 // helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.
@@ -432,6 +435,10 @@ mod catalog_semantic_jobs;
 use catalog_semantic_jobs::*;
 mod face_analysis_jobs;
 use face_analysis_jobs::*;
+// sc-2126 — SAM3 subject masks over a training dataset (epic 2123): one mask per image POSTed to the
+// dataset's content-hash-keyed mask sidecar for the masked-loss trainer.
+mod subject_mask_jobs;
+use subject_mask_jobs::*;
 // sc-4407 — the shared, generator-agnostic face-likeness scorer (epic 4406): the backbone identity-
 // likeness component the Angles (sc-4409) / Poses (sc-4410) / With-Character (sc-4411) surfaces call as
 // a post-pass over a finished generation. Its public seam (`FaceLikenessScorer`) has no production
@@ -2368,6 +2375,12 @@ async fn run_utility_job(
             JobType::DatasetFaceAnalysis => run_dataset_face_analysis_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Dataset face analysis failed.", error)),
+            // Training subject masks (sc-2126): SAM3 "person" segmentation of every dataset image,
+            // POSTed to the mask sidecar. Routed by the `image_segment` capability; MLX on Mac, candle
+            // off-Mac; off both the handler returns a precise unsupported error.
+            JobType::DatasetSubjectMask => run_dataset_subject_mask_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Subject mask generation failed.", error)),
             // On-demand "compare image to another" likeness tool (sc-4415): scores a CANDIDATE asset
             // against a SOURCE identity reference asset through the shared SCRFD+ArcFace scorer. MLX on Mac,
             // candle off-Mac; off both the handler returns a precise unsupported error. Like the

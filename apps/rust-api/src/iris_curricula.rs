@@ -511,10 +511,9 @@ pub(crate) async fn iris_training_metrics(
         )));
     }
     let output_dir = crate::iris_training::trusted_previous_output_dir(&state, &job).await?;
-    let stem = crate::iris_training::file_stem(&plan.output.file_name)
+    crate::iris_training::file_stem(&plan.output.file_name)
         .ok_or_else(|| ApiError::bad_request(format!("{job_id} has no valid output name.")))?;
-    let path = output_dir
-        .join(format!("{stem}.checkpoints"))
+    let path = sceneworks_worker::iris_checkpoint_root(&output_dir, &plan.output.file_name)
         .join("metrics.jsonl");
     let text = match tokio::fs::File::open(&path).await {
         Ok(mut file) => {
