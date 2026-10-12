@@ -14,7 +14,7 @@ const GROUPS = [
   ["Representation alignment (REPA)", ["repa.weight", "repa.variant", "repa.spatial_norm_gamma", "repa.layer", "repa.proj_hidden_dim", "repa.teacher_image_size", "repa.teacher_match_student"]],
   ["Memory", ["activation_checkpointing", "ac_selective_every"]],
   ["Validation, logging and retention", ["val_every_steps", "val_samples", "log_every", "log_block_grad_norms", "save_every_epochs", "preview_at_step_one", "preview_order", "resume_optimizer"]],
-  ["Ranks", ["dist.world.world_size", "dist.world.share_device", "dist.world.timeout_secs", "dist.strategy", "dist.sharding", "dist.mesh.dp_shard", "dist.mesh.dp_replicate", "dist.param_dtype", "dist.reduce_dtype", "dist.reshard_after_forward", "dist.checkpoint_io", "expected_global_batch", "scale_warmup_by_world", "perf.lazy_sync"]],
+  ["Ranks", ["dist.world.world_size", "dist.world.share_device", "dist.world.timeout_secs", "dist.world.rendezvous_timeout_secs", "dist.world.cancel_grace_secs", "dist.strategy", "dist.sharding", "dist.mesh.dp_shard", "dist.mesh.dp_replicate", "dist.param_dtype", "dist.reduce_dtype", "dist.reshard_after_forward", "dist.checkpoint_io", "expected_global_batch", "scale_warmup_by_world", "perf.lazy_sync"]],
 ];
 
 export function IrisRunMetrics({ metrics }) {

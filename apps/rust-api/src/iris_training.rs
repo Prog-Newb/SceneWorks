@@ -217,8 +217,8 @@ fn replace_in_strings(value: &mut Value, from: &str, to: &str) {
 /// directory AND its output id (`manifestEntry.id`), which is the id the completion registrar
 /// registers the export under. One output id is one run: two jobs sharing it write the same export
 /// and register over the same model / adapter, whatever the trainer does with an earlier run's
-/// checkpoints (at the sc-25690 inference bump the trainer moves a foreign run's checkpoints aside
-/// to `<root>.prior-<n>` — `retire_foreign_checkpoints` — instead of resuming them, so a fresh
+/// checkpoints (since the sc-25690 inference pin the trainer moves a foreign run's checkpoints aside
+/// into the one sibling `<root>.prior` — `retire_foreign_checkpoints` — instead of resuming them, so a fresh
 /// run in a used directory no longer mixes checkpoints, but the export and registration still
 /// collide). So:
 ///
@@ -310,7 +310,12 @@ pub(crate) async fn guard_iris_training_rerun(
     let Some(stem) = file_stem(&plan.output.file_name) else {
         return Ok(None);
     };
-    if newest_complete_checkpoint(&output_dir.join(format!("{stem}.checkpoints"))).is_some() {
+    if newest_complete_checkpoint(&sceneworks_worker::iris_checkpoint_root(
+        &output_dir,
+        &plan.output.file_name,
+    ))
+    .is_some()
+    {
         return Err(output_in_use(format!(
             "Training run {} already saved a complete checkpoint; a retry would start the run \
              over under the same output. Resume it (or start a new phase from it) in the Training \
@@ -345,6 +350,47 @@ fn newest_complete_checkpoint(root: &FsPath) -> Option<PathBuf> {
         .collect();
     steps.sort();
     steps.pop().map(|(_, path)| path)
+}
+
+/// The checkpoint directories of the Iris training run a catalog entry (a trained adapter, or a
+/// full / depth / restoration export) was registered from, under its run directory `run_dir`: the
+/// checkpoint root and the single `.prior` sibling the trainers retire foreign or abandoned
+/// checkpoints into (sc-25690), named by the engine contract
+/// ([`sceneworks_worker::iris_run_checkpoint_dirs`]). Deleting the trained model or adapter deletes
+/// them by name. Empty for every entry that is not an Iris training output.
+pub(crate) fn iris_run_checkpoint_paths(entry: &Value, run_dir: &FsPath) -> Vec<PathBuf> {
+    let Some(object) = entry.as_object() else {
+        return Vec::new();
+    };
+    let trained = object
+        .get("source")
+        .and_then(|source| source.get("provider"))
+        .and_then(Value::as_str)
+        == Some("training");
+    let iris = object.contains_key("irisTask") || object.contains_key(TRAINED_CHECKPOINT_KEY);
+    if !trained || !iris || object.get("catalogScope").and_then(Value::as_str) == Some("builtin") {
+        return Vec::new();
+    }
+    // A full export is the directory `<run_dir>/<stem>` (`paths.model`); an adapter is the file
+    // the run named (`files[0]`). Either way the engine keyed its checkpoint root on that stem.
+    let file_name = object
+        .get("paths")
+        .and_then(|paths| paths.get("model"))
+        .and_then(Value::as_str)
+        .and_then(|export| FsPath::new(export).file_name()?.to_str())
+        .map(|stem| format!("{stem}.safetensors"))
+        .or_else(|| {
+            object
+                .get("files")?
+                .as_array()?
+                .first()?
+                .as_str()
+                .map(str::to_owned)
+        });
+    match file_name.filter(|name| is_plain_relative_file(name)) {
+        Some(file_name) => sceneworks_worker::iris_run_checkpoint_dirs(run_dir, &file_name).into(),
+        None => Vec::new(),
+    }
 }
 
 /// Load and vet the previous Iris training job a request names.
@@ -449,12 +495,12 @@ pub(crate) async fn resolve_iris_run_sources(
                 network_type
             )));
         }
-        let stem = file_stem(&previous.output.file_name).ok_or_else(|| {
+        file_stem(&previous.output.file_name).ok_or_else(|| {
             ApiError::bad_request(format!(
                 "advanced.{RESUME_FROM_JOB_KEY}: {job_id} has no valid output name."
             ))
         })?;
-        let root = output_dir.join(format!("{stem}.checkpoints"));
+        let root = sceneworks_worker::iris_checkpoint_root(&output_dir, &previous.output.file_name);
         if newest_complete_checkpoint(&root).is_none() {
             return Err(ApiError::bad_request(format!(
                 "advanced.{RESUME_FROM_JOB_KEY}: {job_id} saved no complete checkpoint to resume \
@@ -488,14 +534,16 @@ pub(crate) async fn resolve_iris_run_sources(
         let source = if export.join(BACKBONE_WEIGHTS_FILE).is_file() {
             export
         } else {
-            newest_complete_checkpoint(&output_dir.join(format!("{stem}.checkpoints"))).ok_or_else(
-                || {
-                    ApiError::bad_request(format!(
-                        "advanced.{LOAD_FROM_JOB_KEY}: {job_id} left neither an export nor a \
+            newest_complete_checkpoint(&sceneworks_worker::iris_checkpoint_root(
+                &output_dir,
+                &previous.output.file_name,
+            ))
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "advanced.{LOAD_FROM_JOB_KEY}: {job_id} left neither an export nor a \
                          complete checkpoint to start from."
-                    ))
-                },
-            )?
+                ))
+            })?
         };
         options.insert(
             "load_from".to_owned(),

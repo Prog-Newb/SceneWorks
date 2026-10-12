@@ -254,7 +254,8 @@ pub use mlx_fit_gate::full_finetune_memory_error;
 )]
 mod iris_training;
 pub use iris_training::{
-    iris_data_walk_report, iris_plan_memory_error, iris_training_memory_error, IrisDataWalkReport,
+    iris_checkpoint_root, iris_data_walk_report, iris_plan_memory_error, iris_run_checkpoint_dirs,
+    iris_training_memory_error, IrisDataWalkReport,
 };
 // Iris-3B depth (sc-25687) / restoration (sc-25688) training seams: task items + load inputs for the
 // executor, and the pre-launch checks the API serves (install availability, sidecar format/alignment,

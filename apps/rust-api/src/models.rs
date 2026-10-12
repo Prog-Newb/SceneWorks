@@ -11466,11 +11466,17 @@ pub(crate) fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<Path
         .filter(|value| !value.is_empty() && !value.contains("${"))
     {
         let path = PathBuf::from(source_path);
-        paths.push(if path.is_absolute() {
+        let run_dir = if path.is_absolute() {
             path
         } else {
             data_dir.join(path)
-        });
+        };
+        // An Iris training run's checkpoint root and its `.prior` retirement (sc-25690), named by
+        // the engine contract. They sit inside the run directory, which goes first so a trash
+        // delete moves the run as one item; the named paths then catch any the directory missed.
+        let checkpoint_dirs = crate::iris_training::iris_run_checkpoint_paths(model, &run_dir);
+        paths.push(run_dir);
+        paths.extend(checkpoint_dirs);
     }
     unique_paths(paths)
 }

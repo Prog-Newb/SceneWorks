@@ -67,6 +67,20 @@ describe("Iris curricula options (sc-25689)", () => {
     expect(fields).toContain("iris.dist.checkpoint_io");
   });
 
+  // sc-25690: the engine's rendezvous bound and cancel grace are offered, sent nested under
+  // `dist.world`, and — like the rank timeout — never as 0, which the engine refuses.
+  it("offers the rank wait bounds and flags a zero before launch", () => {
+    const bounds = { "dist.world.rendezvous_timeout_secs": "300", "dist.world.cancel_grace_secs": "60" };
+    expect(irisOptionsSnapshot(draft(bounds)).dist).toEqual({
+      world: { rendezvous_timeout_secs: 300, cancel_grace_secs: 60 },
+    });
+    for (const key of ["dist.world.timeout_secs", "dist.world.rendezvous_timeout_secs", "dist.world.cancel_grace_secs"]) {
+      const fields = irisValidation(draft({ [key]: "0" })).map((issue) => issue.field);
+      expect(fields).toContain(`iris.${key}`);
+      expect(irisValidation(draft({ [key]: "1" })).map((issue) => issue.field)).not.toContain(`iris.${key}`);
+    }
+  });
+
   it("keeps a preset's tracking tags through the draft and back into the request", () => {
     const seeded = irisDraftFromDefaults({ tracking: { project: "iris", tags: ["stage1", "repa"] } });
     expect(seeded["tracking.tags"]).toEqual(["stage1", "repa"]);
