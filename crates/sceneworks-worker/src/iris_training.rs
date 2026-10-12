@@ -2004,7 +2004,7 @@ mod job_tests {
     /// the OS reserve; CUDA: VRAM).
     #[test]
     fn a_host_under_the_depth_floor_is_refused_before_load() {
-        let _env = isolated_env("64");
+        let _env = isolated_env("48");
         let data_holder = tempfile::tempdir().unwrap();
         let data = data_holder.path().canonicalize().unwrap();
         stage_task_export(&data, "depth");
@@ -2020,7 +2020,7 @@ mod job_tests {
                 message.contains("depth full fine-tune at 480×640") && message.contains("GiB"),
                 "{message}"
             ),
-            other => panic!("a 64 GB host must be refused for the 480×640 depth run: {other:?}"),
+            other => panic!("a 48 GiB host must be refused for the 480×640 depth run: {other:?}"),
         }
         assert_eq!(run.seen.loads, 0);
     }

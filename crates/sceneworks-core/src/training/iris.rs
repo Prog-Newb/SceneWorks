@@ -40,7 +40,7 @@ pub mod restore;
 
 use serde_json::{json, Map, Value};
 
-use floors::{IrisMemoryFloor, Peak, CAMPAIGN_CUDA_CARD, CANDLE_RESERVE_GIB};
+use floors::{IrisMemoryFloor, Peak, CAMPAIGN_CUDA_CARD, CANDLE_RESERVE_GIB, MLX_RESERVE_GIB};
 
 use super::{
     object, ContractNumber, ExtraFields, TrainingConfig, TrainingDataset, TrainingModality,
@@ -240,18 +240,28 @@ pub fn iris_objective_shape(objective: IrisObjective, config: &TrainingConfig) -
 // printed, in the unit it printed it (`Peak`). Every dependent row below is computed from them.
 //
 // sc-25690 terminal campaign, `train_memory_probe`: full fine-tune, AdamW, bf16 over f32 masters,
-// EMA on, cached text conditioning, batch 1, two steps + export. MLX = process phys_footprint on
-// nax-macos-2 (inference run 38292137908); Candle = device VRAM over the idle baseline on an RTX
-// PRO 6000 (run 38291037726). Both summaries print DECIMAL GB.
-const MLX_FULL_512_PEAK: Peak = Peak::DecimalGb(84.64);
-const MLX_FULL_1024_PEAK: Peak = Peak::DecimalGb(109.96);
-const MLX_FULL_AC_1024_PEAK: Peak = Peak::DecimalGb(101.52);
+// EMA on, cached text conditioning, batch 1, whole-process peak; summaries print DECIMAL GB.
+//
+// MLX (nax-macos-2; inference PR 1238 @b1c04bd0d, runs 38312190794 two steps + export and
+// 38318086154 six steps): the ACTIVE peak with MLX's buffer cache DISABLED — what the run needs.
+// Steady by optimizer step 2 and flat through step 6; the process footprint with the cache off
+// agrees within 0.5 GB. Production runs keep the cache, so their footprint can rise to the
+// allocator's GC ceiling (0.95 × the recommended working set, 109.68 GB on that Mac) without that
+// being need — which is what the campaign's first MLX numbers were.
+//
+// Candle (RTX PRO 6000, run 38291037726): device VRAM over the idle baseline, polled. Under
+// diagnosis (a Candle training-memory excess); these constants are the first campaign's.
+const MLX_FULL_512_PEAK: Peak = Peak::DecimalGb(65.57);
+const MLX_FULL_1024_PEAK: Peak = Peak::DecimalGb(104.49);
+const MLX_FULL_AC_1024_PEAK: Peak = Peak::DecimalGb(74.88);
 const CANDLE_FULL_512_PEAK: Peak = Peak::DecimalGb(97.6);
 const CANDLE_FULL_AC_1024_PEAK: Peak = Peak::DecimalGb(92.2);
 
-const MLX_FULL_512: IrisMemoryFloor = IrisMemoryFloor::measured(MLX_FULL_512_PEAK, 0);
-const MLX_FULL_1024: IrisMemoryFloor = IrisMemoryFloor::measured(MLX_FULL_1024_PEAK, 0);
-const MLX_FULL_AC_1024: IrisMemoryFloor = IrisMemoryFloor::measured(MLX_FULL_AC_1024_PEAK, 0);
+const MLX_FULL_512: IrisMemoryFloor = IrisMemoryFloor::measured(MLX_FULL_512_PEAK, MLX_RESERVE_GIB);
+const MLX_FULL_1024: IrisMemoryFloor =
+    IrisMemoryFloor::measured(MLX_FULL_1024_PEAK, MLX_RESERVE_GIB);
+const MLX_FULL_AC_1024: IrisMemoryFloor =
+    IrisMemoryFloor::measured(MLX_FULL_AC_1024_PEAK, MLX_RESERVE_GIB);
 const CANDLE_FULL_512: IrisMemoryFloor =
     IrisMemoryFloor::measured(CANDLE_FULL_512_PEAK, CANDLE_RESERVE_GIB)
         .held_on(CAMPAIGN_CUDA_CARD.gib());
@@ -276,8 +286,9 @@ const CANDLE_FULL_256: IrisMemoryFloor = IrisMemoryFloor::declared(80).bounded_b
 /// [`iris_generation_memory_floor`]); every other full run reads `full`.
 ///
 /// * MEASURED — `full` 512 / 1024 and `full_ac` 1024 on MLX, `full` 512 and `full_ac` 1024 on
-///   Candle: the `*_PEAK` constants above, converted to GiB, plus the 2 GiB Candle allocator
-///   reserve, rounded up; a Candle row never exceeds the card that held its run.
+///   Candle: the `*_PEAK` constants above, converted to GiB, plus the lane's 2 GiB reserve
+///   ([`floors::MLX_RESERVE_GIB`] / [`CANDLE_RESERVE_GIB`]), rounded up; a Candle row never
+///   exceeds the card that held its run.
 /// * EXTRAPOLATED — Candle `full` 1024 ([`CANDLE_FULL_1024`]); the `full` 256 rows where the
 ///   measured 512 row bounds them; the `full_ac` 256 / 512 rows, each the lower of the no-AC row at
 ///   that size and the measured AC 1024² row (checkpointing only lowers a peak, and a smaller run
@@ -387,8 +398,9 @@ fn memory_floors_json() -> Value {
         None,
         "Keyed by artifact and training resolution; `full_ac` is a full fine-tune under full \
          activation checkpointing. Measured rows are the whole-process peak of a real full \
-         fine-tune at batch 1 (two steps + export), converted to GiB, plus a 2 GiB allocator \
-         reserve on Candle.",
+         fine-tune at batch 1, converted to GiB, plus a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the \
+         cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the \
+         recommended working set) without that being need.",
         IRIS_MEMORY_FLOORS_GIB
             .iter()
             .map(|(lane, artifact, resolution, floor)| {
@@ -1137,9 +1149,10 @@ mod tests {
             Peak::DecimalGb(gb) => gb / DECIMAL_GB_PER_GIB,
             other => other.gib(),
         };
-        assert_eq!(MLX_FULL_512.gib, ceil_gib(gib(MLX_FULL_512_PEAK)));
-        assert_eq!(MLX_FULL_1024.gib, ceil_gib(gib(MLX_FULL_1024_PEAK)));
-        assert_eq!(MLX_FULL_AC_1024.gib, ceil_gib(gib(MLX_FULL_AC_1024_PEAK)));
+        let mlx = |peak: Peak| ceil_gib(gib(peak) + f64::from(MLX_RESERVE_GIB));
+        assert_eq!(MLX_FULL_512.gib, mlx(MLX_FULL_512_PEAK));
+        assert_eq!(MLX_FULL_1024.gib, mlx(MLX_FULL_1024_PEAK));
+        assert_eq!(MLX_FULL_AC_1024.gib, mlx(MLX_FULL_AC_1024_PEAK));
         let card = CAMPAIGN_CUDA_CARD.gib() as u32;
         assert_eq!(
             CANDLE_FULL_512.gib,

@@ -27,7 +27,9 @@ use super::super::{
     object, ContractNumber, ExtraFields, TrainingConfig, TrainingDataset, TrainingModality,
     TrainingOutputKind, TrainingPlanError, TrainingTarget, TrainingTargetLimitError,
 };
-use super::floors::{IrisMemoryFloor, Peak, CAMPAIGN_CUDA_CARD, CANDLE_RESERVE_GIB};
+use super::floors::{
+    IrisMemoryFloor, Peak, CAMPAIGN_CUDA_CARD, CANDLE_RESERVE_GIB, MLX_RESERVE_GIB,
+};
 use super::{
     boolean, finite_in, invalid, one_of, validate_micro_steps, whole, IRIS_BASE_MODEL_REPO,
     IRIS_FAMILY, IRIS_TRAINING_KERNEL, LOAD_FROM_JOB_KEY, RESUME_FROM_JOB_KEY,
@@ -108,39 +110,46 @@ const UNREAD_ADVANCED_KEYS: [&str; 6] = [
 // recipe (batch 1, bf16, EMA, two steps + export), in the unit the probe printed.
 //
 // 256² crop: Candle device VRAM ~93.7 GiB on an RTX PRO 6000 (inference run 38149768393).
-// 512² crop (sc-25690 terminal campaign, `train_memory_probe`, DECIMAL GB): MLX phys_footprint
-// 101.13 on nax-macos-2 (run 38292137908); Candle device VRAM 101.8 over the idle baseline (run
-// 38291037726).
-// 1024² crop: MLX was stopped by its guard at 116.75 GB — a LOWER bound, not a peak — and Candle
-// ran out of memory on the campaign card, so the card's whole capacity is its lower bound.
+// 512² crop (sc-25690 terminal campaign, `train_memory_probe`, DECIMAL GB): MLX ACTIVE peak with
+// the buffer cache DISABLED, 71.57, on nax-macos-2 (inference PR 1238 @b1c04bd0d, runs 38312190794
+// and 38318086154; steady by step 2) — production runs keep the cache, so their footprint can rise
+// to the allocator's GC ceiling (0.95 × the recommended working set) without that being need;
+// Candle device VRAM 101.8 over the idle baseline (run 38291037726; polled, under diagnosis).
+// 1024² crop: MLX was stopped by its guard at a 116.47 GB footprint with the cache off (live need
+// above 115 GB) — a LOWER bound, not a peak — and Candle ran out of memory on the campaign card, so
+// the card's whole capacity is its lower bound.
 const CANDLE_RESTORE_FULL_256_PEAK: Peak = Peak::Gib(93.7);
-const MLX_RESTORE_FULL_512_PEAK: Peak = Peak::DecimalGb(101.13);
+const MLX_RESTORE_FULL_512_PEAK: Peak = Peak::DecimalGb(71.57);
 const CANDLE_RESTORE_FULL_512_PEAK: Peak = Peak::DecimalGb(101.8);
-const MLX_RESTORE_FULL_1024_LOWER_BOUND: Peak = Peak::DecimalGb(116.75);
+const MLX_RESTORE_FULL_1024_LOWER_BOUND: Peak = Peak::DecimalGb(116.47);
+const MLX_RESTORE_FULL_512: IrisMemoryFloor =
+    IrisMemoryFloor::measured(MLX_RESTORE_FULL_512_PEAK, MLX_RESERVE_GIB);
 const CANDLE_RESTORE_FULL_1024_LOWER_BOUND: Peak = CAMPAIGN_CUDA_CARD;
 
 /// Memory floors, **GiB** ([`super::floors`]), per `(lane, artifact, micro-batch pixels ≤, floor)`
 /// with a micro-batch's pixels = `batchSize × resolution²`; each row carries its own provenance.
 ///
 /// * MEASURED — the full fine-tune at 262 144 px on both lanes and at 65 536 px on Candle: the
-///   `*_PEAK` constants above converted to GiB, plus the 2 GiB Candle reserve, rounded up; a Candle
+///   `*_PEAK` constants above converted to GiB, plus the lane's 2 GiB reserve, rounded up; a Candle
 ///   row never exceeds the card that held its run.
 /// * LOWER BOUND — the full fine-tune at 1 048 576 px: declared above the measured lower bounds.
-/// * DECLARED — the MLX full row at 65 536 px (the paper's full fine-tune peaked at 87.5 GB there,
-///   nax-macos-2; padded) and every adapter row: LoRA rank 8 at a 256² crop peaked at 25.2 GB on
+/// * EXTRAPOLATED — the MLX full row at 65 536 px: bounded by the measured 262 144 px row (a smaller
+///   crop never needs more; its earlier 92 was declared from an 87.5 GB process footprint, cache
+///   included).
+/// * DECLARED — every adapter row: LoRA rank 8 at a 256² crop peaked at 25.2 GB on
 ///   MLX (run 38140601912) and 29.3 GB of VRAM on CUDA (run 38137202298), padded (Candle adding the
 ///   reserve); adapter rows above 65 536 px scale the activation, LPIPS and critic terms
 ///   conservatively.
 ///
 /// A micro-batch above the last row is refused rather than admitted unbounded.
 const RESTORE_FLOORS_GIB: [(&str, &str, u64, IrisMemoryFloor); 12] = [
-    ("mlx", "full", 65_536, IrisMemoryFloor::declared(92)),
     (
         "mlx",
         "full",
-        262_144,
-        IrisMemoryFloor::measured(MLX_RESTORE_FULL_512_PEAK, 0),
+        65_536,
+        IrisMemoryFloor::declared(92).bounded_by(MLX_RESTORE_FULL_512),
     ),
+    ("mlx", "full", 262_144, MLX_RESTORE_FULL_512),
     (
         "mlx",
         "full",
@@ -214,8 +223,10 @@ fn memory_floors_json() -> Value {
     super::floors::memory_floors_json(
         Some("microBatchPixels"),
         "Keyed by artifact and the pixels of one micro-batch (batch size × crop²). Measured rows \
-         are the whole-process peak of the paper's full recipe at batch 1 (two steps + export), \
-         converted to GiB, plus a 2 GiB allocator reserve on Candle.",
+         are the whole-process peak of the paper's full recipe at batch 1, converted to GiB, plus \
+         a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the \
+         cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the \
+         recommended working set) without that being need.",
         RESTORE_FLOORS_GIB
             .iter()
             .map(|(lane, artifact, pixels, floor)| {
@@ -746,7 +757,8 @@ mod tests {
         assert!(published.get("measured").is_none());
         for (lane, artifact, pixels, floor) in RESTORE_FLOORS_GIB {
             let expected = match (lane, artifact, pixels) {
-                (_, "adapter", _) | ("mlx", "full", 65_536) => FloorProvenance::Declared,
+                (_, "adapter", _) => FloorProvenance::Declared,
+                ("mlx", "full", 65_536) => FloorProvenance::Extrapolated,
                 (_, "full", 1_048_576) => FloorProvenance::LowerBound,
                 _ => FloorProvenance::Measured,
             };

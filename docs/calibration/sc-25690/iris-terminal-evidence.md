@@ -31,7 +31,7 @@ names the exact blocker.
 | AT4 | Both backends: short real-weight runs of generation full fine-tuning, LoRA, LoKr, depth training, restoration training; cancellation/resume; export/registration; inference with the result; random-init generation and all curriculum stages on controlled fixtures | **open (SW job path, 2 rows)** | Closed through the SceneWorks job path for LoRA, LoKr (cancel → resume), depth full fine-tune, restoration LoRA and two-rank DDP (rows T1–T6). Curriculum stages / random init on fixtures: inference `tests/curricula_{parity,lifecycle}.rs`, `train_{parity,lifecycle,lineage}.rs` (CI gate run 38258963637). **Blockers:** generation FULL fine-tune and restoration FULL fine-tune have only trainer-level real-weight runs (rows T7, T8); neither has run through the SceneWorks job path, so the admission gate's full-fine-tune floor rows have never been read by a real job. The smokes exist (`iris_training_gpu_smoke_full_ft_generation_cancel_resume`, `iris_training_gpu_smoke_full_ft_restore`) and are registered in both lanes; rows T9, T10 are filled when they have run. The LoKr resume rows are re-run with the continuation assertion (rows T2, T3). |
 | AT5 | Distributed replication and sharding, global-batch accounting, checkpoint save/resume, rank failure, with real multi-rank execution on supported MLX and CUDA topologies; missing hardware evidence leaves it open | **open** | Mechanism closed on one device: FSDP full / grad_op vs DDP, sharded checkpoint resume + reshard, rank exit / stall → typed failure, multi-process on ONE card (`share_device`) — inference run 38233658960 (CUDA); MLX ring/TCP multi-rank mechanism tests (inference CI) and a real-weight two-rank DDP run on one Mac (row T5). **Blockers:** (1) a real two-GPU CUDA run — **written, not yet run; blocker: card 0 free.** The smoke is `iris_two_card_distributed_smoke` (`crates/sceneworks-worker/src/iris_training_gpu_smoke.rs`): through the job path, two rank processes with `share_device` off on a worker that owns both cards — DDP canceled after a durable checkpoint and resumed (continuation asserted), a killed rank failing the job typed with no rank left holding a card, FSDP to completion, global batch 2 — and each rank's card is read from the run itself (the rank's own recorded pid → the card whose context `nvidia-smi` shows for that pid, plus each card's memory gain), not from the plan. Dispatch: `windows-candle.yml` with `run_iris_worker_smoke=true iris_smoke_cards=0,1`; the job checks both cards free before any build and fails naming an occupied one (row D2). Both cards exist; card 0 was occupied by another tenant; (2) multi-host MLX needs a second Mac free at the same time. |
 | AT6 | Memory-cap admission, task switching, source unavailability, incomplete/wrong-task artifacts, invalid training targets, no-valid-depth pixels, canceled tiles/updates, failed exports; ordinary CI and regression behaviour for existing paths | **open (not fully enumerated)** | Located and green in CI on the PR head (SceneWorks `check-macos` / `check-linux` / `candle` / `parity`, PR 3050): memory-floor and cap refusals before load (`crates/sceneworks-worker/src/iris_training.rs` `tests` + `job_tests`: under-floor, unreadable host, no row), missing backbone / encoder / teacher / training resource refusals, cancel before and after the first step, task switching and eviction (`image_jobs/iris.rs` `run_iris_task_switch`, `an_iris_training_run_evicts_a_resident_generator_or_transform_before_loading`), wrong-task export refusal (`iris_restore/tests.rs` `resolution_refuses_a_wrong_task_export`; inference `restoration_parity::wrong_task_artifacts_are_refused`), canceled tiles (inference `cancel_between_tiles_is_typed_and_yields_no_image`). Existing image/upscale/control/training paths: the same required CI. **Blocker:** tests for *no-valid-depth pixels* and *failed exports* were not located in this pass; each must be cited by name or written. |
-| AT7 | After inference lands and the single final pin is stable: one terminal capability/memory/calibration campaign over the new registered routes; final refs and installed-product outcomes; revisions, hashes, settings, devices, outputs, URLs | **open** | Capability dumps at the final pin list the Iris engines (preflight: `capabilities.mlx.json` vs a fresh dump PASS; `capabilities.candle.json` verified in run 38294903430). Memory: the training-floor measurements below. **Blockers:** (1) `measure-memory-catalog.mjs --list` (unfiltered, both lanes) has **zero Iris rows** — `iris_3b` has no memory-strategy contract / calibration fingerprint at the pin, so no plan anchor exists to measure (needs an inference memory contract and a pin; a product decision); (2) the training-floor measurements are being re-taken (cells marked PENDING RE-MEASUREMENT); (3) installed-product outcomes (below); (4) no 16 GB card exists here, and nothing emulates a small card's real allocation (only admission caps). |
+| AT7 | After inference lands and the single final pin is stable: one terminal capability/memory/calibration campaign over the new registered routes; final refs and installed-product outcomes; revisions, hashes, settings, devices, outputs, URLs | **open** | Capability dumps at the final pin list the Iris engines (preflight: `capabilities.mlx.json` vs a fresh dump PASS; `capabilities.candle.json` verified in run 38294903430). Memory: the training-floor measurements below. **Blockers:** (1) `measure-memory-catalog.mjs --list` (unfiltered, both lanes) has **zero Iris rows** — `iris_3b` has no memory-strategy contract / calibration fingerprint at the pin, so no plan anchor exists to measure (needs an inference memory contract and a pin; a product decision); (2) the MLX training floors are re-measured and final, the Candle ones are PENDING (Candle memory diagnosis); (3) installed-product outcomes (below); (4) no 16 GB card exists here, and nothing emulates a small card's real allocation (only admission caps). |
 | — | Installed packaged-build acceptance | **open** | Not run. **Blocker:** needs a packaged Apple Silicon build and an installed NVIDIA worker driven by hand: install the three tasks through Model Manager, run each, save/reopen jobs, settings, assets and raw-depth exports, restart and read a saved depth asset through a separate consumer. Every run in this ledger is a job-path test binary, a different evidence type (E9). |
 
 ## Runs
@@ -65,22 +65,37 @@ with it report bytes and GiB.
 
 ## Training-floor measurements
 
-Probe: `train_memory_probe` — full fine-tune, batch 1, two steps + export, whole-process peak. The
-first campaign's numbers (inference runs
-[38292137908](https://github.com/SceneWorks/inference/actions/runs/38292137908) on Mac2 and
-[38291037726](https://github.com/SceneWorks/inference/actions/runs/38291037726) on CUDA card 1) are
-partly unsound and are being re-taken: the MLX 1024² values were allocator-cache ceilings rather
-than peaks, and the CUDA values were polled `nvidia-smi` readings.
+Probe: `train_memory_probe` — full fine-tune, batch 1, whole-process peak; summaries print decimal
+GB, converted here to GiB (÷ 1.073741824).
 
-| Shape | MLX (Mac2), GiB | Candle (CUDA card 1), GiB |
-|---|---|---|
-| Generation full 512² | PENDING RE-MEASUREMENT | PENDING RE-MEASUREMENT |
-| Generation full 1024² | PENDING RE-MEASUREMENT | exceeded the 95.59 GiB card (out of memory) |
-| Generation full 1024² + activation checkpointing | PENDING RE-MEASUREMENT | PENDING RE-MEASUREMENT |
-| Depth full 512² | PENDING RE-MEASUREMENT | PENDING RE-MEASUREMENT |
-| Depth full 1024² | PENDING RE-MEASUREMENT | exceeded the 95.59 GiB card (out of memory) |
-| Restoration full 512² crop | PENDING RE-MEASUREMENT | PENDING RE-MEASUREMENT |
-| Restoration full 1024² crop | lower bound only (guard stop): PENDING RE-MEASUREMENT | exceeded the 95.59 GiB card (out of memory) |
+**MLX (final).** Mac2, inference PR SceneWorks/inference#1238 @b1c04bd0d, runs
+[38312190794](https://github.com/SceneWorks/inference/actions/runs/38312190794) (two steps +
+export) and [38318086154](https://github.com/SceneWorks/inference/actions/runs/38318086154) (six
+steps, steady state). The quantity is the **active peak with MLX's buffer cache disabled** — what
+the run needs. It is steady by optimizer step 2 and flat through step 6, and the process footprint
+with the cache off agrees within 0.5 GB. Production runs keep MLX's cache, so process footprint can
+rise to the allocator GC ceiling (0.95 × recommended working set: 109.68 GB = 102.2 GiB on Mac2)
+without that being need; the first campaign's MLX numbers (run 38292137908: 109.96 / 110.08 GB at
+1024²) were that ceiling, not peaks.
+
+**Candle: PENDING (Candle memory diagnosis).** A Candle training-memory excess of roughly 30–55 GB
+over MLX is being diagnosed; no Candle floor is set from the numbers below, and the Candle rows in
+the tables still hold the first campaign's polled `nvidia-smi` readings (run 38291037726).
+Preliminary live pool peaks, CUDA run 38312194527, for the record only: generation 512² 95.40 GB,
+generation 1024² + activation checkpointing 89.54 GB, depth 512² 83.38 GB; restoration 512² needs
+126.28 GB and completes only by spilling 28 GB to system memory — it does **not** fit the card, and
+the earlier "measured 101.8" was card-capped; every 1024² shape without activation checkpointing
+exceeds the card.
+
+| Shape | MLX active peak, cache off | MLX floor (GiB) = ⌈peak GiB + 2⌉ | Candle |
+|---|---|---|---|
+| Generation full 512² | 65.57 GB = 61.07 GiB | 64, measured | PENDING (Candle memory diagnosis) |
+| Generation full 1024² | 104.49 GB = 97.31 GiB | 100, measured | PENDING (Candle memory diagnosis) — exceeded the 95.59 GiB card |
+| Generation full 1024² + activation checkpointing | 74.88 GB = 69.74 GiB | 72, measured | PENDING (Candle memory diagnosis) |
+| Depth full 512² | 53.60 GB = 49.92 GiB | 52, measured | PENDING (Candle memory diagnosis) |
+| Depth full 1024² | 92.58 GB = 86.22 GiB | 89, measured | PENDING (Candle memory diagnosis) — exceeded the card |
+| Restoration full 512² crop | 71.57 GB = 66.65 GiB | 69, measured | PENDING (Candle memory diagnosis) — does not fit the card |
+| Restoration full 1024² crop | lower bound only: footprint 116.47 GB = 108.47 GiB at the guard stop with the cache off (live need above 115 GB; the active peak had reached ≥ 87.45 GB by step 2 of 4) | 128, declared above the lower bound | PENDING (Candle memory diagnosis) — exceeded the card |
 
 ## Floors (`crates/sceneworks-core/src/training/iris{,/depth,/restore}.rs`)
 
@@ -88,11 +103,35 @@ than peaks, and the CUDA values were polled `nvidia-smi` readings.
   `lower_bound` or `declared` — published per row (`memoryFloors.provenance`) and named in every
   refusal, the curriculum check and the Studio hint. There is no table-wide `measured` flag.
 - A measured row is the probe's peak in the unit it printed (the `*_PEAK` constants), converted to
-  GiB, plus a 2 GiB allocator reserve on Candle, rounded up; a Candle row never exceeds the card
-  that held its run. Extrapolated rows are computed from the same constants. Re-measuring is an
-  edit of those constants and a fixture regeneration.
-- Row values: PENDING RE-MEASUREMENT (the table currently holds the first campaign's peaks run
-  through the conversion; they are replaced before this PR is pushed).
+  GiB, plus a 2 GiB reserve, rounded up. The MLX reserve covers the ≤ 0.5 GB the footprint sat above
+  the active peak plus allocator granularity; the macOS/app reserve (4 GiB) is separate — the gate
+  holds it out of unified memory. A Candle row never exceeds the card that held its run.
+  Extrapolated rows are computed from the same constants.
+- MLX floors, GiB, before → after this re-measurement:
+
+  | Table | Row | Before | After | Provenance after |
+  |---|---|---|---|---|
+  | Generation full | 256 | 80 | 64 | extrapolated (bounded by the measured 512 row) |
+  | Generation full | 512 | 85 | 64 | measured |
+  | Generation full | 1024 | 110 | 100 | measured |
+  | Generation full + AC | 256 / 512 | 80 / 85 | 64 / 64 | extrapolated |
+  | Generation full + AC | 1024 | 102 | 72 | measured |
+  | Depth | 16 384 px (128²) | 64 | 52 | extrapolated (bounded by the measured 512² row) |
+  | Depth | 262 144 px (512²) | (read the 307 200 row: 80) | 52 | measured (new row) |
+  | Depth | 307 200 px (480×640) | 80 | 54 | extrapolated (chord between the two measured sizes) |
+  | Depth | 589 824 px (768²) | 96 | 68 | extrapolated (same chord) |
+  | Depth | 1 048 576 px (1024²) | 112 | 89 | measured |
+  | Restoration full | 65 536 px (256²) | 92 | 69 | extrapolated (bounded by the measured 512² row) |
+  | Restoration full | 262 144 px (512²) | 102 | 69 | measured |
+  | Restoration full | 1 048 576 px (1024²) | 128 | 128 | lower bound |
+  | Adapter rows (all three tables) | — | unchanged | unchanged | declared |
+
+  "Before" is the PR's first commit (decimal-GB footprints compared against GiB capacity). No MLX
+  row is declared below a measured peak.
+- Candle rows: PENDING (Candle memory diagnosis). The Candle rows derived from MLX inputs moved
+  with them (generation full 1024 → 130, depth 307 200 / 589 824 / 1 048 576 → 85 / 98 / 119, all
+  extrapolated); the rows labelled measured on Candle are the first campaign's and are not
+  final.
 - Activation checkpointing exists only for generation (the depth and restoration trainers refuse
   it), so only generation has `full_ac` rows. A full generation run refused at its plain row is told
   when the same run under activation checkpointing fits the machine.

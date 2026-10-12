@@ -23,6 +23,13 @@ pub const DECIMAL_GB_PER_GIB: f64 = 1.073_741_824;
 /// The allocator reserve (GiB) a Candle floor adds on top of a measured device-VRAM peak.
 pub const CANDLE_RESERVE_GIB: u32 = 2;
 
+/// The margin (GiB) an MLX floor adds on top of a measured ACTIVE peak. The MLX peaks are taken
+/// with the buffer cache disabled (what the run needs, not what the allocator holds); the process
+/// footprint in the same runs sat within 0.5 GB of the active peak, and the rest covers allocator
+/// granularity and run-to-run variation, as the Candle reserve does. (The macOS/app reserve is
+/// separate: the gate holds it out of the machine's unified memory, not out of the floor.)
+pub const MLX_RESERVE_GIB: u32 = 2;
+
 /// The card the epic-25678 Candle measurements ran on: an RTX PRO 6000 Blackwell ("96 GB"),
 /// `nvidia-smi` `memory.total` 97,887 MiB = 95.59 GiB. A row measured on it is held to it
 /// ([`IrisMemoryFloor::held_on`]): the card that demonstrably ran a shape is never refused for it.

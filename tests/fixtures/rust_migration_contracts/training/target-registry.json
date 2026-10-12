@@ -2255,7 +2255,7 @@
         ]
       },
       "memoryFloors": {
-        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by artifact and training resolution; `full_ac` is a full fine-tune under full activation checkpointing. Measured rows are the whole-process peak of a real full fine-tune at batch 1 (two steps + export), converted to GiB, plus a 2 GiB allocator reserve on Candle. Each row carries its own provenance. Measured at the row's own shape: mlx full 512; mlx full 1024; mlx full_ac 1024; candle full 512; candle full_ac 1024. Extrapolated from measured rows: mlx full 256; mlx full_ac 256; mlx full_ac 512; candle full 1024; candle full_ac 512. Declared, not measured: mlx adapter 256; mlx adapter 512; mlx adapter 1024; candle adapter 256; candle adapter 512; candle adapter 1024; candle full 256; candle full_ac 256. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
+        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by artifact and training resolution; `full_ac` is a full fine-tune under full activation checkpointing. Measured rows are the whole-process peak of a real full fine-tune at batch 1, converted to GiB, plus a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without that being need. Each row carries its own provenance. Measured at the row's own shape: mlx full 512; mlx full 1024; mlx full_ac 1024; candle full 512; candle full_ac 1024. Extrapolated from measured rows: mlx full 256; mlx full_ac 256; mlx full_ac 512; candle full 1024; candle full_ac 512. Declared, not measured: mlx adapter 256; mlx adapter 512; mlx adapter 1024; candle adapter 256; candle adapter 512; candle adapter 1024; candle full 256; candle full_ac 256. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
         "lanes": {
           "candle": {
             "adapter": {
@@ -2264,7 +2264,7 @@
               "512": 32
             },
             "full": {
-              "1024": 117,
+              "1024": 130,
               "256": 80,
               "512": 93
             },
@@ -2281,14 +2281,14 @@
               "512": 24
             },
             "full": {
-              "1024": 103,
-              "256": 79,
-              "512": 79
+              "1024": 100,
+              "256": 64,
+              "512": 64
             },
             "full_ac": {
-              "1024": 95,
-              "256": 79,
-              "512": 79
+              "1024": 72,
+              "256": 64,
+              "512": 64
             }
           }
         },
@@ -2459,20 +2459,21 @@
       },
       "irisObjective": "depth",
       "memoryFloors": {
-        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by the pixels of one micro-batch (batch size × training height × width). Evidence is the whole-process peak of a real full fine-tune of the 3B depth model at batch 1. Each row carries its own provenance. Extrapolated from measured rows: candle 307200; candle 589824; candle 1048576. Declared, not measured: mlx 16384; mlx 307200; mlx 589824; mlx 1048576; candle 16384. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
+        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by the pixels of one micro-batch (batch size × training height × width). Evidence is the whole-process peak of a real full fine-tune of the 3B depth model at batch 1, converted to GiB, plus a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without that being need. Each row carries its own provenance. Measured at the row's own shape: mlx 262144; mlx 1048576. Extrapolated from measured rows: mlx 16384; mlx 307200; mlx 589824; candle 307200; candle 589824; candle 1048576. Declared, not measured: candle 16384. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
         "key": "microBatchPixels",
         "lanes": {
           "candle": {
-            "1048576": 117,
+            "1048576": 119,
             "16384": 68,
-            "307200": 84,
-            "589824": 97
+            "307200": 85,
+            "589824": 98
           },
           "mlx": {
-            "1048576": 112,
-            "16384": 64,
-            "307200": 80,
-            "589824": 96
+            "1048576": 89,
+            "16384": 52,
+            "262144": 52,
+            "307200": 54,
+            "589824": 68
           }
         },
         "provenance": {
@@ -2483,10 +2484,11 @@
             "589824": "extrapolated"
           },
           "mlx": {
-            "1048576": "declared",
-            "16384": "declared",
-            "307200": "declared",
-            "589824": "declared"
+            "1048576": "measured",
+            "16384": "extrapolated",
+            "262144": "measured",
+            "307200": "extrapolated",
+            "589824": "extrapolated"
           }
         },
         "unit": "GiB"
@@ -2612,7 +2614,7 @@
       },
       "irisObjective": "restoration",
       "memoryFloors": {
-        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by artifact and the pixels of one micro-batch (batch size × crop²). Measured rows are the whole-process peak of the paper's full recipe at batch 1 (two steps + export), converted to GiB, plus a 2 GiB allocator reserve on Candle. Each row carries its own provenance. Measured at the row's own shape: mlx full 262144; candle full 65536; candle full 262144. Declared above a measured lower bound: mlx full 1048576; candle full 1048576. Declared, not measured: mlx full 65536; mlx adapter 65536; mlx adapter 262144; mlx adapter 1048576; candle adapter 65536; candle adapter 262144; candle adapter 1048576. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
+        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by artifact and the pixels of one micro-batch (batch size × crop²). Measured rows are the whole-process peak of the paper's full recipe at batch 1, converted to GiB, plus a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without that being need. Each row carries its own provenance. Measured at the row's own shape: mlx full 262144; candle full 65536; candle full 262144. Extrapolated from measured rows: mlx full 65536. Declared above a measured lower bound: mlx full 1048576; candle full 1048576. Declared, not measured: mlx adapter 65536; mlx adapter 262144; mlx adapter 1048576; candle adapter 65536; candle adapter 262144; candle adapter 1048576. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
         "key": "microBatchPixels",
         "lanes": {
           "candle": {
@@ -2635,8 +2637,8 @@
             },
             "full": {
               "1048576": 128,
-              "262144": 95,
-              "65536": 92
+              "262144": 69,
+              "65536": 69
             }
           }
         },
@@ -2662,7 +2664,7 @@
             "full": {
               "1048576": "lower_bound",
               "262144": "measured",
-              "65536": "declared"
+              "65536": "extrapolated"
             }
           }
         },

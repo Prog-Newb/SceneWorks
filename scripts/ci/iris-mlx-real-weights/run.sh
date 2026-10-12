@@ -195,8 +195,15 @@ training_set=(
 # first durable checkpoint, resumed, exported, and the registered checkpoint rendered by a
 # generation job. Restoration: the paper's full recipe at a 256² crop, exported and selected by id
 # in a restore job. Each run holds the full-model state (f32 masters + grads + optimizer + EMA).
+#
+# Caps: the guard reads the process FOOTPRINT, which includes MLX's buffer cache. The measured need
+# (active peak, cache off) is ~61 GiB for a generation full fine-tune at 512² and ~67 GiB for
+# restoration at a 512² crop, and less at these 256² shapes — but a production run keeps the cache,
+# so its footprint may climb to the allocator's GC ceiling (0.95 x the recommended working set:
+# 109.68 GB = 102.2 GiB on this Mac) without needing it. 104 GiB sits just above that ceiling, so
+# the guard only fires on a run that escapes MLX's own limit.
 full_ft_set=(
-  "iris_training_gpu_smoke::iris_training_gpu_smoke_full_ft_generation_cancel_resume 100 3000 $hub"
+  "iris_training_gpu_smoke::iris_training_gpu_smoke_full_ft_generation_cancel_resume 104 3000 $hub"
   "iris_training_gpu_smoke::iris_training_gpu_smoke_full_ft_restore 104 2400 $no_encoder"
 )
 case "$filter" in
