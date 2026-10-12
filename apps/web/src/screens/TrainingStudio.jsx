@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
-import { API_BASE_URL, isAbortError } from "../api.js";
+import { API_BASE_URL, checkIrisDataset, irisItemSidecar, isAbortError } from "../api.js";
 import { errorMessage } from "../errorMessage.js";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
@@ -64,10 +64,11 @@ import { useValidation } from "../validation/useValidation.js";
 import { ConfigureJobPanel } from "./training/ConfigureJobPanel.jsx";
 import {
   irisCaptionFieldOptions,
+  irisObjective,
   irisPreviousRuns,
-  isIrisTarget,
   trainingLaneFromCapabilities,
 } from "../training/irisOptions.js";
+import { irisTrainingResourceIds } from "../training/irisTaskOptions.js";
 import { useIrisDataWalk } from "../training/useIrisDataWalk.js";
 import { useIrisMetrics, useIrisPlanCheck, useIrisStagePresets } from "../training/useIrisCurricula.js";
 import { IrisRunMetrics } from "./training/IrisCurriculaOptions.jsx";
@@ -790,7 +791,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
 
   // Iris-3B (sc-25685): the previous runs a new run can resume / start from, the dataset's caption
   // field names, the active lane for the declared memory floor, and the data-walk preflight.
-  const irisSelected = isIrisTarget(selectedTarget);
+  const irisObjectiveSelected = irisObjective(selectedTarget);
+  const irisSelected = irisObjectiveSelected === "generation";
   const irisDataWalk = useIrisDataWalk({
     enabled: irisSelected,
     targetId: selectedTarget?.id,
@@ -811,27 +813,47 @@ export function TrainingStudio({ mode = "training" } = {}) {
   }, [irisSelected, activeDataset, configDraft, selectedPreset, selectedTarget]);
   const irisPlanCheck = useIrisPlanCheck({ enabled: irisSelected, targetId: selectedTarget?.id, config: irisPlanConfig, token });
   const irisResumeMetrics = useIrisMetrics(irisSelected ? configDraft.resumeFromJobId : "", token);
-  const irisContext = useMemo(
-    () =>
-      irisSelected
-        ? {
-            previousRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id }),
-            fullRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id, fullOnly: true }),
-            captionFieldOptions: irisCaptionFieldOptions(activeDataset),
-            trainingLane: trainingLaneFromCapabilities(macCapabilities),
-            dataWalk: irisDataWalk,
-            presets: irisPresets,
-            planCheck: irisPlanCheck,
-            resumeMetrics: irisResumeMetrics,
-            applyPreset: (preset) =>
-              preset &&
-              setConfigDraft((current) =>
-                configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, current.triggerWord ?? "", preset, current),
-              ),
-          }
-        : {},
-    [irisSelected, jobs, activeProject?.id, activeDataset, macCapabilities, irisDataWalk, irisPresets, irisPlanCheck, irisResumeMetrics, selectedTarget, gpuOptions],
-  );
+  const irisContext = useMemo(() => {
+    if (irisSelected) {
+      return {
+        previousRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id }),
+        fullRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id, fullOnly: true }),
+        captionFieldOptions: irisCaptionFieldOptions(activeDataset),
+        trainingLane: trainingLaneFromCapabilities(macCapabilities),
+        dataWalk: irisDataWalk,
+        presets: irisPresets,
+        planCheck: irisPlanCheck,
+        resumeMetrics: irisResumeMetrics,
+        applyPreset: (preset) =>
+          preset &&
+          setConfigDraft((current) =>
+            configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, current.triggerWord ?? "", preset, current),
+          ),
+      };
+    }
+    // Depth / restoration (sc-25687 / sc-25688): previous runs of the same task, the restoration
+    // training-only resources still to install, and the pre-launch dataset check of THIS config.
+    if (!irisObjectiveSelected) return {};
+    return {
+      previousRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id, baseModel: selectedTarget.baseModel }),
+      trainingLane: trainingLaneFromCapabilities(macCapabilities),
+      missingResources: missingRequiredModels(models, irisTrainingResourceIds(selectedTarget)),
+      checkDataset: () =>
+        checkIrisDataset(
+          {
+            projectId: activeProject?.id,
+            datasetId: activeDataset?.id,
+            targetId: selectedTarget.id,
+            config: trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget }).config,
+          },
+          { token },
+        ),
+    };
+  }, [
+    irisSelected, irisObjectiveSelected, jobs, activeProject?.id, activeDataset, macCapabilities, irisDataWalk,
+    models, selectedTarget, selectedPreset, configDraft, token,
+    irisPresets, irisPlanCheck, irisResumeMetrics, gpuOptions,
+  ]);
 
   // The dataset's character kind (person/style/object) — refines the readiness kind
   // and thus the blur floor. "" when the dataset isn't tied to a character.
@@ -1791,6 +1813,18 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
   }
 
+  // Iris depth / restoration sidecars (sc-25687 / sc-25688): attach (file) or remove (null) one
+  // saved item's depth map / mask / degraded input; the API answers with the updated dataset.
+  async function irisSidecar(item, kind, file, fields) {
+    const dataset = await irisItemSidecar(
+      { projectId: activeProject?.id, datasetId: activeDataset?.id, itemId: item.id, kind, file, fields },
+      { token },
+    );
+    setActiveDataset(dataset);
+    setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
+    return dataset;
+  }
+
   async function importParquetDataset(settings) {
     setDatasetError("");
     setDatasetMessage("");
@@ -2178,6 +2212,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 config={{
                   imageAssets, characters, associatedCharacterId, setActiveView,
                   importingAssets, gpuOptions, onUploadPreparedBundle: uploadPreparedBundle,
+                  onIrisSidecar: activeDataset?.id ? irisSidecar : undefined,
                 }}
               />
             ) : (

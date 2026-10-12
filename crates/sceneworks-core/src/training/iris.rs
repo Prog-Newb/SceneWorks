@@ -22,11 +22,19 @@
 //! * [`iris_training_memory_floor_gb`] — the DECLARED (measured: false) per-lane floors, so a routed
 //!   Iris training lane is never admitted unbounded. S6 owns the measured values.
 //!
-//! The S11 surface (sc-25689) — official stage presets, bucket/area shapes, the RoPE law, REPA /
-//! iREPA, activation-checkpointing policies, holdout validation, fp16 and distributed execution —
-//! lives in [`curricula`].
+//! The S11 surface of GENERATION training (sc-25689) — official stage presets, bucket/area shapes,
+//! the RoPE law, REPA / iREPA, activation-checkpointing policies, holdout validation, fp16 and
+//! distributed execution — lives in [`curricula`].
+//!
+//! The same `iris_train` kernel serves the two downstream TASK trainers too, keyed on the target's
+//! base model ([`IrisObjective`]): depth ([`depth`], S9 sc-25687) and restoration ([`restore`], S10
+//! sc-25688). Everything kernel-wide (durable cancel, resume / new phase, the memory-floor gate, the
+//! data walk) applies to all three; the request surface, the dataset contract and the floors are per
+//! objective.
 
 pub mod curricula;
+pub mod depth;
+pub mod restore;
 
 use serde_json::{json, Map, Value};
 
@@ -113,9 +121,113 @@ pub const IRIS_CLIENT_OPTION_KEYS: [&str; 33] = [
 /// previous job ([`RESUME_FROM_JOB_KEY`] / [`LOAD_FROM_JOB_KEY`]) after validating it.
 pub const IRIS_API_OWNED_OPTION_KEYS: [&str; 2] = ["resume_from", "load_from"];
 
-/// Whether `kernel` is the Iris generation trainer.
+/// Whether `kernel` is an Iris trainer (generation, depth or restoration — see [`IrisObjective`]).
 pub fn is_iris_training_kernel(kernel: &str) -> bool {
     kernel == IRIS_TRAINING_KERNEL
+}
+
+/// What an Iris training run trains, keyed on its target's base model (the task install).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrisObjective {
+    /// `iris_3b` — LoRA / LoKr adapters and full fine-tunes of the generation backbone.
+    Generation,
+    /// `iris_3b_depth` — the supervised depth fine-tune (a `depth/` export).
+    Depth,
+    /// `iris_3b_restore` — the adversarial restoration fine-tune (an `upscaler/` export).
+    Restoration,
+}
+
+impl IrisObjective {
+    /// The objective of an Iris target / plan base model, `None` for any other model.
+    pub fn from_base_model(base_model: &str) -> Option<Self> {
+        match base_model {
+            IRIS_BASE_MODEL => Some(Self::Generation),
+            depth::IRIS_DEPTH_BASE_MODEL => Some(Self::Depth),
+            restore::IRIS_RESTORE_BASE_MODEL => Some(Self::Restoration),
+            _ => None,
+        }
+    }
+
+    /// The task identity its artifacts carry (`irisTask`).
+    pub fn task(self) -> &'static str {
+        match self {
+            Self::Generation => IRIS_GENERATION_TASK,
+            Self::Depth => depth::IRIS_DEPTH_TASK,
+            Self::Restoration => restore::IRIS_RESTORATION_TASK,
+        }
+    }
+
+    /// The catalog model (engine trainer id) it trains.
+    pub fn base_model(self) -> &'static str {
+        match self {
+            Self::Generation => IRIS_BASE_MODEL,
+            Self::Depth => depth::IRIS_DEPTH_BASE_MODEL,
+            Self::Restoration => restore::IRIS_RESTORE_BASE_MODEL,
+        }
+    }
+
+    /// The `TrainingConfig.advanced` key of its engine options bag.
+    pub fn options_key(self) -> &'static str {
+        match self {
+            Self::Generation | Self::Depth => IRIS_OPTIONS_KEY,
+            Self::Restoration => restore::RESTORE_OPTIONS_KEY,
+        }
+    }
+}
+
+/// The objective of an Iris training target, `None` for a non-Iris target.
+pub fn iris_objective(target: &TrainingTarget) -> Option<IrisObjective> {
+    if !is_iris_training_kernel(&target.kernel) {
+        return None;
+    }
+    IrisObjective::from_base_model(&target.base_model)
+}
+
+/// The declared floor (GB) of an Iris run of `objective` with `config` on `lane`, or `None` when no
+/// floor is declared for that shape (callers refuse rather than admit unbounded).
+pub fn iris_objective_memory_floor_gb(
+    objective: IrisObjective,
+    lane: &str,
+    config: &TrainingConfig,
+) -> Option<u32> {
+    match objective {
+        IrisObjective::Generation => iris_training_memory_floor_gb(
+            lane,
+            advanced_string(config, "networkType").unwrap_or("lora"),
+            config.resolution,
+        ),
+        IrisObjective::Depth => depth::depth_memory_floor_gb(lane, config),
+        IrisObjective::Restoration => restore::restore_memory_floor_gb(lane, config),
+    }
+}
+
+/// A short description of the run shape a floor was declared for (refusal messages).
+pub fn iris_objective_shape(objective: IrisObjective, config: &TrainingConfig) -> String {
+    let network = advanced_string(config, "networkType").unwrap_or(match objective {
+        IrisObjective::Generation => "lora",
+        _ => "full",
+    });
+    let artifact = if network.eq_ignore_ascii_case("full") {
+        "a full fine-tune"
+    } else {
+        "an adapter (LoRA/LoKr) run"
+    };
+    match objective {
+        IrisObjective::Generation => format!("{artifact} at {}px", config.resolution),
+        IrisObjective::Depth => {
+            let (height, width) = depth::depth_training_size(config);
+            format!(
+                "a depth full fine-tune at {height}×{width}, batch {}",
+                config.batch_size.max(1)
+            )
+        }
+        IrisObjective::Restoration => format!(
+            "a restoration {} at a {}² crop, batch {}",
+            artifact.trim_start_matches("a ").trim_start_matches("an "),
+            config.resolution,
+            config.batch_size.max(1)
+        ),
+    }
 }
 
 /// Declared (NOT measured) memory floors, GB, per `(lane, artifact, resolution)`.
@@ -308,6 +420,60 @@ pub fn iris_generation_target() -> TrainingTarget {
         })),
         extra,
     }
+}
+
+/// Every micro-step field of `fields` present in `config` must be a whole number of `multiple`
+/// micro-steps (an optimizer-step boundary — or, for restoration, a generator + critic step).
+fn validate_micro_steps(
+    config: &TrainingConfig,
+    multiple: u64,
+    fields: &[(&str, bool)],
+) -> Result<(), TrainingPlanError> {
+    for (field, top_level) in fields {
+        let value = if *top_level {
+            Some(u64::from(match *field {
+                "steps" => config.steps,
+                "saveEvery" => config.save_every,
+                _ => unreachable!("only steps/saveEvery are top-level micro-step fields"),
+            }))
+        } else {
+            advanced_u64(config, field)?
+        };
+        if let Some(value) = value {
+            if !value.is_multiple_of(multiple) {
+                return Err(TrainingPlanError::TargetLimit(
+                    TrainingTargetLimitError::NotMultipleOf {
+                        field: (*field).to_owned(),
+                        value,
+                        multiple,
+                    },
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The per-objective dataset contract: generation items answer the caption selection; depth items
+/// are aligned examples; restoration items are all pairs or all clean images.
+pub fn validate_iris_dataset(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+    dataset: &TrainingDataset,
+) -> Result<(), TrainingPlanError> {
+    match IrisObjective::from_base_model(&target.base_model) {
+        Some(IrisObjective::Depth) => depth::validate_depth_dataset(dataset),
+        Some(IrisObjective::Restoration) => restore::validate_restore_dataset(config, dataset),
+        Some(IrisObjective::Generation) | None => validate_iris_dataset_captions(config, dataset),
+    }
+}
+
+/// The store-boundary check of an item's Iris extras: named captions, a depth target, a degraded
+/// input.
+pub fn validate_item_iris_extras(extra: &ExtraFields) -> Result<(), String> {
+    validate_item_captions(extra)?;
+    depth::validate_item_depth(extra)?;
+    restore::validate_item_degraded(extra)
 }
 
 fn invalid(detail: impl Into<String>) -> TrainingPlanError {
@@ -512,30 +678,17 @@ pub fn validate_iris_training_config(
     target: &TrainingTarget,
     config: &TrainingConfig,
 ) -> Result<(), TrainingPlanError> {
-    // ---- micro-step multiples -----------------------------------------------------------------
-    let accumulation = config.gradient_accumulation.max(1);
-    for (field, top_level) in IRIS_MICRO_STEP_FIELDS {
-        let value = if top_level {
-            Some(u64::from(match field {
-                "steps" => config.steps,
-                "saveEvery" => config.save_every,
-                _ => unreachable!("only steps/saveEvery are top-level micro-step fields"),
-            }))
-        } else {
-            advanced_u64(config, field)?
-        };
-        if let Some(value) = value {
-            if value % u64::from(accumulation) != 0 {
-                return Err(TrainingPlanError::TargetLimit(
-                    TrainingTargetLimitError::NotMultipleOf {
-                        field: field.to_owned(),
-                        value,
-                        multiple: u64::from(accumulation),
-                    },
-                ));
-            }
-        }
+    match IrisObjective::from_base_model(&target.base_model) {
+        Some(IrisObjective::Depth) => return depth::validate_depth_config(config),
+        Some(IrisObjective::Restoration) => return restore::validate_restore_config(config),
+        Some(IrisObjective::Generation) | None => {}
     }
+    // ---- micro-step multiples -----------------------------------------------------------------
+    validate_micro_steps(
+        config,
+        u64::from(config.gradient_accumulation.max(1)),
+        &IRIS_MICRO_STEP_FIELDS,
+    )?;
 
     // ---- the options bag ----------------------------------------------------------------------
     let options = iris_options(config)?;

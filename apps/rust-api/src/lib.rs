@@ -151,6 +151,7 @@ use workflows::{get_asset_workflow, inspect_workflow, max_inspect_multipart_body
 #[cfg(test)]
 use assets::sweep_stale_asset_uploads_before;
 mod iris_curricula;
+mod iris_task_training;
 mod iris_training;
 mod training;
 use training::{
@@ -1671,6 +1672,17 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/ltx-prepared-bundle",
             post(upload_ltx_prepared_bundle).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        // Iris depth / restoration dataset sidecars + the pre-launch dataset check (sc-25687/8).
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/iris-sidecar/:kind",
+            post(iris_task_training::upload_iris_item_sidecar)
+                .delete(iris_task_training::delete_iris_item_sidecar)
+                .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/iris-check",
+            post(iris_task_training::check_iris_task_dataset),
         )
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/batch-rename",

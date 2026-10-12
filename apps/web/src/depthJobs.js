@@ -75,8 +75,9 @@ export function depthProcessingSize(width, height, resolution, patch = 16) {
   return { width: side(w), height: side(h) };
 }
 
-// The typed request body. `requestedGpu` rides along like every other job route.
-export function buildDepthJobBody({ project, requestedGpu, sourceAssetId, resolution, displayName }) {
+// The typed request body. `requestedGpu` rides along like every other job route. `irisModel` names a
+// trained depth model (sc-25687); absent = the release export.
+export function buildDepthJobBody({ project, requestedGpu, sourceAssetId, resolution, displayName, irisModel }) {
   const body = {
     projectId: project.id,
     projectName: project.name ?? null,
@@ -85,6 +86,7 @@ export function buildDepthJobBody({ project, requestedGpu, sourceAssetId, resolu
     requestedGpu: requestedGpu ?? "auto",
   };
   if (displayName) body.displayName = displayName;
+  if (irisModel && irisModel !== DEPTH_MODEL_ID) body.irisModel = irisModel;
   return body;
 }
 
@@ -96,6 +98,11 @@ export function isDepthAsset(asset) {
 export function depthSettingsFromAsset(asset) {
   const recorded = asset?.recipe?.rawAdapterSettings?.depth?.resolution ?? asset?.depth?.preprocessing?.resolution;
   return recorded ? normalizeDepthResolution(recorded) : { ...DEFAULT_DEPTH_RESOLUTION };
+}
+
+// The trained depth model a depth asset was made with ("" = the release export).
+export function depthModelFromAsset(asset) {
+  return asset?.recipe?.rawAdapterSettings?.depth?.irisModel ?? "";
 }
 
 function resolutionLabel(resolution) {

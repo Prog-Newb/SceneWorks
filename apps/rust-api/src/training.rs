@@ -1709,8 +1709,20 @@ pub(crate) async fn create_training_job(
     // A real run loads the base model and writes weights, so it must have the
     // model installed and room on disk. A dry run only resolves the plan, so it
     // is exempt — that is how you preview a plan before installing the model.
+    // Iris depth / restoration (sc-25687 / sc-25688): a task run needs its own task export (and, for
+    // restoration, the pinned training-only resources), not the shared repo's generation files — so
+    // availability is judged per resource, not off the repo-level install marker.
+    let iris_task = sceneworks_worker::iris_task_objective(&target.kernel, &target.base_model);
     if !payload.dry_run {
-        if let Some(message) = training_base_unavailable_message(
+        if let Some(objective) = iris_task {
+            if let Some(message) = sceneworks_worker::iris_task_training_unavailable(
+                &data_dir,
+                objective,
+                &payload.config,
+            ) {
+                return Err(ApiError::bad_request(message));
+            }
+        } else if let Some(message) = training_base_unavailable_message(
             training_base_model_status(&data_dir, target),
             &target.base_model,
         ) {
@@ -1730,10 +1742,8 @@ pub(crate) async fn create_training_job(
         // co-located macOS API the declared unified-memory floor refuses an undersized Mac here,
         // before a job exists; the worker repeats the gate on every lane (VRAM on Candle).
         if sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel) {
-            // The whole run's floor (sc-25689): one rank's (+ the REPA teacher) times the ranks
-            // sharing the Mac's one GPU.
             if let Some(message) =
-                sceneworks_worker::iris_training_run_memory_error(&payload.config)
+                sceneworks_worker::iris_plan_memory_error(&target.base_model, &payload.config)
             {
                 return Err(ApiError::bad_request(message));
             }
@@ -1784,6 +1794,11 @@ pub(crate) async fn create_training_job(
         payload.dry_run,
     )
     .await?;
+    // Restoration's synthetic-degradation overrides go through the engine's own parser (unknown
+    // Real-ESRGAN keys, bad ranges, a kernel larger than the crop) before a job exists.
+    if iris_task == Some(sceneworks_core::training::iris::IrisObjective::Restoration) {
+        crate::iris_training::check_restore_degradation_overrides(&plan)?;
+    }
 
     // Pre-build the LoRA registry entry the completed job will register, mirroring
     // the `lora_import` pattern: Rust owns LoRA registration. The descriptive
@@ -1877,6 +1892,7 @@ pub(crate) async fn create_training_job(
                 &output_dir,
                 &plan.output.file_name,
                 is_base_checkpoint,
+                &target.base_model,
             );
             if let Some(receipts) = &iris_receipts {
                 entry.insert(

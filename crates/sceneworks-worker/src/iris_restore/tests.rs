@@ -1084,6 +1084,7 @@ mod job_tests {
             never_loads,
             image::RgbImage::new(512, 384),
             IrisRestoreParams::default(),
+            None,
             |_, _| unreachable!(),
         )
         .await

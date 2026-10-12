@@ -254,8 +254,23 @@ pub use mlx_fit_gate::full_finetune_memory_error;
 )]
 mod iris_training;
 pub use iris_training::{
-    iris_data_walk_report, iris_training_memory_error, iris_training_run_memory_error,
-    IrisDataWalkReport,
+    iris_data_walk_report, iris_plan_memory_error, iris_training_memory_error, IrisDataWalkReport,
+};
+// Iris-3B depth (sc-25687) / restoration (sc-25688) training seams: task items + load inputs for the
+// executor, and the pre-launch checks the API serves (install availability, sidecar format/alignment,
+// the per-item dataset report, the degradation parser).
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+mod iris_task_training;
+pub use iris_task_training::{
+    check_degraded_sidecar, check_depth_sidecar, check_restore_degradation,
+    iris_task_dataset_report, iris_task_training_unavailable,
+    task_objective as iris_task_objective,
 };
 // Iris-3B curricula, REPA, holdout and fp16 (sc-25689): the engine's stage presets, its plan
 // resolution (typed refusals + receipts) and the REPA teacher TRAINING resource.

@@ -147,7 +147,9 @@ pub(crate) async fn iris_plan_check(
             }
         }
         if first_refusal.is_none() {
-            if let Some(message) = sceneworks_worker::iris_training_run_memory_error(&config) {
+            if let Some(message) =
+                sceneworks_worker::iris_plan_memory_error(&target.base_model, &config)
+            {
                 first_refusal = Some(refusal("memory", message));
             }
         }
@@ -248,9 +250,14 @@ pub(crate) async fn check_iris_submit(
         ));
     }
     if let Some(job_id) = resume_job {
-        let (_, previous, _) =
-            crate::iris_training::previous_iris_run(state, project_id, job_id, RESUME_FROM_JOB_KEY)
-                .await?;
+        let (_, previous, _) = crate::iris_training::previous_iris_run(
+            state,
+            project_id,
+            job_id,
+            RESUME_FROM_JOB_KEY,
+            &plan.target.base_model,
+        )
+        .await?;
         let previous_stage = plan_stage(&previous);
         if let Some(stage) = stage {
             let policy = options

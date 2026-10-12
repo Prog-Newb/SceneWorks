@@ -883,6 +883,43 @@ fn training_request_from_plan(
     plan: &TrainingPlan,
     prepared_inputs: &mut PreparedTrainingInputs,
 ) -> WorkerResult<TrainingRequest> {
+    // Iris depth / restoration (sc-25687 / sc-25688): an item is an image plus its task sidecar(s),
+    // resolved under the dataset root; the engine options bag is the only `model_options` key.
+    if let Some(objective) =
+        crate::iris_task_training::task_objective(&plan.target.kernel, &plan.target.base_model)
+    {
+        let root = PathBuf::from(&plan.dataset.root_path);
+        let items = plan
+            .dataset
+            .items
+            .iter()
+            .map(|item| {
+                let image = resolve_dataset_item_path(
+                    settings,
+                    &plan.dataset.root_path,
+                    &item.image_path,
+                    "Training dataset imagePath",
+                )?;
+                crate::iris_task_training::task_item(objective, &root, image, &item.extra)
+                    .map_err(WorkerError::InvalidPayload)
+            })
+            .collect::<WorkerResult<Vec<_>>>()?;
+        return Ok(TrainingRequest {
+            items,
+            config: crate::iris_task_training::shape_task_config(
+                finalize_training_config(map_training_config(&plan.config), plan),
+                objective,
+            ),
+            output_dir: resolve_training_output_dir(
+                settings,
+                &plan.output.output_dir,
+                "Training outputDir",
+            )?,
+            file_name: plan.output.file_name.clone(),
+            trigger_words: Vec::new(),
+            cancel: CancelFlag::new(),
+        });
+    }
     let items = plan
         .dataset
         .items
@@ -1334,7 +1371,14 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
         // under the generation install's id (`gen_core::iris::train::TRAINER_ID`), serving LoRA, LoKr
         // and the full (weights- or random-init) run; the network type travels in the config. The
         // depth/restoration exports are different task installs and are never a training base here.
-        "iris_train" => (base_model == "iris_3b").then_some(gen_core::iris::train::TRAINER_ID),
+        // The depth (S9 sc-25687) and restoration (S10 sc-25688) task trainers ride the same kernel,
+        // keyed on the task install they fine-tune.
+        "iris_train" => match base_model {
+            "iris_3b" => Some(gen_core::iris::train::TRAINER_ID),
+            "iris_3b_depth" => Some(gen_core::iris::train::depth::DEPTH_TRAINER_ID),
+            "iris_3b_restore" => Some(gen_core::iris::restoration_train::TRAINER_ID),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1845,6 +1889,20 @@ impl TrainerLoadInputs {
         })
     }
 
+    /// The inputs of an Iris depth / restoration task run (sc-25687 / sc-25688): its resolved task
+    /// export and staged components.
+    pub(crate) fn from_task(
+        engine_id: &str,
+        weights_dir: PathBuf,
+        components: std::collections::BTreeMap<String, WeightsSource>,
+    ) -> Self {
+        Self {
+            text_encoder: training_text_encoder(engine_id, &weights_dir),
+            weights_dir,
+            components,
+        }
+    }
+
     /// The trainer `LoadSpec`. Load precision tracks the requested `train_dtype` (advanced
     /// `mixedPrecision`, default bf16). The MLX Lens trainer loads its DiT at this precision and
     /// enforces `train_dtype` against it (sc-5148), so f32 training must load at Fp32; the
@@ -1990,9 +2048,33 @@ pub(crate) async fn run_training_execution_drive(
     // components incl. the Iris REPA teacher) — resolved BEFORE the blocking thread so a missing one
     // fails the job with an actionable error. A multi-rank run resolves them here too (each rank
     // re-resolves its own), so a missing resource is refused before any rank process starts.
-    let load_inputs = match TrainerLoadInputs::resolve(settings, plan, engine_id) {
-        Ok(inputs) => inputs,
-        Err(error) => return prepared_run.finish(Err(error)),
+    // Iris depth / restoration (sc-25687 / sc-25688): the task export the run fine-tunes and its
+    // caller-staged components (empty-prompt source, the integrity-checked training resources),
+    // resolved cache-only — nothing downloads at training time.
+    let load_inputs = match crate::iris_task_training::task_objective(
+        &plan.target.kernel,
+        &plan.target.base_model,
+    ) {
+        Some(objective) => {
+            let task_settings = settings.clone();
+            let config = plan.config.clone();
+            let resolved = tokio::task::spawn_blocking(move || {
+                crate::iris_task_training::task_load_inputs(&task_settings, objective, &config)
+            })
+            .await
+            .map_err(|error| task_join_error("Iris training resource check", error))
+            .and_then(|resolved| resolved.map_err(WorkerError::InvalidPayload));
+            match resolved {
+                Ok(inputs) => {
+                    TrainerLoadInputs::from_task(engine_id, inputs.weights, inputs.components)
+                }
+                Err(error) => return prepared_run.finish(Err(error)),
+            }
+        }
+        None => match TrainerLoadInputs::resolve(settings, plan, engine_id) {
+            Ok(inputs) => inputs,
+            Err(error) => return prepared_run.finish(Err(error)),
+        },
     };
 
     if let Err(error) = tokio::fs::create_dir_all(&prepared_run.request.output_dir).await {
@@ -2159,24 +2241,32 @@ async fn iris_training_preflight(
     ) {
         return Err(WorkerError::InvalidPayload(refusal));
     }
-    if let Some(refusal) =
-        crate::iris_training::iris_run_memory_refusal(lane, &plan.config, devices, capacity)
-    {
+    if let Some(refusal) = crate::iris_training::iris_plan_memory_refusal(
+        lane,
+        &plan.target.base_model,
+        &plan.config,
+        devices,
+        capacity,
+    ) {
         return Err(WorkerError::InvalidPayload(refusal));
     }
     // The engine's own request resolution (stage lineage aside, which needs the checkpoint): every
     // typed refusal — an invalid mesh, a global-batch mismatch, a REPA layer outside the trunk, a
     // shape policy the backbone's patch cannot tile — before anything loads.
-    let backbone = resolve_app_managed_model_dir(
-        settings,
-        &plan.target.base_model_path,
-        "Training baseModelPath",
-    )?;
-    let resolved = crate::iris_curricula::resolve_iris_plan(&backbone, plan)
-        .map_err(|refusal| WorkerError::InvalidPayload(refusal.message()))?;
-
+    // (The generation objective's plan; the depth / restoration task trainers resolve their own.)
     let mut notes = JsonObject::new();
-    notes.insert("irisPlan".to_owned(), resolved.to_json());
+    if sceneworks_core::training::iris::IrisObjective::from_base_model(&plan.target.base_model)
+        == Some(sceneworks_core::training::iris::IrisObjective::Generation)
+    {
+        let backbone = resolve_app_managed_model_dir(
+            settings,
+            &plan.target.base_model_path,
+            "Training baseModelPath",
+        )?;
+        let resolved = crate::iris_curricula::resolve_iris_plan(&backbone, plan)
+            .map_err(|refusal| WorkerError::InvalidPayload(refusal.message()))?;
+        notes.insert("irisPlan".to_owned(), resolved.to_json());
+    }
     let Some(report) = crate::iris_training::iris_data_walk_report(
         request.items.len(),
         request.config.batch_size.max(1) as usize,

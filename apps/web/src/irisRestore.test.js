@@ -10,6 +10,7 @@ import {
   restorePlanBodyForSize,
   restorePlanItemText,
   summarizeRestorePlans,
+  trainedTaskModels,
 } from "./irisRestore.js";
 import { buildUpscaleJobBody, upscaleEngineIsRestoration } from "./imageJobs.js";
 import { buildBatchJob } from "./batchOps.js";
@@ -150,5 +151,34 @@ describe("Iris restoration job bodies", () => {
       restore: { scale: 3 },
     });
     expect(body.payload).toEqual({ projectId: "p1", sourceAssetId: "s1", factor: 2, engine: "real-esrgan", displayName: "Photo" });
+  });
+});
+
+describe("trained Iris models (sc-25687 / sc-25688)", () => {
+  const models = [
+    { id: "iris_3b_restore", installState: "installed" },
+    { id: "mine_restore", installState: "installed", trainedCheckpoint: { task: "restoration" } },
+    { id: "pending_restore", installState: "missing", trainedCheckpoint: { task: "restoration" } },
+    { id: "mine_depth", installState: "installed", trainedCheckpoint: { task: "depth" } },
+  ];
+
+  it("lists only installed trained models of the task", () => {
+    expect(trainedTaskModels(models, "restoration").map((model) => model.id)).toEqual(["mine_restore"]);
+    expect(trainedTaskModels(models, "depth").map((model) => model.id)).toEqual(["mine_depth"]);
+  });
+
+  it("carries irisModel beside the Iris controls — omitted for the release export", () => {
+    expect(irisRestoreControls({ scale: 2, irisModel: "mine_restore" }).irisModel).toBe("mine_restore");
+    expect(irisRestoreControls({ irisModel: "iris_3b_restore" })).not.toHaveProperty("irisModel");
+    expect(irisRestoreControls({ irisModel: "" })).not.toHaveProperty("irisModel");
+    expect(irisControlsFromRecord({ engine: "iris", scale: 4, irisModel: "mine_restore" }).irisModel).toBe("mine_restore");
+    const job = buildBatchJob({
+      op: "upscale",
+      asset: { id: "a1" },
+      params: { engine: "iris", restore: irisRestoreControls({ irisModel: "mine_restore" }) },
+      project,
+      requestedGpu: "auto",
+    });
+    expect(job.body.payload.irisModel).toBe("mine_restore");
   });
 });

@@ -139,3 +139,90 @@ export function irisJob({
     result,
   };
 }
+
+// The depth / restoration targets (sc-25687 / sc-25688), mirroring
+// `crates/sceneworks-core/src/training/iris/{depth,restore}.rs` as serialized by the API.
+const TASK_LIMITS = {
+  lrSchedulers: ["constant", "cosine"],
+  mixedPrecisions: ["bf16", "f32"],
+  gradientCheckpointing: false,
+  microStepFields: ["steps", "saveEvery", "sampleEvery", "lrWarmupSteps"],
+  outputScopes: ["project", "global"],
+};
+
+export function irisDepthTarget() {
+  return {
+    id: "iris_3b_depth",
+    name: "Iris 3B Depth",
+    modality: "image",
+    outputKind: "base_checkpoint",
+    family: "iris",
+    baseModel: "iris_3b_depth",
+    kernel: "iris_train",
+    irisObjective: "depth",
+    depthTraining: { sizeMin: 64, sizeMax: 2048, sizeMultiple: 16, inits: ["export", "parent"] },
+    defaults: {
+      rank: 1, alpha: 1, learningRate: 3e-5, steps: 320000, batchSize: 1, gradientAccumulation: 32,
+      resolution: 640, saveEvery: 32000, seed: 42, optimizer: "adamw",
+      advanced: {
+        mixedPrecision: "bf16", networkType: "full", lossType: "l1", weightDecay: 0.01, lrScheduler: "constant",
+        lrWarmupSteps: 0, gradientCheckpointing: false, sampleEvery: 32000, outputScope: "project",
+        requestedGpu: "auto", depthInit: "export",
+        iris: {
+          depth_size: [480, 640], resize: "cover", crop: "center", hflip_prob: 0.5, gradient_weight: 5,
+          low_percentile: 2, high_percentile: 98, clip_target: false, loss_reduction: "valid_pixels",
+          invalid_examples: "reject", min_valid_pixels: 2, betas: [0.9, 0.999], gradient_clip: 1,
+          ema_enabled: false, nan_loss_tolerance: 20, keep_last_checkpoints: 2, milestone_steps: [],
+          preview_items: 4, preview_weights: "raw", export_weights: "raw",
+        },
+      },
+    },
+    limits: { ...TASK_LIMITS, optimizers: ["adamw", "muon"], networkTypes: ["full"], lossTypes: ["l1"] },
+    ui: { label: "Iris 3B Depth", objective: "depth" },
+    memoryFloors: {
+      measured: false, unit: "GB", key: "microBatchPixels", basis: "Declared depth floors.",
+      lanes: { mlx: { 16384: 64, 307200: 80, 589824: 96 }, candle: { 16384: 68, 307200: 84, 589824: 100 } },
+    },
+  };
+}
+
+export function irisRestoreTarget() {
+  return {
+    id: "iris_3b_restore",
+    name: "Iris 3B Restoration",
+    modality: "image",
+    outputKind: "base_checkpoint",
+    family: "iris",
+    baseModel: "iris_3b_restore",
+    kernel: "iris_train",
+    irisObjective: "restoration",
+    trainingResources: [
+      { modelId: "iris_restore_train_vgg16", component: "lpips_vgg16" },
+      { modelId: "iris_restore_train_lpips_lin", component: "lpips_lin" },
+      { modelId: "iris_restore_train_critic_trunk", component: "critic_trunk" },
+    ],
+    defaults: {
+      rank: 16, alpha: 16, learningRate: 1e-5, steps: 10000, batchSize: 1, gradientAccumulation: 1,
+      resolution: 1024, saveEvery: 1000, seed: 42, optimizer: "adamw",
+      advanced: {
+        mixedPrecision: "bf16", networkType: "full", decomposeFactor: -1, lossType: "mse", weightDecay: 0.01,
+        lrScheduler: "constant", lrWarmupSteps: 0, gradientCheckpointing: false, sampleEvery: 1000,
+        outputScope: "project", requestedGpu: "auto",
+        iris_restore: {
+          loss_l2: 1, loss_lpips: 5, loss_gan: 0.5, gan_real_label: 0.8, betas: [0.9, 0.999], gradient_clip: 1,
+          critic_gradient_clip: 1, ema_enabled: true, ema_decay: 0.999, crop: "random", critic_dtype: "bf16",
+          init: "export", nan_loss_tolerance: 20, keep_last_checkpoints: 2, milestone_steps: [], export_dtype: "fp32",
+        },
+      },
+    },
+    limits: {
+      ...TASK_LIMITS, optimizers: ["adamw"], networkTypes: ["full", "lora", "lokr"], lossTypes: ["mse"],
+      resolutions: [256, 512, 1024], microStepMultiple: "2xGradientAccumulation",
+    },
+    ui: { label: "Iris 3B Restoration", objective: "restoration" },
+    memoryFloors: {
+      measured: false, unit: "GB", key: "microBatchPixels", basis: "Declared restoration floors.",
+      lanes: { mlx: { full: { 65536: 92, 1048576: 128 }, adapter: { 65536: 28, 1048576: 56 } } },
+    },
+  };
+}

@@ -56,7 +56,12 @@ const ORPHAN_EXIT_BOUND: Duration = Duration::from_secs(600);
 
 /// The world size the plan asks for (1 for every non-Iris plan).
 pub(crate) fn fleet_world_size(plan: &TrainingPlan) -> usize {
-    if !is_iris_training_kernel(&plan.target.kernel) {
+    // Distribution is a generation-objective option (the depth / restoration task trainers are
+    // single-process).
+    if !is_iris_training_kernel(&plan.target.kernel)
+        || sceneworks_core::training::iris::IrisObjective::from_base_model(&plan.target.base_model)
+            != Some(sceneworks_core::training::iris::IrisObjective::Generation)
+    {
         return 1;
     }
     curricula::iris_world_size(&plan.config) as usize

@@ -16,7 +16,6 @@ import { issue } from "../validation/issues.js";
 import { asText, numberFromDraft, numericDraft } from "./drafts.js";
 import { terminalStatuses } from "../jobTypes.js";
 import {
-  IRIS_CURRICULA_KEYS,
   IRIS_CURRICULA_SPECS,
   curriculaInPlay,
   curriculaIssues,
@@ -29,6 +28,24 @@ export const IRIS_TRAINING_TARGET_ID = "iris_3b_generation";
 
 export function isIrisTarget(target) {
   return target?.kernel === IRIS_TRAINING_KERNEL;
+}
+
+// Which Iris objective a target trains (sc-25687 / sc-25688): "generation" | "depth" |
+// "restoration", or null for a non-Iris target. Depth and restoration share the kernel, so the
+// target's own `irisObjective` (or `ui.objective`, else its base model) tells them apart.
+const TASK_BASE_MODELS = { iris_3b_depth: "depth", iris_3b_restore: "restoration" };
+export function irisObjective(target) {
+  if (!isIrisTarget(target)) return null;
+  const objective = target.irisObjective ?? target.ui?.objective ?? TASK_BASE_MODELS[target.baseModel];
+  return objective === "depth" || objective === "restoration" ? objective : "generation";
+}
+
+export function isIrisGenerationTarget(target) {
+  return irisObjective(target) === "generation";
+}
+
+export function isIrisTaskTarget(target) {
+  return ["depth", "restoration"].includes(irisObjective(target));
 }
 
 const between = (min, max, { maxExclusive = false } = {}) => ({
@@ -76,14 +93,15 @@ export const IRIS_OPTION_SPECS = Object.freeze({
 
 export const IRIS_OPTION_KEYS = Object.freeze(Object.keys(IRIS_OPTION_SPECS));
 // Every drafted key: the S7 options plus the S11 curricula keys (sc-25689, irisCurricula.js).
-const ALL_SPECS = { ...IRIS_OPTION_SPECS, ...IRIS_CURRICULA_SPECS };
-const ALL_KEYS = [...IRIS_OPTION_KEYS, ...IRIS_CURRICULA_KEYS];
+const GENERATION_SPECS = { ...IRIS_OPTION_SPECS, ...IRIS_CURRICULA_SPECS };
 
 // Draft value for one key: strings for inputs/selects, booleans (or "" = trainer default) for
 // toggles, an array of names for caption_fields, "a, b" text for milestone steps, a pair of
 // strings for betas.
-function draftValue(spec, value) {
+export function draftValue(spec, value) {
   switch (spec.kind) {
+    case "json":
+      return value && typeof value === "object" ? JSON.stringify(value) : asText(value);
     case "bool":
       return typeof value === "boolean" ? value : "";
     case "strings":
@@ -91,6 +109,7 @@ function draftValue(spec, value) {
     case "ints":
       return Array.isArray(value) ? value.join(", ") : asText(value);
     case "betas":
+    case "size":
       return Array.isArray(value) && value.length === 2 ? value.map(numericDraft) : ["", ""];
     case "number":
     case "int":
@@ -100,10 +119,30 @@ function draftValue(spec, value) {
   }
 }
 
-export function irisDraftFromDefaults(defaults = {}) {
+// The draft of an options bag: every key of `specs` (generation's by default) as an input value.
+export function irisDraftFromDefaults(defaults, specs = GENERATION_SPECS) {
   const source = defaults && typeof defaults === "object" ? defaults : {};
-  return Object.fromEntries(ALL_KEYS.map((key) => [key, draftValue(ALL_SPECS[key], dottedValue(source, key))]));
+  return Object.fromEntries(Object.keys(specs).map((key) => [key, draftValue(specs[key], dottedValue(source, key))]));
 }
+
+// One pass over an options bag (generation, depth or restoration): `values` = the filled, in-play,
+// in-domain keys for the request; `issues` = one error (field `<prefix>.<key>`) per out-of-domain
+// value, and per EMA-weight choice made with the EMA off.
+export function parseOptionsBag(specs, bag = {}, inPlay, prefix, emaOn) {
+  const values = {};
+  const issues = [];
+  for (const key of Object.keys(specs)) {
+    if (!inPlay(key)) continue;
+    const parsed = parseOption(key, bag[key], specs);
+    const message = parsed.invalid ?? (!emaOn && parsed.value === "ema" ? `${specs[key].label}: EMA weights need the EMA enabled` : null);
+    if (message) issues.push(issue.error(`${prefix}.${key}`, message));
+    if ("value" in parsed) values[key] = parsed.value;
+  }
+  return { values, issues };
+}
+
+export const RESUME_OR_LOAD_MESSAGE =
+  "Resume continues a run; starting from a previous run's weights begins a new one — choose one";
 
 function parseIntList(text) {
   const tokens = String(text ?? "").split(/[\s,]+/).filter(Boolean);
@@ -112,8 +151,8 @@ function parseIntList(text) {
 
 // Parse one draft value. `{ value }` when set, `{}` when empty (= trainer/backbone default),
 // `{ invalid }` when the user typed something outside the key's domain.
-function parseOption(key, raw) {
-  const spec = ALL_SPECS[key];
+export function parseOption(key, raw, specs = IRIS_OPTION_SPECS) {
+  const spec = specs[key];
   const label = spec.label;
   switch (spec.kind) {
     case "choice": {
@@ -170,6 +209,25 @@ function parseOption(key, raw) {
       }
       return { value: values };
     }
+    case "size": {
+      // Depth training size [height, width]: multiples of 16 in [64, 2048] (depth.rs).
+      const pair = (Array.isArray(raw) ? raw : ["", ""]).map(numberFromDraft);
+      if (pair.some((side) => side === null || !Number.isInteger(side) || side < 64 || side > 2048 || side % 16)) {
+        return { invalid: `${label} sides must be multiples of 16 between 64 and 2048` };
+      }
+      return { value: pair };
+    }
+    case "json": {
+      const text = asText(raw).trim();
+      if (!text) return {};
+      try {
+        const value = JSON.parse(text);
+        if (value && typeof value === "object" && !Array.isArray(value)) return { value };
+      } catch {
+        // fall through
+      }
+      return { invalid: `${label} must be a JSON object` };
+    }
     default:
       return {};
   }
@@ -216,17 +274,18 @@ export function irisOptionInPlay(key, configDraft) {
 }
 
 // `advanced.iris` for the request: only filled, in-play, in-domain keys.
+function irisBag(configDraft) {
+  return parseOptionsBag(
+    GENERATION_SPECS,
+    configDraft.iris,
+    (key) => irisOptionInPlay(key, configDraft),
+    "iris",
+    !irisRunContext(configDraft).emaOff,
+  );
+}
+
 export function irisOptionsSnapshot(configDraft = {}) {
-  const iris = configDraft.iris ?? {};
-  const out = {};
-  for (const key of ALL_KEYS) {
-    if (!irisOptionInPlay(key, configDraft)) continue;
-    const parsed = parseOption(key, iris[key]);
-    if (Object.prototype.hasOwnProperty.call(parsed, "value")) {
-      out[key] = parsed.value;
-    }
-  }
-  return nestDotted(out);
+  return nestDotted(irisBag(configDraft).values);
 }
 
 // The request-level keys that ride beside `advanced.iris`.
@@ -246,27 +305,13 @@ export function irisUpstreamPromptsOn(configDraft = {}) {
 
 // The Iris-specific rules (fields `iris.<key>` outline their own inputs).
 export function irisValidation(configDraft = {}) {
-  const issues = [];
+  const { issues } = irisBag(configDraft);
+  for (const [field, message] of curriculaIssues(configDraft)) issues.push(issue.error(field, message));
   const iris = configDraft.iris ?? {};
   const run = irisRunContext(configDraft);
-  for (const key of ALL_KEYS) {
-    if (!irisOptionInPlay(key, configDraft)) continue;
-    const parsed = parseOption(key, iris[key]);
-    if (parsed.invalid) {
-      issues.push(issue.error(`iris.${key}`, parsed.invalid));
-    }
-  }
-  for (const [field, message] of curriculaIssues(configDraft)) issues.push(issue.error(field, message));
-  if (run.emaOff) {
-    for (const key of ["preview_weights", "export_weights"]) {
-      if (asText(iris[key]).trim() === "ema") {
-        issues.push(issue.error(`iris.${key}`, `${IRIS_OPTION_SPECS[key].label}: EMA weights need the EMA enabled`));
-      }
-    }
-  }
   const { loadFromJobId } = irisRequestKeys(configDraft);
   if (loadFromJobId && run.resuming) {
-    issues.push(issue.error("loadFromJobId", "Resume continues a run; starting from a previous run's weights begins a new one — choose one"));
+    issues.push(issue.error("loadFromJobId", RESUME_OR_LOAD_MESSAGE));
   }
   if (loadFromJobId && asText(iris.init).trim() === "random") {
     issues.push(issue.error("loadFromJobId", "Starting from a previous run's weights cannot be combined with random initialization"));
@@ -284,22 +329,24 @@ export function trainingLaneFromCapabilities(caps) {
   return null;
 }
 
-// The DECLARED floor(s) for this run, `[{ lane, gb }]`. A resolution between two declared rows
-// takes the next row up (iris.rs `iris_training_memory_floor_gb`); none above the table. With an
-// unknown lane, both lanes' floors.
-export function irisMemoryFloors(target, networkType, resolution, lane) {
+// The DECLARED floor(s) for this run, `[{ lane, gb }]`. `size` is the row key the target's table
+// is keyed by (`memoryFloors.key`: the resolution, or the micro-batch pixels for depth /
+// restoration). A size between two declared rows takes the next row up (iris.rs
+// `iris_training_memory_floor_gb`); none above the table. With an unknown lane, both lanes' floors.
+// A depth table has no artifact level (always a full fine-tune).
+export function irisMemoryFloors(target, networkType, size, lane) {
   const lanes = target?.memoryFloors?.lanes;
   if (!lanes || typeof lanes !== "object") return [];
   const artifact = asText(networkType).trim().toLowerCase() === "full" ? "full" : "adapter";
-  const wanted = Number(resolution);
+  const wanted = Number(size);
   const laneNames = lane ? [lane] : ["mlx", "candle"];
   return laneNames
     .map((name) => {
-      const rows = lanes[name]?.[artifact];
+      const rows = lanes[name]?.[artifact] ?? lanes[name];
       if (!rows) return null;
       const match = Object.entries(rows)
         .map(([row, gb]) => [Number(row), Number(gb)])
-        .filter(([row]) => Number.isFinite(wanted) && row >= wanted)
+        .filter(([row, gb]) => Number.isFinite(wanted) && Number.isFinite(gb) && row >= wanted)
         .sort((left, right) => left[0] - right[0])[0];
       return match ? { lane: name, gb: match[1] } : null;
     })
@@ -333,13 +380,17 @@ function jobNetworkType(job) {
 }
 
 // Terminal Iris training runs (newest first) a new run can resume or start from. The API is the
-// authority on whether a run left a durable checkpoint; this only narrows the picker.
-export function irisPreviousRuns(jobs, { projectId, fullOnly = false } = {}) {
+// authority on whether a run left a durable checkpoint; this only narrows the picker. `baseModel`
+// selects a depth / restoration target's runs (its plan's `target.baseModel`); without it, the
+// generation target's.
+export function irisPreviousRuns(jobs, { projectId, fullOnly = false, baseModel } = {}) {
   return (jobs ?? [])
     .filter(
       (job) =>
         job?.type === "lora_train" &&
-        jobTargetId(job) === IRIS_TRAINING_TARGET_ID &&
+        (baseModel
+          ? job.payload?.plan?.target?.baseModel === baseModel
+          : jobTargetId(job) === IRIS_TRAINING_TARGET_ID) &&
         terminalStatuses.has(job.status) &&
         (!projectId || job.projectId === projectId) &&
         (!fullOnly || jobNetworkType(job) === "full"),

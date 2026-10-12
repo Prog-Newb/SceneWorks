@@ -188,6 +188,16 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             entrypoint: TypedResolverEntrypoint::PinnedComponent,
         },
     },
+    // sc-25687 / sc-25688: Iris depth / restoration TRAINING resolves its task export (`depth/`,
+    // `upscaler/`), the generation backbone + text encoder of a parent start, and the three pinned
+    // training-only restoration resources, all cache-only from their pinned snapshots.
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/iris_task_training.rs"],
+        categories: &[Category::Image, Category::Primary, Category::OptionalComponent],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
+        },
+    },
     // sc-25689: Iris generation training stages its pinned TRAINING-only REPA teacher
     // (`facebook/dinov2-base`) cache-only from the pinned snapshot, after a size + sha256 check.
     ModelConsumerInventoryEntry {

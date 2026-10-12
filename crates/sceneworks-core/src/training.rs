@@ -521,6 +521,10 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             // Iris-3B generation (epic sc-25678, S7 sc-25685 MLX / S8 sc-25686 Candle): LoRA, LoKr
             // and full fine-tuning (weights- or random-init) over the native trainers.
             iris::iris_generation_target(),
+            // Iris-3B depth (S9 sc-25687) and restoration (S10 sc-25688): full-model task exports
+            // on the same `iris_train` kernel, MLX and Candle.
+            iris::depth::iris_depth_target(),
+            iris::restore::iris_restore_target(),
         ],
         extra: ExtraFields::new(),
     }
@@ -2851,8 +2855,10 @@ pub fn build_training_plan(
         return Err(TrainingPlanError::EmptyDataset);
     }
     if iris::is_iris_training_kernel(&input.target.kernel) {
-        iris::validate_iris_dataset_captions(&input.config, input.dataset)?;
-        iris::curricula::validate_iris_holdout(&input.config, input.dataset)?;
+        iris::validate_iris_dataset(input.target, &input.config, input.dataset)?;
+        if iris::iris_objective(input.target) == Some(iris::IrisObjective::Generation) {
+            iris::curricula::validate_iris_holdout(&input.config, input.dataset)?;
+        }
     }
 
     let trigger_words = match input.config.trigger_word.as_deref().map(str::trim) {

@@ -5520,6 +5520,27 @@
       ]
     },
     {
+      "key": "laion/CLIP-convnext_xxlarge-laion2B-s34B-b82K-augreg-soup@9f3e8ee3f383c672388d9178afe70af9e63ac9df",
+      "repo": "laion/CLIP-convnext_xxlarge-laion2B-s34B-b82K-augreg-soup",
+      "revision": "9f3e8ee3f383c672388d9178afe70af9e63ac9df",
+      "resolvedSha": "9f3e8ee3f383c672388d9178afe70af9e63ac9df",
+      "servedRepo": "laion/CLIP-convnext_xxlarge-laion2B-s34B-b82K-augreg-soup",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "convnext_xxlarge_zero_shot.png",
+        "convnext_xxlarge_zero_shot_zoom.png",
+        "merges.txt",
+        "open_clip_config.json",
+        "open_clip_pytorch_model.bin",
+        "special_tokens_map.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json"
+      ]
+    },
+    {
       "key": "laion/clap-htsat-unfused@8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a",
       "repo": "laion/clap-htsat-unfused",
       "revision": "8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a",
@@ -6076,6 +6097,34 @@
         "starvector_arch.py",
         "tokenizer_config.json",
         "vocab.json"
+      ]
+    },
+    {
+      "key": "timm/vgg16.tv_in1k@b8d8aa2dd860af9233c8c67385a8097fd6c35d3f",
+      "repo": "timm/vgg16.tv_in1k",
+      "revision": "b8d8aa2dd860af9233c8c67385a8097fd6c35d3f",
+      "resolvedSha": "b8d8aa2dd860af9233c8c67385a8097fd6c35d3f",
+      "servedRepo": "timm/vgg16.tv_in1k",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "config.json",
+        "model.safetensors",
+        "pytorch_model.bin"
+      ]
+    },
+    {
+      "key": "vivym/lpips@270571f1fb2a2c4c5f920cec96cd87838c345982",
+      "repo": "vivym/lpips",
+      "revision": "270571f1fb2a2c4c5f920cec96cd87838c345982",
+      "resolvedSha": "270571f1fb2a2c4c5f920cec96cd87838c345982",
+      "servedRepo": "vivym/lpips",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "vgg_lpips_linear.safetensors"
       ]
     },
     {

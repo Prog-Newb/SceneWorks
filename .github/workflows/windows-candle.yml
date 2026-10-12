@@ -1729,6 +1729,10 @@ jobs:
           cargo test -p sceneworks-worker --features backend-candle --release %IRIS_SMOKE_FILTER% -- --ignored --nocapture --test-threads=1
       # SC-25686: one bounded Iris LoRA `lora_train` job through the production executor (8 steps,
       # 256²), then the trained adapter applied by an `image_generate` job (same snapshots, offline).
+      # SC-25687 / SC-25688: the same filter selects `iris_training_gpu_smoke_depth` (a 4-step depth
+      # full fine-tune at 128² → its export selected by id in an `image_depth` job) and
+      # `iris_training_gpu_smoke_restore` (a 2-step restoration LoRA at 256² with the three pinned
+      # training resources → its export selected by id in an Iris `image_upscale` job).
       # SC-25689: the same filter also selects `iris_training_gpu_smoke_two_rank_ddp` — the run as
       # two ddp rank processes sharing this job's one visible card (`share_device`), over loopback
       # TCP. The card inventory is printed first: the runner exposes one card to CUDA.

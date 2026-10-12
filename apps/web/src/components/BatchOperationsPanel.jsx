@@ -6,7 +6,7 @@ import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import { DepthResolutionFields } from "./DepthResolutionFields.jsx";
 import { DEFAULT_DEPTH_RESOLUTION, depthResolutionError } from "../depthJobs.js";
-import { IrisRestoreControls } from "./IrisRestoreControls.jsx";
+import { IrisRestoreControls, TrainedIrisModelSelect } from "./IrisRestoreControls.jsx";
 import { IRIS_RESTORE_DEFAULTS, irisRestoreControls } from "../irisRestore.js";
 
 // Batch operations panel (sc-6112): pick ONE op (upscale / detail / edit) + shared
@@ -87,6 +87,7 @@ export function BatchOperationsPanel({
   const [seed, setSeed] = useState("");
   // Depth params (sc-25682).
   const [depthResolution, setDepthResolution] = useState(DEFAULT_DEPTH_RESOLUTION);
+  const [depthModel, setDepthModel] = useState("");
 
   const count = assets.length;
   const running = items != null;
@@ -123,7 +124,7 @@ export function BatchOperationsPanel({
     } else if (op === "detail") {
       onRun(op, { model: activeDetailModel, strength, cnScale });
     } else if (op === "depth") {
-      onRun(op, { resolution: depthResolution });
+      onRun(op, { resolution: depthResolution, ...(depthModel ? { irisModel: depthModel } : {}) });
     } else {
       onRun(op, { model: activeEditModel, prompt: prompt.trim(), seed });
     }
@@ -293,6 +294,12 @@ export function BatchOperationsPanel({
 
           {op === "depth" ? (
             <div className="batch-ops-params">
+              <TrainedIrisModelSelect
+                onChange={setDepthModel}
+                releaseLabel="Iris 3B Depth (release)"
+                task="depth"
+                value={depthModel}
+              />
               <DepthResolutionFields idPrefix="batch-depth" onChange={setDepthResolution} value={depthResolution} />
               <p className="batch-ops-note">
                 Each image gets its own depth map (raw .npy + preview) linked to it; the source images are not modified.

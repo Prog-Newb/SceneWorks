@@ -20,7 +20,33 @@ pub const IRIS_RESTORE_ENGINE: &str = "iris";
 pub const IRIS_RESTORE_MODEL_ID: &str = "iris_3b_restore";
 /// The payload keys only the Iris engine honours. Any other engine refuses them by name rather than
 /// ignoring them (E3).
-pub const IRIS_ONLY_KEYS: [&str; 3] = ["scale", "inputSizing", "colorFix"];
+pub const IRIS_ONLY_KEYS: [&str; 4] = ["scale", "inputSizing", "colorFix", IRIS_MODEL_KEY];
+/// The payload key naming a TRAINED restoration model (a Training Studio `iris_3b_restore` run's
+/// registered export, sc-25688) to restore with instead of the installed release export. Absent (or
+/// the release id itself) = the release export.
+pub const IRIS_MODEL_KEY: &str = "irisModel";
+
+/// Whether `id` is a well-formed catalog model id (the worker joins it as one directory component).
+pub fn is_plain_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// The trained restoration model a payload names (`irisModel`), validated; `None` for the release
+/// export (absent, null, or the release id itself).
+pub fn parse_iris_restore_model(object: &Map<String, Value>) -> Result<Option<String>, String> {
+    match object.get(IRIS_MODEL_KEY) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(id)) if id == IRIS_RESTORE_MODEL_ID => Ok(None),
+        Some(Value::String(id)) if is_plain_model_id(id) => Ok(Some(id.clone())),
+        Some(_) => Err(format!(
+            "{IRIS_MODEL_KEY} must be the id of a trained Iris restoration model"
+        )),
+    }
+}
 
 /// Is this (raw, un-normalized) engine string the Iris restoration engine?
 pub fn is_iris_engine(engine: &str) -> bool {
@@ -87,6 +113,7 @@ pub fn parse_iris_restore_params(object: &Map<String, Value>) -> Result<IrisRest
         },
         Some(_) => return Err("inputSizing must be \"budgeted\" or \"original\"".to_owned()),
     };
+    parse_iris_restore_model(object)?;
     let color_fix = match object.get("colorFix") {
         None | Some(Value::Null) => None,
         Some(Value::Bool(value)) => Some(*value),

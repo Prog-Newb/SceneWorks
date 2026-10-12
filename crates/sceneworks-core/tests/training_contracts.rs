@@ -164,6 +164,16 @@ fn builtin_targets_gate_network_types() {
             "iris_3b_generation"
         ]
     );
+    // The Iris restoration target (sc-25688) produces a restoration MODEL (`base_checkpoint`) in
+    // every arm, its LoRA / LoKr arm merged at export, so it is outside the LoRA-output set above.
+    let restore = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "iris_3b_restore")
+        .expect("the Iris restoration target");
+    assert!(
+        advertises(restore, "full") && advertises(restore, "lora") && advertises(restore, "lokr")
+    );
 }
 
 #[test]
@@ -334,7 +344,14 @@ fn only_mage_flow_targets_advertise_the_full_finetune_network_type() {
         .collect();
     assert_eq!(
         full_targets,
-        vec!["mage_flow_base_lora", "iris_3b_generation"],
+        vec![
+            "mage_flow_base_lora",
+            "iris_3b_generation",
+            // Iris depth (sc-25687) is a full fine-tune only; restoration (sc-25688) defaults to the
+            // paper's full fine-tune. Both native trainers report `supports_full_finetune`.
+            "iris_3b_depth",
+            "iris_3b_restore"
+        ],
         "only the Mage-Flow Base and Iris-3B targets may advertise the full fine-tune network type \
          (both native trainers report `supports_full_finetune`)"
     );
@@ -1526,7 +1543,17 @@ fn build_plan_for_target(
     target: &sceneworks_core::training::TrainingTarget,
     config: TrainingConfig,
 ) -> Result<TrainingPlan, TrainingPlanError> {
-    let dataset = dataset_fixture();
+    let mut dataset = dataset_fixture();
+    // An Iris depth target trains aligned examples: every item carries its depth target
+    // (sc-25687). Other targets read the fixture unchanged.
+    if target.base_model == "iris_3b_depth" {
+        for item in &mut dataset.items {
+            item.extra.insert(
+                "irisDepth".to_owned(),
+                json!({ "path": format!("sidecars/{}.depth.npy", item.id) }),
+            );
+        }
+    }
     build_training_plan(BuildTrainingPlan {
         job_id: "job_target_limit",
         target,
@@ -1597,6 +1624,13 @@ fn trainer_capability_numeric_boundaries_are_typed_and_preserved() {
             for boundary in boundary_values {
                 let boundary = u32::try_from(boundary).expect("builtin bound fits u32");
                 let mut config = target.defaults.clone();
+                if field == "steps" && target.limits.contains_key("microStepFields") {
+                    // Micro-step targets (Iris) count steps in accumulation windows; a 1-step
+                    // boundary is a whole window only at accumulation 1.
+                    config.gradient_accumulation = 1;
+                    config.save_every = 0;
+                    config.advanced.insert("sampleEvery".to_owned(), json!(0));
+                }
                 set_training_numeric_field(&mut config, field, boundary);
                 let plan = build_plan_for_target(target, config.clone()).unwrap_or_else(|error| {
                     panic!(

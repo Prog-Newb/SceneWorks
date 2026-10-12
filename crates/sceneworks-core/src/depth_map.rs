@@ -82,6 +82,11 @@ pub struct ImageDepthJobPayload {
     /// Names the result (`"<displayName> (depth)"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// A TRAINED depth model (a Training Studio `iris_3b_depth` run's registered export, sc-25687)
+    /// to estimate with instead of the installed release export. `None` (or the release id) = the
+    /// release export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iris_model: Option<String>,
 }
 
 impl ImageDepthJobPayload {
@@ -99,7 +104,19 @@ impl ImageDepthJobPayload {
         {
             return Err("displayName must be at most 512 characters".to_owned());
         }
+        if let Some(model) = &self.iris_model {
+            if !crate::image_restoration::is_plain_model_id(model) {
+                return Err("irisModel must be the id of a trained Iris depth model".to_owned());
+            }
+        }
         self.resolution.validate()
+    }
+
+    /// The trained depth model this request names, `None` for the release export.
+    pub fn trained_model(&self) -> Option<&str> {
+        self.iris_model
+            .as_deref()
+            .filter(|model| *model != DEPTH_MODEL_ID)
     }
 
     /// Parse and validate a stored job payload. Fields the job store or the API's model-source seam
@@ -115,6 +132,7 @@ impl ImageDepthJobPayload {
             "sourceAssetId",
             "resolution",
             "displayName",
+            "irisModel",
         ] {
             if let Some(value) = payload.get(key).filter(|value| !value.is_null()) {
                 request.insert(key.to_owned(), value.clone());
