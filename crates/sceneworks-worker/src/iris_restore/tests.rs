@@ -465,6 +465,45 @@ fn a_complete_install_resolves_with_its_own_tile_geometry() {
     );
 }
 
+/// S9b: the pre-submission plan for a TRAINED restoration model uses that export's own tile
+/// geometry (an imported export's `task.tile` need not be the release's 1024), exactly as the job
+/// does — never the release geometry. A missing model is the job's refusal, not a release plan.
+#[test]
+fn a_trained_model_previews_with_its_own_tile_geometry() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp
+        .path()
+        .join("models")
+        .join("finetunes")
+        .join("restore-512")
+        .join("restored");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("config.yaml"),
+        UPSCALER_CONFIG.replace("  tile: 1024", "  tile: 512"),
+    )
+    .unwrap();
+    let weights = crate::iris_test_weights::task_weights(gen_core::iris::IrisTask::Restoration);
+    for file in ["model.safetensors", "empty_prompt.safetensors"] {
+        std::fs::write(dir.join(file), &weights).unwrap();
+    }
+
+    let release = restore_plan_geometry(temp.path(), None).unwrap();
+    assert_eq!(release, TileGeometry::RELEASE);
+    let trained = restore_plan_geometry(temp.path(), Some("restore-512")).unwrap();
+    assert_eq!(trained.tile, 512);
+
+    let p = IrisRestoreParams::default();
+    let release_view = preview_restore_plan_with(512, 384, &p, release).unwrap();
+    let trained_view = preview_restore_plan_with(512, 384, &p, trained).unwrap();
+    assert_eq!(release_view.tile, 1024);
+    assert_eq!(trained_view.tile, 512);
+    assert!(trained_view.tile_count > release_view.tile_count);
+
+    let missing = restore_plan_geometry(temp.path(), Some("absent-model")).unwrap_err();
+    assert!(missing.contains("not installed"), "{missing}");
+}
+
 /// The linked engine's descriptor matches what the UI and admission assume, on both native lanes
 /// (MLX declares `mac_only`, Candle does not).
 #[cfg(any(

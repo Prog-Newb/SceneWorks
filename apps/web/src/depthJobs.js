@@ -14,28 +14,55 @@ export function depthModel(models) {
   return (models ?? []).find((model) => model?.id === DEPTH_MODEL_ID) ?? null;
 }
 
+// The installed TRAINED depth models (a Training Studio depth run, sc-25687). Each runs from its own
+// export with no release install (`depthInit: parent` training does not need it either).
+export function trainedDepthModels(models) {
+  return (models ?? []).filter((model) => model?.trainedCheckpoint?.task === "depth" && model.installState === "installed");
+}
+
+// The depth model a fresh picker starts on: the release export when it is installed, else the first
+// installed trained depth model, else the release (whose missing install then names the fix).
+export function defaultDepthModel(models) {
+  if (depthModel(models)?.installState === "installed") return "";
+  return trainedDepthModels(models)[0]?.id ?? "";
+}
+
 // Whether depth can run here, and why not. Both halves are required: a native lane on this platform
 // (the platform-intrinsic `imageDepth` capability — false until capabilities load, so the action is
-// never offered on a guess) and a COMPLETE install of the depth task export.
-export function depthAvailability(models, macCapabilities) {
+// never offered on a guess) and a COMPLETE install of the model that will run.
+//
+// `irisModel` is the picker's selection: "" / the release id needs the release `iris_3b_depth` task
+// export; a trained depth model id needs only THAT trained model installed (S3 — never the release).
+// Omitted (`undefined`) asks whether ANY depth model can run — the entry-point check that offers the
+// Library / Editor action at all.
+export function depthAvailability(models, macCapabilities, irisModel) {
   if (macCapabilities?.features?.imageDepth?.supported !== true) {
     const detail = macCapabilities?.features?.imageDepth?.reason?.detail;
     return { available: false, reason: detail || "Depth estimation is not available on this platform." };
   }
+  const trained = trainedDepthModels(models);
+  if (irisModel && irisModel !== DEPTH_MODEL_ID) {
+    return trained.some((model) => model.id === irisModel)
+      ? { available: true, reason: null }
+      : {
+          available: false,
+          reason: `The trained depth model ${irisModel} is not installed — pick another model or retrain it.`,
+        };
+  }
   const model = depthModel(models);
+  if (model?.installState === "installed") return { available: true, reason: null };
+  if (irisModel === undefined && trained.length) return { available: true, reason: null };
+  const alternative = trained.length ? " Or choose one of your trained depth models." : "";
   if (!model) {
-    return { available: false, reason: "Iris 3B Depth is not in the model catalog." };
+    return { available: false, reason: `Iris 3B Depth is not in the model catalog.${alternative}` };
   }
-  if (model.installState !== "installed") {
-    return {
-      available: false,
-      reason:
-        model.installState === "incomplete"
-          ? "The Iris 3B Depth install is incomplete — repair it in Models."
-          : "Install Iris 3B Depth in Models to estimate depth.",
-    };
-  }
-  return { available: true, reason: null };
+  return {
+    available: false,
+    reason:
+      (model.installState === "incomplete"
+        ? "The Iris 3B Depth install is incomplete — repair it in Models."
+        : "Install Iris 3B Depth in Models to estimate depth.") + alternative,
+  };
 }
 
 // The request's resolution choice, normalized: `native`, or `capped` with an integer max side.
@@ -130,7 +157,10 @@ export function depthAssetDetails(asset) {
     ["Resolution", resolutionLabel(pre.resolution ?? depthSettingsFromAsset(asset))],
     ["Model input", `${pre.modelWidth ?? "?"}×${pre.modelHeight ?? "?"} · in ${pre.inputResample ?? "?"} / out ${pre.outputResample ?? "?"}`],
     ["Model", `${model.id ?? DEPTH_MODEL_ID} (${model.backend ?? "?"}, ${model.computeDtype ?? "?"})`],
-    ["Weights", `${model.weightsRepo ?? "?"}@${String(model.weightsRevision ?? "?").slice(0, 12)} ${model.weightsSubdir ?? ""}`.trim()],
+    // A trained depth model's weights are its Training Studio export, never the release snapshot.
+    model.weightsSource === "training"
+      ? ["Weights", `trained ${model.trainedModelId ?? "?"} (${model.exportPath ?? "?"})`]
+      : ["Weights", `${model.weightsRepo ?? "?"}@${String(model.weightsRevision ?? "?").slice(0, 12)} ${model.weightsSubdir ?? ""}`.trim()],
     ["Config sha256", String(model.configSha256 ?? "?")],
   );
   return rows;

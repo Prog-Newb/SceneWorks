@@ -1113,6 +1113,127 @@ mod job_tests {
             .contains("never trained on"));
     }
 
+    /// S11: a warm generator (an `iris_3b` render keeps its backbone + text encoder resident for the
+    /// idle window) or a resident restoration transform is evicted BEFORE the trainer loads its own
+    /// backbone — never a second backbone on top of the first.
+    #[test]
+    fn an_iris_training_run_evicts_a_resident_generator_or_transform_before_loading() {
+        let _env = isolated_env("64");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        let resident_weights = tempfile::tempdir().unwrap();
+        let caches = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        for generator in [true, false] {
+            caches.block_on(async {
+                if generator {
+                    crate::generator_cache::load_stub_into_global_cache(resident_weights.path())
+                        .await
+                        .unwrap();
+                    assert!(crate::generator_cache::global_generator_resident()
+                        .await
+                        .is_some());
+                } else {
+                    crate::transform_cache::load_stub_into_global_cache(resident_weights.path())
+                        .await
+                        .unwrap();
+                    assert!(crate::transform_cache::global_transform_resident().await);
+                }
+            });
+            let plan = plan(&data, &install.backbone, 2, |_| {});
+            let run = run(Behavior::Completes, plan, &data);
+            assert!(run.outcome.is_ok(), "{:?}", run.outcome);
+            assert_eq!(run.seen.loads, 1);
+            let resident_after = caches.block_on(async {
+                (
+                    crate::generator_cache::global_generator_resident()
+                        .await
+                        .is_some(),
+                    crate::transform_cache::global_transform_resident().await,
+                )
+            });
+            assert_eq!(
+                resident_after,
+                (false, false),
+                "the resident {} must be evicted by the training run",
+                if generator { "generator" } else { "transform" }
+            );
+        }
+    }
+
+    /// S7: generation training needs the pinned ROOT backbone and the Qwen3-VL text encoder —
+    /// a depth/ export alone, or a backbone without its encoder, is refused typed before load.
+    #[test]
+    fn a_generation_run_without_its_backbone_or_text_encoder_is_refused_before_load() {
+        let _env = isolated_env("64");
+        let objective = sceneworks_core::training::iris::IrisObjective::Generation;
+        let config = builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.kernel == "iris_train" && target.base_model == "iris_3b")
+            .unwrap()
+            .defaults;
+
+        // Only the depth export installed: the repo exists, the generation backbone does not.
+        let only_depth = tempfile::tempdir().unwrap();
+        for file in [
+            "config.yaml",
+            "model.safetensors",
+            "empty_prompt.safetensors",
+        ] {
+            stage(
+                only_depth.path(),
+                BACKBONE_REPO,
+                BACKBONE_REVISION,
+                &format!("depth/{file}"),
+            );
+        }
+        let refusal = crate::iris_task_training::iris_training_install_refusal(
+            only_depth.path(),
+            objective,
+            &config,
+        )
+        .expect("a depth export is not a generation install");
+        assert_eq!(refusal.kind, "missing_backbone", "{refusal:?}");
+
+        // The backbone without its text encoder.
+        let no_encoder = tempfile::tempdir().unwrap();
+        for file in ["config.yaml", "model.safetensors"] {
+            stage(no_encoder.path(), BACKBONE_REPO, BACKBONE_REVISION, file);
+        }
+        let refusal = crate::iris_task_training::iris_training_install_refusal(
+            no_encoder.path(),
+            objective,
+            &config,
+        )
+        .expect("the text encoder is required");
+        assert_eq!(refusal.kind, "missing_text_encoder", "{refusal:?}");
+
+        // A full install is ready; the worker run refuses the encoder-less one before the loader.
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        assert_eq!(
+            crate::iris_task_training::iris_training_install_refusal(&data, objective, &config),
+            None
+        );
+        let encoder_repo = install.text_encoder.parent().unwrap().parent().unwrap();
+        std::fs::remove_dir_all(encoder_repo).unwrap();
+        let plan = plan(&data, &install.backbone, 2, |_| {});
+        let run = run(Behavior::Completes, plan, &data);
+        match &run.outcome {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("text encoder"), "{message}")
+            }
+            other => panic!("an encoder-less install must be refused, got {other:?}"),
+        }
+        assert_eq!(run.seen.loads, 0, "refused before the loader ran");
+    }
+
     /// A host under the declared floor is refused BEFORE the loader runs; nothing is written.
     #[test]
     fn a_host_under_the_declared_floor_is_refused_before_load() {

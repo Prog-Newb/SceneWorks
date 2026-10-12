@@ -38,6 +38,7 @@ impl Drop for IrisEnv {
 /// sc-25681, owns that declaration); stand that in so the training guardrail is satisfied.
 pub(super) fn seed_iris_install(settings: &Settings) {
     seed_installed_training_base(&settings.data_dir, "iris_3b");
+    seed_iris_generation_files(&settings.data_dir, true, true);
     let manifests = settings.config_dir.join("manifests");
     std::fs::create_dir_all(&manifests).expect("manifest dir");
     std::fs::write(
@@ -54,6 +55,69 @@ pub(super) fn seed_iris_install(settings: &Settings) {
         .unwrap(),
     )
     .expect("user models manifest");
+}
+
+const IRIS_BACKBONE_REPO: &str = "speridlabs/iris-3b";
+const IRIS_BACKBONE_REVISION: &str = "7445443349bc9abe3c96f01ff793e2098ca012b3";
+const IRIS_TE_REPO: &str = "Qwen/Qwen3-VL-4B-Instruct";
+const IRIS_TE_REVISION: &str = "ebb281ec70b05090aa6165b016eac8ec08e71b17";
+const IRIS_RELEASE_CONFIG: &str =
+    include_str!("../../../../crates/sceneworks-worker/tests/fixtures/iris/config.yaml");
+
+fn iris_snapshot_file(data_dir: &std::path::Path, repo: &str, revision: &str, file: &str) {
+    let root = sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir, repo).unwrap();
+    let path = root.join("snapshots").join(revision).join(file);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(root.join("refs")).unwrap();
+    std::fs::write(root.join("refs").join("main"), revision).unwrap();
+    let bytes: &[u8] = if file == "config.yaml" {
+        IRIS_RELEASE_CONFIG.as_bytes()
+    } else {
+        b"x"
+    };
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// The generation install's pinned files, per task resource (S7): the ROOT backbone
+/// (`config.yaml` + `model.safetensors` at the pinned revision) and/or the Qwen3-VL text encoder.
+pub(super) fn seed_iris_generation_files(
+    data_dir: &std::path::Path,
+    backbone: bool,
+    text_encoder: bool,
+) {
+    if backbone {
+        for file in ["config.yaml", "model.safetensors"] {
+            iris_snapshot_file(data_dir, IRIS_BACKBONE_REPO, IRIS_BACKBONE_REVISION, file);
+        }
+    }
+    if text_encoder {
+        for file in [
+            "config.json",
+            "generation_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-00001-of-00002.safetensors",
+        ] {
+            iris_snapshot_file(data_dir, IRIS_TE_REPO, IRIS_TE_REVISION, file);
+        }
+    }
+}
+
+/// The depth task export alone (`depth/` of the pinned repo) — not a generation install.
+pub(super) fn seed_iris_depth_export_only(data_dir: &std::path::Path) {
+    for file in [
+        "config.yaml",
+        "model.safetensors",
+        "empty_prompt.safetensors",
+    ] {
+        iris_snapshot_file(
+            data_dir,
+            IRIS_BACKBONE_REPO,
+            IRIS_BACKBONE_REVISION,
+            &format!("depth/{file}"),
+        );
+    }
 }
 
 pub(super) async fn project(app: &axum::Router) -> String {
@@ -134,6 +198,105 @@ pub(super) async fn submit(
 
 fn one_item() -> Value {
     json!([{ "caption": { "text": "a red square" } }])
+}
+
+/// S7: generation training is judged on ITS OWN install — the pinned root backbone and the Qwen3-VL
+/// text encoder — at plan-check and at submit, with typed refusals. A depth export alone (which the
+/// repo-wide marker counted as installed) and an encoder without its backbone are both refused.
+#[tokio::test]
+async fn iris_generation_training_needs_its_own_backbone_and_text_encoder() {
+    let _env = iris_env("256");
+    let temp_dir = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).unwrap();
+    // The adapter-family guardrail is satisfied, and the repo-wide marker says "installed".
+    seed_installed_training_base(&settings.data_dir, "iris_3b");
+    let manifests = settings.config_dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("user.models.jsonc"),
+        serde_json::to_vec_pretty(&json!({ "models": [{
+            "id": "iris_adapter_host", "name": "Iris adapter host", "type": "image",
+            "family": "iris", "loraCompatibility": { "families": ["iris"], "types": ["lora"] }
+        }] }))
+        .unwrap(),
+    )
+    .unwrap();
+    let project_id = project(&app).await;
+    let dataset_id = dataset(&app, &project_id, one_item()).await;
+    let defaults = iris_target(&app).await["defaults"].clone();
+    let refusal_kind = |app: axum::Router, config: Value| async move {
+        let (status, check) = request(
+            app,
+            "POST",
+            "/api/v1/training/iris/plan-check",
+            json!({ "targetId": IRIS_TARGET, "config": config }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{check}");
+        check["refusal"]["kind"].clone()
+    };
+
+    // Only the depth export installed.
+    seed_iris_depth_export_only(&settings.data_dir);
+    assert_eq!(
+        refusal_kind(app.clone(), defaults.clone()).await,
+        "missing_backbone"
+    );
+    let (status, error) = submit(&app, &project_id, &dataset_id, defaults.clone(), false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "iris_training_refused", "{error}");
+    assert_eq!(error["context"]["kind"], "missing_backbone", "{error}");
+
+    // The backbone deleted, the encoder kept.
+    seed_iris_generation_files(&settings.data_dir, false, true);
+    let (status, error) = submit(&app, &project_id, &dataset_id, defaults.clone(), false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["context"]["kind"], "missing_backbone", "{error}");
+
+    // The backbone without its encoder: a fresh data dir.
+    let bare_dir = tempfile::tempdir().unwrap();
+    let bare_settings = test_settings(&bare_dir);
+    let bare_app = create_app(bare_settings.clone()).unwrap();
+    seed_installed_training_base(&bare_settings.data_dir, "iris_3b");
+    std::fs::create_dir_all(bare_settings.config_dir.join("manifests")).unwrap();
+    std::fs::copy(
+        manifests.join("user.models.jsonc"),
+        bare_settings
+            .config_dir
+            .join("manifests")
+            .join("user.models.jsonc"),
+    )
+    .unwrap();
+    seed_iris_generation_files(&bare_settings.data_dir, true, false);
+    assert_eq!(
+        refusal_kind(bare_app.clone(), defaults.clone()).await,
+        "missing_text_encoder"
+    );
+    let bare_project = project(&bare_app).await;
+    let bare_dataset = dataset(&bare_app, &bare_project, one_item()).await;
+    let (status, error) = submit(
+        &bare_app,
+        &bare_project,
+        &bare_dataset,
+        defaults.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["context"]["kind"], "missing_text_encoder", "{error}");
+
+    // Both installed: the install check passes (whatever the plan check says next is not an
+    // install refusal).
+    seed_iris_generation_files(&settings.data_dir, true, true);
+    let kind = refusal_kind(app.clone(), defaults.clone()).await;
+    assert!(
+        !matches!(
+            kind.as_str(),
+            Some("missing_backbone" | "missing_text_encoder")
+        ),
+        "{kind}"
+    );
 }
 
 /// Every refusal the trainer would raise after load is a 400 at submit — typed for the advertised
@@ -326,6 +489,74 @@ pub(super) async fn complete(
     .await;
     assert_eq!(code, StatusCode::OK, "{body}");
     body
+}
+
+/// S9a: every fresh submit mints its own output folder, and a retry / duplicate (which copies the
+/// plan, output folder included) of a run that already saved checkpoints is refused typed instead of
+/// starting a fresh run on top of them. A run that wrote nothing retries as before.
+#[tokio::test]
+async fn an_iris_rerun_never_starts_fresh_on_top_of_saved_checkpoints() {
+    let _env = iris_env("256");
+    let temp_dir = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).unwrap();
+    seed_iris_install(&settings);
+    let project_id = project(&app).await;
+    let dataset_id = dataset(&app, &project_id, one_item()).await;
+    let config = iris_target(&app).await["defaults"].clone();
+
+    let (_, first) = submit(&app, &project_id, &dataset_id, config.clone(), false).await;
+    let (_, second) = submit(&app, &project_id, &dataset_id, config.clone(), false).await;
+    let output_dir = |job: &Value| {
+        std::path::PathBuf::from(
+            job["payload"]["plan"]["output"]["outputDir"]
+                .as_str()
+                .unwrap(),
+        )
+    };
+    assert_ne!(
+        output_dir(&first),
+        output_dir(&second),
+        "each fresh run gets its own output folder"
+    );
+
+    // The first run saved a checkpoint, then failed.
+    let job_id = first["id"].as_str().unwrap().to_owned();
+    claim_training_job_as_mlx_worker(&app, &job_id).await;
+    let stem = first["payload"]["plan"]["output"]["fileName"]
+        .as_str()
+        .unwrap()
+        .trim_end_matches(".safetensors")
+        .to_owned();
+    let checkpoint = output_dir(&first).join(format!("{stem}.checkpoints/step_00000002"));
+    std::fs::create_dir_all(&checkpoint).unwrap();
+    std::fs::write(checkpoint.join("state.json"), b"{}").unwrap();
+    complete(&app, &job_id, "failed", json!({})).await;
+    for action in ["retry", "duplicate"] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{action}"),
+            json!({ "payloadChanges": {} }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{action}: {error}");
+        assert_eq!(error["code"], "iris_training_refused", "{error}");
+        assert_eq!(error["context"]["kind"], "output_in_use", "{error}");
+    }
+
+    // A run that wrote nothing retries as before.
+    let clean_id = second["id"].as_str().unwrap().to_owned();
+    claim_training_job_as_mlx_worker(&app, &clean_id).await;
+    complete(&app, &clean_id, "failed", json!({})).await;
+    let (status, retried) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{clean_id}/retry"),
+        json!({ "payloadChanges": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{retried}");
 }
 
 /// A LoRA run's adapter registers as an Iris generation adapter with its task identity; per-item
@@ -779,6 +1010,7 @@ async fn a_trained_iris_adapter_is_accepted_by_the_iris_image_job_gate() {
     // The catalog is the SHIPPED `iris_3b` row alone — no stand-in adapter host: its
     // `loraCompatibility` must satisfy both the training family guardrail and the image-job gate.
     seed_installed_training_base(&settings.data_dir, "iris_3b");
+    seed_iris_generation_files(&settings.data_dir, true, true);
     let manifests = settings.config_dir.join("manifests");
     std::fs::create_dir_all(&manifests).expect("manifest dir");
     let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(

@@ -570,6 +570,8 @@ struct JobSetup {
     orientation: Option<u16>,
     resolution: Value,
     resident: Option<Resident>,
+    /// Run a TRAINED depth model of this id (staged under `models/finetunes/<id>/depth`).
+    trained: Option<&'static str>,
 }
 
 impl Default for JobSetup {
@@ -583,6 +585,7 @@ impl Default for JobSetup {
             orientation: Some(6),
             resolution: json!({ "mode": "capped", "maxSide": 1024 }),
             resident: None,
+            trained: None,
         }
     }
 }
@@ -600,6 +603,23 @@ fn run_job(setup: JobSetup) -> JobRun {
     let data = tempfile::tempdir().unwrap();
     let project_dir = tempfile::tempdir().unwrap();
     stage_export(data.path(), setup.stage, TINY_DEPTH_CONFIG);
+    if let Some(model) = setup.trained {
+        let dir = data
+            .path()
+            .join("models")
+            .join("finetunes")
+            .join(model)
+            .join("depth");
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in DEPTH_EXPORT_FILES {
+            let bytes = if file == BACKBONE_CONFIG_FILE {
+                TINY_DEPTH_CONFIG.as_bytes().to_vec()
+            } else {
+                crate::iris_test_weights::task_weights(IrisTask::Depth)
+            };
+            std::fs::write(dir.join(file), bytes).unwrap();
+        }
+    }
 
     // A real project with a real (EXIF-rotated) source image asset.
     let store = ProjectStore::new(data.path().to_path_buf(), "test");
@@ -667,6 +687,15 @@ fn run_job(setup: JobSetup) -> JobRun {
         .as_object()
         .cloned()
         .unwrap();
+        if let Some(model) = setup.trained {
+            // The API attaches the trained model's OWN catalog entry (its engine's depth
+            // declaration overlaid) in place of the release entry (S6).
+            let mut trained_entry = shipped_depth_entry();
+            trained_entry["id"] = json!(model);
+            job.payload.insert("irisModel".to_owned(), json!(model));
+            job.payload
+                .insert("modelManifestEntries".to_owned(), json!([trained_entry]));
+        }
         let loader_loads = Arc::clone(&loads);
         let loader_seen = Arc::clone(&seen);
         let behavior = setup.behavior;
@@ -706,6 +735,46 @@ fn run_job(setup: JobSetup) -> JobRun {
         data_dir: data,
         _project_dir: project_dir,
     }
+}
+
+/// S5: a TRAINED depth model's run records the trained identity everywhere lineage is read — the
+/// asset, the job result and its generation set name the trained id, and the depth model block names
+/// the training export (no release repo/revision) — and it runs with NO release install staged.
+#[test]
+fn a_trained_depth_run_records_the_trained_identity_not_the_release_weights() {
+    let run = run_job(JobSetup {
+        stage: &[],
+        trained: Some("my_depth_run"),
+        ..JobSetup::default()
+    });
+    run.outcome
+        .as_ref()
+        .expect("the trained depth job succeeds");
+    let last = run.posts.last().unwrap();
+    assert_eq!(last["result"]["model"], "my_depth_run", "{last:#}");
+    assert_eq!(last["result"]["generationSet"]["model"], "my_depth_run");
+    let fact = run.completed_fact();
+    assert_eq!(fact["model"], "my_depth_run");
+    let lineage = &fact["depth"]["model"];
+    assert_eq!(lineage["trainedModelId"], "my_depth_run");
+    assert_eq!(lineage["weightsSource"], "training");
+    assert_eq!(lineage["weightsRepo"], Value::Null, "{lineage:#}");
+    assert_eq!(lineage["weightsRevision"], Value::Null);
+    assert_eq!(lineage["weightsSubdir"], Value::Null);
+    assert_eq!(lineage["exportPath"], "models/finetunes/my_depth_run/depth");
+
+    // The release run keeps the release identity.
+    let release = run_job(JobSetup::default());
+    release
+        .outcome
+        .as_ref()
+        .expect("the release depth job succeeds");
+    let last = release.posts.last().unwrap();
+    assert_eq!(last["result"]["model"], DEPTH_MODEL_ID);
+    assert_eq!(last["result"]["generationSet"]["model"], DEPTH_MODEL_ID);
+    let lineage = &release.completed_fact()["depth"]["model"];
+    assert_eq!(lineage["weightsRepo"], UPSTREAM_WEIGHTS_REPO);
+    assert!(lineage.get("weightsSource").is_none());
 }
 
 #[test]

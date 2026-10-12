@@ -10757,6 +10757,75 @@ fn inline_upscaled_asset_links_back_to_base_for_library_fold() {
     );
 }
 
+/// E6: an inline Iris post-process whose input was budget-downscaled is NOT `scale×` of the render,
+/// so its filename must never claim `_iris4x` — it names the budgeted output geometry. A within-budget
+/// restore keeps the `iris{scale}x` tag.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn inline_iris_restore_of_a_budget_downscaled_render_is_not_named_4x() {
+    use sceneworks_core::image_restoration::{IrisRestoreParams, RestoreInputSizing};
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    let req = request(json!({
+        "projectId": "p", "model": "iris_3b", "prompt": "Mist over hills",
+        "count": 1, "width": 2048, "height": 1536, "seed": 7,
+    }));
+    let plan = ImagePlan::new(&req);
+    let base_fact = write_image_asset(
+        &plan,
+        0,
+        7,
+        64,
+        48,
+        stub_rgb8(64, 48, 7),
+        STUB_ADAPTER,
+        stub_raw_settings(&req),
+        project_path,
+    )
+    .unwrap();
+    for (width, height, expect_budgeted) in [(2048, 1536, true), (512, 384, false)] {
+        let restore = crate::iris_restore::tests::plan_for(
+            width,
+            height,
+            IrisRestoreParams {
+                scale: Some(4.0),
+                input_sizing: RestoreInputSizing::Budgeted,
+                color_fix: None,
+            },
+        );
+        assert_eq!(restore.budget_applied, expect_budgeted);
+        let out = image::RgbImage::new(restore.output.width, restore.output.height);
+        let fact = write_upscaled_asset(
+            &plan,
+            &base_fact,
+            &out,
+            None,
+            sceneworks_core::image_restoration::IRIS_RESTORE_ENGINE,
+            0,
+            0.0,
+            Some((&restore, None)),
+            project_path,
+        )
+        .unwrap();
+        let media = fact["mediaPath"].as_str().unwrap();
+        if expect_budgeted {
+            assert!(!media.contains("iris4x"), "{media}");
+            assert!(
+                media.ends_with(&format!(
+                    "_iris_budgeted_{}x{}.png",
+                    restore.output.width, restore.output.height
+                )),
+                "{media}"
+            );
+        } else {
+            assert!(media.ends_with("_iris4x.png"), "{media}");
+        }
+    }
+}
+
 /// F-003 / sc-11159: the upscaled variant builds its own `_up{factor}x.png` filename from the
 /// same payload model id, so it must be confined identically to the base PNG.
 #[cfg(any(

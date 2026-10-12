@@ -1712,15 +1712,23 @@ pub(crate) async fn create_training_job(
     // Iris depth / restoration (sc-25687 / sc-25688): a task run needs its own task export (and, for
     // restoration, the pinned training-only resources), not the shared repo's generation files — so
     // availability is judged per resource, not off the repo-level install marker.
+    // Iris GENERATION is judged per task resource too (S7): the root backbone at the pinned
+    // revision AND the Qwen3-VL text encoder — never the repo-wide marker, which any depth/ or
+    // upscaler/ file satisfies. Every Iris refusal is typed (`iris_training_refused` + `kind`, S8).
     let iris_task = sceneworks_worker::iris_task_objective(&target.kernel, &target.base_model);
+    let iris_objective = sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel)
+        .then(|| {
+            sceneworks_core::training::iris::IrisObjective::from_base_model(&target.base_model)
+        })
+        .flatten();
     if !payload.dry_run {
-        if let Some(objective) = iris_task {
-            if let Some(message) = sceneworks_worker::iris_task_training_unavailable(
+        if let Some(objective) = iris_objective {
+            if let Some(refusal) = sceneworks_worker::iris_training_install_refusal(
                 &data_dir,
                 objective,
                 &payload.config,
             ) {
-                return Err(ApiError::bad_request(message));
+                return Err(crate::iris_curricula::iris_install_refused(refusal));
             }
         } else if let Some(message) = training_base_unavailable_message(
             training_base_model_status(&data_dir, target),

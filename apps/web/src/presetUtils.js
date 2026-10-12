@@ -261,11 +261,15 @@ export function loraMatchesModel(lora, model) {
   // apart. A model declaring `loraCompatibility.irisTask` is offered only adapters whose recorded
   // `irisTask` stamp matches (an unstamped adapter is never offered — the API would refuse it), and
   // whose recorded base model, if any, is this model.
+  // A trained full Iris checkpoint is listed under its own id but RUNS on its engine (the API aliases
+  // it onto `iris_3b` before the adapter gate), so an adapter's recorded base is compared with that
+  // engine id — a `baseModel: iris_3b` adapter is offered for the trained checkpoint too.
   const irisTask = model?.loraCompatibility?.irisTask;
   if (irisTask) {
     if (lora?.irisTask !== irisTask) return false;
     const base = lora?.baseModel ?? lora?.base_model;
-    if (base && model?.id && base !== model.id) return false;
+    const engineId = model?.trainedCheckpoint?.engineModel ?? model?.id;
+    if (base && engineId && base !== engineId) return false;
   }
   const declaredModelIds = loraModelIds(lora);
   if (declaredModelIds.length && model?.id && !declaredModelIds.includes(model.id)) {

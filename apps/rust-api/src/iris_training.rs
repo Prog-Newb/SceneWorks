@@ -169,6 +169,64 @@ pub(crate) async fn trusted_previous_output_dir(
     )
 }
 
+/// A retry / duplicate copies a training job's plan verbatim — its output directory and output id
+/// included. A fresh Iris run never reuses a directory (each submit mints its own output id), but a
+/// rerun of a run that already saved checkpoints or an export would start a FRESH run on top of
+/// them: the trainer refuses that (it would mix two runs' checkpoints), and a duplicate would
+/// re-register over the original's output. Refused typed BEFORE a job exists; resume / new phase
+/// (Training Studio) is how a run is continued. A run that wrote nothing reruns as before.
+pub(crate) async fn refuse_iris_rerun_into_used_output(
+    state: &AppState,
+    job: &JobSnapshot,
+) -> Result<(), ApiError> {
+    if !matches!(job.job_type, JobType::LoraTrain) {
+        return Ok(());
+    }
+    let Some(plan) = job
+        .payload
+        .get("plan")
+        .cloned()
+        .and_then(|plan| serde_json::from_value::<TrainingPlan>(plan).ok())
+    else {
+        return Ok(());
+    };
+    if !is_iris_training_kernel(&plan.target.kernel) {
+        return Ok(());
+    }
+    let Ok(output_dir) = trusted_previous_output_dir(state, job).await else {
+        return Ok(());
+    };
+    let Some(stem) = file_stem(&plan.output.file_name) else {
+        return Ok(());
+    };
+    let checkpoints = output_dir.join(format!("{stem}.checkpoints"));
+    let has_checkpoints = std::fs::read_dir(&checkpoints)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    let has_export =
+        output_dir.join(&stem).exists() || output_dir.join(&plan.output.file_name).exists();
+    if !(has_checkpoints || has_export) {
+        return Ok(());
+    }
+    let message = format!(
+        "Training run {} already saved {} in its output folder; a retry or duplicate would start a \
+         fresh run on top of it. Resume it (or start a new phase from it) in the Training Studio, \
+         or submit a new run.",
+        job.id,
+        if has_checkpoints {
+            "checkpoints"
+        } else {
+            "an export"
+        }
+    );
+    Err(ApiError::typed(
+        StatusCode::BAD_REQUEST,
+        message.clone(),
+        "iris_training_refused",
+        json!({ "kind": "output_in_use", "message": message }),
+    ))
+}
+
 /// A complete checkpoint (`step_XXXXXXXX/state.json`) under a run's checkpoint root, newest first.
 fn newest_complete_checkpoint(root: &FsPath) -> Option<PathBuf> {
     let mut steps: Vec<(u64, PathBuf)> = std::fs::read_dir(root)

@@ -692,12 +692,17 @@ async fn iris_training_gpu_smoke_depth() {
     );
     let depth_job_id = "iris-depth-trained-job";
     let mut snapshot = stub_job_snapshot(depth_job_id, "image_depth", &project.id);
+    let mut trained_entry =
+        crate::training_jobs::builtin_model_manifest_entry("iris_3b_depth").unwrap();
+    trained_entry["id"] = json!(model_id);
     snapshot["payload"] = json!({
         "projectId": project.id,
         "sourceAssetId": source,
         "resolution": { "mode": "capped", "maxSide": 256 },
         "irisModel": model_id,
-        "modelManifestEntries": [crate::training_jobs::builtin_model_manifest_entry("iris_3b_depth").unwrap()],
+        // The API attaches the trained model's own entry (its engine's depth declaration
+        // overlaid) in place of the release entry.
+        "modelManifestEntries": [trained_entry],
     });
     let job: JobSnapshot = serde_json::from_value(snapshot).unwrap();
     crate::depth_jobs::run_image_depth_job(&api, &settings, &job)

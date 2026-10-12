@@ -406,6 +406,7 @@ pub(crate) async fn retry_job(
     request: AxumRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     let mut payload = retry_job_request_from_body(request).await?;
+    refuse_iris_training_rerun(&state, &job_id).await?;
     if let Some(job) = crate::generation::replay_vector_prompt_workflow(
         state.clone(),
         &job_id,
@@ -438,6 +439,21 @@ pub(crate) async fn retry_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
+/// An Iris training rerun (retry / duplicate) whose source run already wrote checkpoints or an export
+/// into the output folder the rerun would reuse is refused typed (S9a); every other job is untouched.
+async fn refuse_iris_training_rerun(state: &AppState, job_id: &str) -> Result<(), ApiError> {
+    let source = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await;
+    match source {
+        Ok(job) => crate::iris_training::refuse_iris_rerun_into_used_output(state, &job).await,
+        // A missing job is the store's own 404 on the retry/duplicate below.
+        Err(_) => Ok(()),
+    }
+}
+
 async fn retry_job_request_from_body(request: AxumRequest) -> Result<RetryJobRequest, ApiError> {
     let bytes = to_bytes(request.into_body(), 1024 * 1024)
         .await
@@ -456,6 +472,7 @@ pub(crate) async fn duplicate_job(
     Path(job_id): Path<String>,
     ApiJson(mut payload): ApiJson<DuplicateJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    refuse_iris_training_rerun(&state, &job_id).await?;
     if let Some(job) = crate::generation::replay_vector_prompt_workflow(
         state.clone(),
         &job_id,

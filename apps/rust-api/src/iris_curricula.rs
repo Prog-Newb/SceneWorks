@@ -24,7 +24,7 @@ use sceneworks_core::training::iris::curricula::{
     IRIS_REPA_TEACHER_REPO, IRIS_REPA_TEACHER_REVISION, IRIS_STAGES,
 };
 use sceneworks_core::training::iris::{
-    iris_options, is_iris_training_kernel, IRIS_OPTIONS_KEY, RESUME_FROM_JOB_KEY,
+    iris_options, is_iris_training_kernel, IrisObjective, IRIS_OPTIONS_KEY, RESUME_FROM_JOB_KEY,
 };
 use sceneworks_core::training::{TrainingConfig, TrainingPlan, TrainingTarget};
 
@@ -49,10 +49,41 @@ fn iris_target(target_id: &str) -> Result<TrainingTarget, ApiError> {
         })
 }
 
+/// The objective of an Iris target.
+fn target_objective(target: &TrainingTarget) -> Option<IrisObjective> {
+    IrisObjective::from_base_model(&target.base_model)
+}
+
+/// The typed install refusal of an Iris target's run (S7/S8): what it needs that is not installed,
+/// judged per task resource (`None` = ready).
+fn install_refusal(
+    state: &AppState,
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Option<sceneworks_worker::IrisInstallRefusal> {
+    target_objective(target).and_then(|objective| {
+        sceneworks_worker::iris_training_install_refusal(
+            &state.settings.data_dir,
+            objective,
+            config,
+        )
+    })
+}
+
+/// An Iris install refusal as the typed `iris_training_refused` API error.
+pub(crate) fn iris_install_refused(refusal: sceneworks_worker::IrisInstallRefusal) -> ApiError {
+    refused(refusal.kind, refusal.message)
+}
+
 /// The installed backbone directory of an Iris target when its `config.yaml` is present (the engine
-/// resolution reads it); `None` when the base is not installed.
+/// resolution reads it); `None` when the base is not installed. Generation reads the pinned
+/// generation backbone itself (root `config.yaml` + `model.safetensors`), never the repo-level
+/// marker a task export satisfies (S7).
 fn installed_backbone(state: &AppState, target: &TrainingTarget) -> Option<PathBuf> {
     let data_dir = &state.settings.data_dir;
+    if target_objective(target) == Some(IrisObjective::Generation) {
+        return sceneworks_worker::iris_generation_backbone_dir(data_dir);
+    }
     if !matches!(
         crate::training::training_base_model_status(data_dir, target),
         crate::training::TrainingBaseStatus::Ready
@@ -149,6 +180,13 @@ pub(crate) async fn iris_plan_check(
         sceneworks_core::training::validate_training_config_for_target(&target, &config)
     {
         first_refusal = Some(refusal("invalid", error.to_string()));
+    }
+    // The run's own install (S7): a missing backbone / text encoder / task export is a typed
+    // refusal here, so the engine resolution below never silently skips for want of a backbone.
+    if first_refusal.is_none() {
+        if let Some(missing) = install_refusal(&state, &target, &config) {
+            first_refusal = Some(refusal(missing.kind, missing.message));
+        }
     }
     if first_refusal.is_none()
         && iris_repa_enabled(&options)
@@ -339,6 +377,13 @@ pub(crate) async fn check_iris_submit(
                      the backbone's optimizer state without the projector."
                 ),
             ));
+        }
+    }
+
+    // ---- the run's own install (S7): typed, before the engine resolution needs the backbone -------
+    if !dry_run {
+        if let Some(missing) = install_refusal(state, target, &plan.config) {
+            return Err(iris_install_refused(missing));
         }
     }
 

@@ -36,6 +36,24 @@ export function batchPromptBudgetMessage(overages = []) {
   } the character limit — shorten the prompt or pick a shorter style.`;
 }
 
+// The Iris restoration post-processing gate (sc-25683), shared by Generate and the batch Run: a
+// refused plan blocks with its reason (the request is never silently changed); a still-loading
+// preview is a silent requirement. `restorePlan` is null when no Iris pass is selected.
+function restorePlanIssues(restorePlan) {
+  if (restorePlan?.blocked) {
+    return [
+      issue.error(
+        "upscale",
+        restorePlan.error ? `Iris restoration cannot run: ${restorePlan.error}` : "Iris restoration cannot run as set.",
+      ),
+    ];
+  }
+  if (restorePlan && !restorePlan.ready) {
+    return [issue.requirement("upscale", "Planning the Iris restoration…")];
+  }
+  return [];
+}
+
 // Single-image Generate. The conditions whose message already has a home stay OUT of
 // here and remain plain gates in the button's `disabled` expression:
 //   - a structured caption's field errors are listed inside StructuredPromptBuilder;
@@ -83,16 +101,7 @@ export function imageGenerateValidation({
   if (!activeProject) {
     issues.push(issue.requirement("project", "Open a project to generate"));
   }
-  if (restorePlan?.blocked) {
-    issues.push(
-      issue.error(
-        "upscale",
-        restorePlan.error ? `Iris restoration cannot run: ${restorePlan.error}` : "Iris restoration cannot run as set.",
-      ),
-    );
-  } else if (restorePlan && !restorePlan.ready) {
-    issues.push(issue.requirement("upscale", "Planning the Iris restoration…"));
-  }
+  issues.push(...restorePlanIssues(restorePlan));
   // A structured model needs caption content; everyone else a plain prompt. Both are
   // "you haven't written it yet" — silent, the empty field speaks for itself.
   if (structuredActive) {
@@ -183,11 +192,16 @@ export function imageBatchValidation({
   // global 256–4096 / no-stride envelope. Defaults to that global envelope for callers with no model.
   dimensionConstraints = { min: MIN_IMAGE_DIMENSION, max: MAX_IMAGE_DIMENSION, step: 1 },
   decoderCapabilitiesPending = false,
+  // The Iris restoration post-processing plan status for EVERY distinct render size of the batch
+  // (each prompt's own [WxH] directive or the Studio size), else null — a batch whose prompts would
+  // be refused after their base image renders never starts.
+  restorePlan = null,
 } = {}) {
   const issues = [];
   if (!activeProject) {
     issues.push(issue.requirement("project", "Open a project to run a batch"));
   }
+  issues.push(...restorePlanIssues(restorePlan));
   if (batchStructuredExpandBlocked) {
     issues.push(
       issue.error(

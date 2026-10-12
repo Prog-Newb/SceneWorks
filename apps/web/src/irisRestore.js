@@ -75,6 +75,24 @@ export function restorePlanBodyForSize({ width, height, ...controls }) {
   return { ...irisRestoreControls(controls), width: Number(width), height: Number(height) };
 }
 
+// The plan body for a Studio render pass: the Studio size, or — for a prompt batch whose prompts
+// carry their own [WxH] directives (`resolutions`, null for a prompt without one) — every DISTINCT
+// render size, so the gate covers each render the batch will restore, not only the Studio default.
+// Without plan-able dimensions there is nothing to plan (null).
+export function restorePlanBodyForRenders({ width, height, resolutions = [] } = {}) {
+  const studio = Number(width) > 0 && Number(height) > 0 ? { width: Number(width), height: Number(height) } : null;
+  const sizes = new Map();
+  for (const resolution of resolutions.length ? resolutions : [null]) {
+    const size = resolution && Number(resolution.width) > 0 && Number(resolution.height) > 0
+      ? { width: Number(resolution.width), height: Number(resolution.height) }
+      : studio;
+    if (!size) return null;
+    sizes.set(`${size.width}x${size.height}`, size);
+  }
+  const distinct = [...sizes.values()];
+  return distinct.length === 1 ? distinct[0] : { sizes: distinct };
+}
+
 export function restorePlanBodyForAssets({ projectId, assetIds, ...controls }) {
   return { ...irisRestoreControls(controls), projectId, assetIds: [...(assetIds ?? [])] };
 }

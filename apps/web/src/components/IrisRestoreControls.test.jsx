@@ -58,6 +58,36 @@ describe("IrisRestoreControls (sc-25683)", () => {
     expect(onStatus).toHaveBeenLastCalledWith({ ready: true, blocked: false, error: null });
   });
 
+  // S9b / S2: the selected trained model plans with its own export geometry, and a batch's distinct
+  // render sizes plan together.
+  it("plans with the selected trained model and every batch render size", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue(
+      planResponse([
+        { assetId: null, plan: { summary: "a" }, error: null },
+        { assetId: null, plan: null, error: "output 6144x10752 exceeds 8192" },
+      ]),
+    );
+    const onStatus = vi.fn();
+    await act(async () =>
+      root.render(
+        <Harness
+          initial={{ scale: 8, inputSizing: "original", colorFix: true, irisModel: "my_restore" }}
+          onStatus={onStatus}
+          planBody={{ sizes: [{ width: 512, height: 384 }, { width: 768, height: 1344 }] }}
+        />,
+      ),
+    );
+    await settle();
+    expect(JSON.parse(fetchMock.mock.calls.at(-1)[1].body)).toEqual({
+      sizes: [{ width: 512, height: 384 }, { width: 768, height: 1344 }],
+      scale: 8,
+      inputSizing: "original",
+      colorFix: true,
+      irisModel: "my_restore",
+    });
+    expect(onStatus).toHaveBeenLastCalledWith({ ready: false, blocked: true, error: "output 6144x10752 exceeds 8192" });
+  });
+
   it("re-plans when a control changes (1× restore-only, original input, colour fix off)", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue(
       planResponse([{ assetId: null, plan: { summary: "1× restore: 512x384 → 512x384 (processed at 1376x1024 in 2 tiles)" }, error: null }]),

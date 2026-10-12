@@ -205,6 +205,41 @@ describe("BatchOperationsPanel (sc-6112)", () => {
     expect(onRun).toHaveBeenLastCalledWith("depth", { resolution: { mode: "native" } });
   });
 
+  // S3: a trained depth model runs without the release install — Run follows the SELECTED model.
+  it("gates depth Run on the selected model, so a trained depth model needs no release install", async () => {
+    const onRun = vi.fn();
+    const depthAvailabilityFor = (irisModel) =>
+      irisModel === "my_depth"
+        ? { available: true, reason: null }
+        : { available: false, reason: "Install Iris 3B Depth in Models to estimate depth." };
+    await mount({
+      onRun,
+      initialOp: "depth",
+      depthAvailability: { available: true, reason: null },
+      depthAvailabilityFor,
+      defaultDepthModel: "my_depth",
+    });
+    expect(runButton().disabled).toBe(false);
+    await act(async () => runButton().click());
+    expect(onRun).toHaveBeenLastCalledWith("depth", {
+      resolution: { mode: "capped", maxSide: 1024 },
+      irisModel: "my_depth",
+    });
+
+    // A fresh panel (the picker's state starts from `defaultDepthModel`).
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await mount({
+      onRun,
+      initialOp: "depth",
+      depthAvailability: { available: true, reason: null },
+      depthAvailabilityFor,
+      defaultDepthModel: "",
+    });
+    expect(document.body.textContent).toContain("Install Iris 3B Depth in Models to estimate depth.");
+    expect(runButton().disabled).toBe(true);
+  });
+
   it("opens directly on the depth op for a single-asset action", async () => {
     await mount({ initialOp: "depth", depthAvailability: { available: true, reason: null } });
     expect(tab("Depth map").getAttribute("aria-pressed")).toBe("true");

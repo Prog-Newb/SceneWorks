@@ -90,6 +90,58 @@ async fn plan_preview_by_size_uses_the_engine_planner_and_labels_budgets_honestl
         .contains("16128x12096"));
 }
 
+/// S2: a Studio prompt batch whose prompts carry their own `[WxH]` directives plans EVERY distinct
+/// render size in one call, so the Run gate sees the size the worker would refuse (768x1344 at 8x
+/// original sizing is 6144x10752 — over the per-side bound) instead of only the Studio default.
+#[tokio::test]
+async fn plan_preview_by_sizes_plans_every_batch_render_size() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image-restoration/plan",
+        json!({
+            "sizes": [{ "width": 512, "height": 384 }, { "width": 768, "height": 1344 }],
+            "scale": 8,
+            "inputSizing": "original",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        items[0]["plan"]["output"],
+        json!({ "width": 4096, "height": 3072 })
+    );
+    assert_eq!(items[0]["error"], Value::Null);
+    assert_eq!(items[1]["plan"], Value::Null);
+    assert!(
+        items[1]["error"].as_str().unwrap().contains("6144x10752"),
+        "{body}"
+    );
+}
+
+/// S9b: a trained restoration model that is not installed is the job's refusal on every item —
+/// never a silent plan with the release geometry.
+#[tokio::test]
+async fn plan_preview_with_a_missing_trained_model_is_refused_per_item() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image-restoration/plan",
+        json!({ "width": 512, "height": 384, "irisModel": "absent-restore-run" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"][0]["plan"], Value::Null);
+    let error = body["items"][0]["error"].as_str().unwrap();
+    assert!(error.contains("absent-restore-run"), "{error}");
+}
+
 #[tokio::test]
 async fn plan_preview_rejects_malformed_controls_and_ambiguous_sources() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -103,6 +155,10 @@ async fn plan_preview_rejects_malformed_controls_and_ambiguous_sources() {
         json!({}),
         json!({ "width": 512, "height": 384, "projectId": "p", "assetIds": ["a"] }),
         json!({ "assetIds": ["a"] }),
+        json!({ "sizes": [{ "width": 512 }] }),
+        json!({ "sizes": "512x384" }),
+        json!({ "width": 512, "height": 384, "sizes": [{ "width": 512, "height": 384 }] }),
+        json!({ "width": 512, "height": 384, "irisModel": "../escape" }),
     ] {
         let (status, response) = request(
             app.clone(),

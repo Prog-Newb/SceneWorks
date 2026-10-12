@@ -288,8 +288,11 @@ where
         source_name: &source_name,
         source: &source.geometry,
         metadata: &metadata,
+        trained_export_path: request
+            .trained_model()
+            .map(|_| data_relative_path(&settings.data_dir, &export.dir)),
     })?;
-    let result = depth_job_result(&outputs, &metadata, fact);
+    let result = depth_job_result(&outputs, &metadata, request.trained_model(), fact);
     // The API persists the asset only when it accepts this completion; if it refuses, the
     // published files would be orphans, so remove them before reporting the failure.
     if let Err(error) = update_job(
@@ -505,18 +508,27 @@ pub(crate) struct DepthAdmission {
 impl DepthAdmission {
     /// Read the declaration for `lane` (`"mlx"` | `"candle"`) from the job's attached catalog entry.
     pub(crate) fn from_payload(payload: &JsonObject, lane: &str) -> WorkerResult<Self> {
+        // The model the job runs: a trained depth model's own catalog entry (which carries its
+        // engine's depth declaration — the API attaches it in place of the release entry, S6), else
+        // the release `iris_3b_depth` entry.
+        let model = payload
+            .get(sceneworks_core::image_restoration::IRIS_MODEL_KEY)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .unwrap_or(DEPTH_MODEL_ID);
         let entry = payload
             .get("modelManifestEntries")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .chain(payload.get("modelManifestEntry"))
-            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(DEPTH_MODEL_ID))
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model))
             .ok_or_else(|| {
                 typed(
                     MEMORY_ADMISSION,
                     format!(
-                        "the job carries no {DEPTH_MODEL_ID} catalog entry, so it has no memory \
+                        "the job carries no {model} catalog entry, so it has no memory \
                          declaration; refusing an unbounded run"
                     ),
                 )
@@ -684,6 +696,8 @@ struct DepthFactInputs<'a> {
     source_name: &'a str,
     source: &'a SourceGeometry,
     metadata: &'a DepthMetadata,
+    /// The data-relative export path of a trained depth model (`None` for the release export).
+    trained_export_path: Option<String>,
 }
 
 fn resolution_json(resolution: DepthResolutionRequest) -> Value {
@@ -698,6 +712,7 @@ fn depth_asset_fact(inputs: DepthFactInputs<'_>) -> WorkerResult<Value> {
         source_name,
         source,
         metadata: m,
+        trained_export_path,
     } = inputs;
     let (input_resample, output_resample) = (m.input_resample, m.output_resample);
     let resolution = resolution_json(request.resolution);
@@ -713,13 +728,30 @@ fn depth_asset_fact(inputs: DepthFactInputs<'_>) -> WorkerResult<Value> {
     );
     // A trained depth model (sc-25687): the catalog id of the Training Studio export used, on the
     // asset (`model`), its reload settings (`irisModel`) and its model identity (`trainedModelId`).
+    // Its weights are the TRAINED export, not the release snapshot: the lineage names the training
+    // source and the export's data-relative path, and carries no release repo/revision (S5).
     if let Some(model) = request.trained_model() {
         fact["model"] = json!(model);
         fact["rawAdapterSettings"]["depth"]["irisModel"] = json!(model);
-        fact["depth"]["model"]["trainedModelId"] = json!(model);
-        fact["depth"]["model"]["weightsSubdir"] = Value::Null;
+        let lineage = &mut fact["depth"]["model"];
+        lineage["trainedModelId"] = json!(model);
+        lineage["weightsSource"] = json!("training");
+        lineage["weightsRepo"] = Value::Null;
+        lineage["weightsRevision"] = Value::Null;
+        lineage["weightsSubdir"] = Value::Null;
+        lineage["exportPath"] = json!(trained_export_path);
     }
     Ok(fact)
+}
+
+/// The data-relative path of a trained depth export (`models/finetunes/<id>/<export>`), or the
+/// absolute path when it is not under the data dir (never expected: the resolver confines it).
+fn data_relative_path(data_dir: &Path, dir: &Path) -> String {
+    let data_dir = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    dir.strip_prefix(&data_dir)
+        .unwrap_or(dir)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -809,8 +841,12 @@ fn depth_asset_fact_json(
 fn depth_job_result(
     outputs: &DepthOutputPaths,
     metadata: &DepthMetadata,
+    // The trained depth model the job ran (S5): the result and its generation set name IT, never
+    // the release `iris_3b_depth`.
+    trained_model: Option<&str>,
     fact: Value,
 ) -> JsonObject {
+    let model = trained_model.unwrap_or(DEPTH_MODEL_ID);
     let mut result = JsonObject::new();
     result.insert(
         "generationSetId".to_owned(),
@@ -818,13 +854,13 @@ fn depth_job_result(
     );
     result.insert("expectedCount".to_owned(), json!(1));
     result.insert("adapter".to_owned(), json!(metadata.backend));
-    result.insert("model".to_owned(), json!(DEPTH_MODEL_ID));
+    result.insert("model".to_owned(), json!(model));
     result.insert(
         "generationSet".to_owned(),
         json!({
             "id": outputs.generation_set_id,
             "mode": "image_depth",
-            "model": DEPTH_MODEL_ID,
+            "model": model,
             "prompt": "",
             "negativePrompt": "",
             "count": 1,

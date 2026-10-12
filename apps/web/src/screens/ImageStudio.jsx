@@ -203,7 +203,7 @@ import {
   upscaleFactorsForEngine,
   useUpscaleEngineFallback,
 } from "../upscaleEngines.js";
-import { IRIS_RESTORE_DEFAULTS, irisControlsFromRecord, irisRestoreControls } from "../irisRestore.js";
+import { IRIS_RESTORE_DEFAULTS, irisControlsFromRecord, irisRestoreControls, restorePlanBodyForRenders } from "../irisRestore.js";
 import { IrisRestoreControls } from "../components/IrisRestoreControls.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
@@ -2874,6 +2874,17 @@ export function ImageStudio() {
       releaseBatchSlotWaiters();
     }
   }, [batchRun, jobs, setBatchRun]);
+  // The Iris post-processing plan covers what the next run renders: the Studio size for a single
+  // Generate, every distinct per-prompt [WxH] size (or the Studio size) for a prompt batch (S2).
+  const restorePlanBody = useMemo(
+    () =>
+      restorePlanBodyForRenders({
+        width,
+        height,
+        resolutions: batchMode ? batchPrompts.map((line) => parsePromptResolution(line).resolution) : [],
+      }),
+    [batchMode, batchPrompts, height, width],
+  );
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
   // Prompt lines whose leading [WxH] directive (sc-10063) breaks the SELECTED model's geometry — the
@@ -2925,6 +2936,7 @@ export function ImageStudio() {
       // own 512–2048 / ÷16 envelope; every other model gets the global 256–4096 / no-stride default.
       dimensionConstraints,
       decoderCapabilitiesPending,
+      restorePlan: irisUpscale ? restorePlanStatus : null,
     }),
     [
       activeProject,
@@ -2935,6 +2947,8 @@ export function ImageStudio() {
       batchResolutionIssues,
       dimensionConstraints,
       decoderCapabilitiesPending,
+      irisUpscale,
+      restorePlanStatus,
     ],
   );
   // sc-13131 / sc-13133: the live composed-prompt preview for the selected Style Catalog entry, and
@@ -4410,7 +4424,7 @@ export function ImageStudio() {
                   idPrefix="studio-iris"
                   onChange={(next) => setUpscaleRestore(irisRestoreControls(next))}
                   onStatus={setRestorePlanStatus}
-                  planBody={width > 0 && height > 0 ? { width, height } : null}
+                  planBody={restorePlanBody}
                   token={token}
                   value={upscaleRestore}
                 />

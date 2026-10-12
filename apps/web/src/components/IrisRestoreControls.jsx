@@ -54,7 +54,10 @@ export function IrisRestoreControls({ value, onChange, planBody = null, token = 
   }, [value?.scale]);
 
   const scale = normalizeIrisScale(scaleText);
-  const planKey = planBody && scale ? JSON.stringify({ ...planBody, scale, inputSizing: value?.inputSizing, colorFix: value?.colorFix }) : null;
+  // The selected trained model rides along: it plans with ITS export's tile geometry (S9b).
+  const planKey = planBody && scale
+    ? JSON.stringify({ ...planBody, scale, inputSizing: value?.inputSizing, colorFix: value?.colorFix, irisModel: value?.irisModel || undefined })
+    : null;
 
   useEffect(() => {
     if (!scale) {
