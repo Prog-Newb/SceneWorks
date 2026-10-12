@@ -9332,9 +9332,7 @@ fn bernini_editing_reference_modes_real_weights() {
     }
 }
 
-// ===================== SCAIL-2 validation (epic 5439 / sc-5450) ==============}
-
-#[cfg(target_os = "macos")]
+// ===================== SCAIL-2 validation (epic 5439 / sc-5450) =====================
 
 /// Only the `scail2_14b` catalog id routes to the SCAIL-2 engine (sc-5448). Every other video
 /// family (Wan/LTX/SVD/Bernini/image ids) is `None`, so they keep their own routing.
@@ -21476,7 +21474,11 @@ impl Generator for VedaAdmissionProbe {
         &self,
         r: gen_core::veda::workspace::Request<'_>,
     ) -> gen_core::Result<Option<gen_core::veda::workspace::WorkspaceBound>> {
-        if r.veda.is_some_and(|v| v.enabled) {
+        if let Some(veda) = r.veda.filter(|v| v.enabled) {
+            assert_eq!(veda.generated, gen_core::VedaBudget::KeyTiles(32));
+            assert_eq!(veda.reference, gen_core::VedaBudget::SparsityPercent(0.0));
+            assert_eq!(veda.full_attention_layers, vec![0, 1, 49]);
+            assert_eq!(veda.full_attention_steps, vec![0, 7]);
             Err(gen_core::Error::Msg(
                 "CPU Veda admission bound refusal before generate".into(),
             ))
@@ -21498,7 +21500,7 @@ fn minimax_h3_veda_queued_request_prices_bound_before_engine_generate() {
         let probe = ArmProbe::default();
         let request = minimax_h3_request(
             "minimax_h3",
-            json!({"advanced":{"veda":{"enabled":enabled}}}),
+            json!({"advanced":{"steps":8,"veda":{"enabled":enabled,"generated":"32","reference":"0%","fullAttentionLayers":"0-1,49","fullAttentionSteps":"0,7"}}}),
         );
         let loader = probe.loader();
         let result = drive_minimax_h3_arm_in_project_with_loader(

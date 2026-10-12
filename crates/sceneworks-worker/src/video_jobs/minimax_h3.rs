@@ -1686,22 +1686,11 @@ pub(super) async fn generate_candle_minimax_h3(
                         .to_owned(),
                 )
             })?;
-    // CUDA copies/kernel CSR are bounded at full tile density, so this cold-load
-    // envelope is independent of percentage/count/layer/step controls. The common
-    // queued gate consumes the complete typed input.veda supplied by the request parser.
-    let sparse_controls = request
-        .advanced
-        .get("veda")
-        .and_then(|v| v.get("enabled"))
-        .and_then(Value::as_bool)
-        .filter(|&v| v)
-        .map(|_| gen_core::VedaRequest {
-            enabled: true,
-            ..Default::default()
-        });
+    // Price the cold-load envelope from the same complete parsed controls used by
+    // the queued gate and generation, including budgets and dense overrides.
     let sparse_bound = gen_core::veda::workspace::for_video_request(
         gen_core::veda::workspace::Request {
-            veda: sparse_controls.as_ref(),
+            veda: veda.as_ref(),
             width: request.width,
             height: request.height,
             frames,
