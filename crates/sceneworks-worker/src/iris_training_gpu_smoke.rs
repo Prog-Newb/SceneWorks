@@ -1224,7 +1224,7 @@ async fn run_cancel_resume_smoke(arm: CancelResumeArm) {
     let data_dir = settings.data_dir.clone();
     let backbone = crate::model_jobs::huggingface_snapshot_dir(&data_dir, BACKBONE_REPO)
         .expect("HF_HUB_CACHE must already hold the Iris backbone (no download at training time)");
-    let store = ProjectStore::new(data_dir.clone(), &format!("iris-{label}-smoke"));
+    let store = ProjectStore::new(data_dir.clone(), format!("iris-{label}-smoke"));
     let project = store.create_project("Iris cancel/resume smoke").unwrap();
     let project_object = serde_json::to_value(&project)
         .unwrap()
