@@ -621,7 +621,7 @@ async fn iris_worker_gpu_smoke_native_prompt_batch() {
 /// per-tile progress — for a multi-tile 4× (512x384 → 2048x1536, 6 tiles) and a 1× restore. The
 /// `iris_worker_gpu_smoke` filter of the dispatch-only `iris-worker-smoke` job selects this too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "real-weight worker GPU smoke; needs the pinned speridlabs/iris-3b upscaler/ export under HF_HUB_CACHE and a CUDA device"]
+#[ignore = "real-weight worker GPU smoke; needs the pinned speridlabs/iris-3b upscaler/ export under HF_HUB_CACHE and a CUDA device or Apple GPU"]
 async fn iris_worker_gpu_smoke_restore() {
     let hf_hub_cache = PathBuf::from(
         std::env::var("HF_HUB_CACHE").expect("set $HF_HUB_CACHE to the real-weights hub"),
@@ -633,8 +633,13 @@ async fn iris_worker_gpu_smoke_restore() {
     settings.api_url = api_url;
     settings.config_dir = temp.path().join("config");
     settings.worker_id = "iris-smoke-worker".to_owned();
-    settings.gpu_id = "cuda".to_owned();
-    settings.backend_candle_enabled = true;
+    // sc-25690: the same restore jobs are the MLX real-weight check on a Mac (the worker's MLX
+    // defaults), so only the off-Mac build pins the CUDA lane.
+    #[cfg(not(target_os = "macos"))]
+    {
+        settings.gpu_id = "cuda".to_owned();
+        settings.backend_candle_enabled = true;
+    }
     settings.heartbeat_seconds = 30;
     let (export_dir, _) = crate::iris_restore::resolve_restore_export_dir(&settings)
         .expect("HF_HUB_CACHE must already hold the iris_3b_restore upscaler/ export");
@@ -715,8 +720,13 @@ async fn iris_worker_gpu_smoke_restore() {
             "the restored image looks degenerate (RGB std {std:.2})"
         );
         eprintln!(
-            "RESULT status=pass model=iris_3b_restore backend=candle scale={scale} geometry={}x{} \
+            "RESULT status=pass model=iris_3b_restore backend={} scale={scale} geometry={}x{} \
              tiles={tiles} elapsed_s={:.1} rgb_std={std:.3} export={} output={}",
+            if cfg!(target_os = "macos") {
+                "mlx"
+            } else {
+                "candle"
+            },
             restored.width,
             restored.height,
             elapsed.as_secs_f64(),

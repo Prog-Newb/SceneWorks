@@ -882,3 +882,260 @@ async fn iris_training_gpu_smoke_restore() {
         export.display()
     );
 }
+
+// =============================================================================================
+// sc-25690 (epic 25678 terminal evidence): a LoKr generation run CANCELED through the job API after
+// its first durable checkpoint, then RESUMED from that checkpoint to completion — the production
+// path end to end (`run_training_execution`, the in-loop cancel poller, the trainer's durable
+// cancel, the API's `resumeFromJobId` → `iris.resume_from` translation reproduced exactly as
+// `apps/rust-api` `resolve_iris_run_sources` writes it), then the LoKr adapter applied by a
+// generation job.
+// =============================================================================================
+
+type CancelSwitch = Arc<std::sync::atomic::AtomicBool>;
+type CancellableState = (ProgressPosts, CancelSwitch);
+
+fn cancellable_snapshot(job_id: &str, cancel: &CancelSwitch) -> Value {
+    let mut job = stub_job_snapshot(job_id, "lora_train", "smoke");
+    job["cancelRequested"] = json!(cancel.load(std::sync::atomic::Ordering::SeqCst));
+    job
+}
+
+async fn cancellable_job(
+    State((_, cancel)): State<CancellableState>,
+    AxumPath(job_id): AxumPath<String>,
+) -> Json<Value> {
+    Json(cancellable_snapshot(&job_id, &cancel))
+}
+
+async fn cancellable_progress(
+    State((posts, cancel)): State<CancellableState>,
+    AxumPath(job_id): AxumPath<String>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    posts.lock().unwrap().push((job_id.clone(), payload));
+    Json(cancellable_snapshot(&job_id, &cancel))
+}
+
+/// The worker API stub with a user cancel: every job snapshot (the cancel poller's GET and each
+/// progress-post reply) reports `cancelRequested` from `cancel`.
+async fn spawn_cancellable_api_stub(cancel: CancelSwitch) -> (String, ProgressPosts) {
+    let posts: ProgressPosts = Arc::default();
+    let app = Router::new()
+        .route("/api/v1/jobs/:job_id", get(cancellable_job))
+        .route("/api/v1/jobs/:job_id/progress", post(cancellable_progress))
+        .route("/api/v1/jobs/:job_id/metrics", post(stub_metrics))
+        .route("/api/v1/workers/:worker_id/heartbeat", post(stub_heartbeat))
+        .with_state((posts.clone(), cancel));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{address}"), posts)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "real-weight Iris LoKr cancel/resume smoke; needs the pinned speridlabs/iris-3b and Qwen3-VL-4B-Instruct snapshots under HF_HUB_CACHE and an Apple-Silicon GPU or a CUDA device"]
+async fn iris_training_gpu_smoke_lokr_cancel_resume() {
+    const FIRST_JOB: &str = "iris-train-lokr";
+    const RESUME_JOB: &str = "iris-train-lokr-resume";
+    const STEPS: u32 = 8;
+    const FILE: &str = "iris_lokr.safetensors";
+    let cancel: CancelSwitch = Arc::default();
+    let temp = tempfile::tempdir().unwrap();
+    let (api_url, posts) = spawn_cancellable_api_stub(cancel.clone()).await;
+    let settings = smoke_settings(temp.path(), api_url, "iris-lokr-smoke-worker");
+    let data_dir = settings.data_dir.clone();
+    let backbone = crate::model_jobs::huggingface_snapshot_dir(&data_dir, BACKBONE_REPO)
+        .expect("HF_HUB_CACHE must already hold the Iris backbone (no download at training time)");
+    let store = ProjectStore::new(data_dir.clone(), "iris-lokr-smoke");
+    let project = store
+        .create_project("Iris LoKr cancel/resume smoke")
+        .unwrap();
+    let project_object = serde_json::to_value(&project)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
+    let dataset_root = PathBuf::from(&project.path).join("training/datasets/ds_smoke");
+    let dataset = write_dataset(&dataset_root);
+    let output_dir = PathBuf::from(&project.path).join("loras/lora_iris_lokr");
+
+    let target = sceneworks_core::training::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.kernel == "iris_train")
+        .expect("the Iris target is registered");
+    let mut config = target.defaults.clone();
+    config.rank = 4;
+    config.alpha = 4;
+    config.steps = STEPS;
+    config.save_every = 2;
+    config.resolution = RESOLUTION;
+    config.learning_rate =
+        sceneworks_core::contracts::ContractNumber::from_f64(1e-3).expect("finite");
+    config.trigger_word = Some("smoke style".to_owned());
+    config.advanced.insert("networkType".into(), json!("lokr"));
+    config.advanced.insert("decomposeFactor".into(), json!(4));
+    config.advanced.insert("sampleEvery".into(), json!(STEPS));
+    config.advanced.insert("sampleSteps".into(), json!(10));
+    config.advanced.insert("sampleCount".into(), json!(1));
+    config.advanced.insert(
+        "samplePrompts".into(),
+        json!(["a flat red square, smoke style"]),
+    );
+    let build = |job_id: &str, config| {
+        sceneworks_core::training::build_training_plan(
+            sceneworks_core::training::BuildTrainingPlan {
+                job_id,
+                target: &target,
+                dataset: &dataset,
+                config,
+                preset: None,
+                lora_id: "lora_iris_lokr",
+                base_model_path: backbone.display().to_string(),
+                dataset_root: &dataset_root,
+                output_dir: &output_dir,
+                file_name: FILE.to_owned(),
+                created_at: "2026-10-12T00:00:00Z".to_owned(),
+            },
+        )
+        .expect("the LoKr plan builds from the real target")
+    };
+    let api = ApiClient::new(&settings);
+
+    // 1. Run, and request a cancel the moment the first durable checkpoint lands.
+    let checkpoint_root = crate::iris_checkpoint_root(&output_dir, FILE);
+    let watcher = {
+        let latest = checkpoint_root.join("latest");
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            while !latest.is_file() {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+    };
+    let plan = build(FIRST_JOB, config.clone());
+    let mut snapshot = stub_job_snapshot(FIRST_JOB, "lora_train", &project.id);
+    snapshot["payload"] = json!({ "dryRun": false, "plan": plan });
+    let job: JobSnapshot = serde_json::from_value(snapshot).unwrap();
+    let started = std::time::Instant::now();
+    let outcome = crate::training_jobs::run_training_execution(&api, &settings, &job, &plan).await;
+    let first_seconds = started.elapsed().as_secs_f64();
+    watcher.abort();
+    assert!(
+        matches!(outcome, Err(WorkerError::Canceled(_))),
+        "the canceled LoKr run ends Canceled: {outcome:?}"
+    );
+    let canceled = posts
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(id, body)| id == FIRST_JOB && body["status"] == "canceled")
+        .map(|(_, body)| body.clone())
+        .expect("the run posted a terminal canceled update");
+    let stopped_at = canceled["result"]["stepsCompleted"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a durable cancel reports its step: {canceled:#}"));
+    assert!(
+        (2..u64::from(STEPS)).contains(&stopped_at),
+        "canceled after the first checkpoint and before the end: {canceled:#}"
+    );
+    assert!(
+        checkpoint_root.join("latest").is_file(),
+        "the canceled run kept its durable checkpoint"
+    );
+
+    // 2. Resume from that run's checkpoint (the API's `resumeFromJobId` translation) to the end.
+    cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+    let mut plan = build(RESUME_JOB, config);
+    let mut options = match plan.config.advanced.remove("iris") {
+        Some(Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    options.insert(
+        "resume_from".to_owned(),
+        json!(checkpoint_root.display().to_string()),
+    );
+    plan.config
+        .advanced
+        .insert("iris".to_owned(), Value::Object(options));
+    plan.config
+        .advanced
+        .insert("resume".to_owned(), json!(true));
+    let mut snapshot = stub_job_snapshot(RESUME_JOB, "lora_train", &project.id);
+    snapshot["payload"] = json!({ "dryRun": false, "plan": plan });
+    let job: JobSnapshot = serde_json::from_value(snapshot).unwrap();
+    let started = std::time::Instant::now();
+    crate::training_jobs::run_training_execution(&api, &settings, &job, &plan)
+        .await
+        .expect("the resumed LoKr run completes");
+    let resume_seconds = started.elapsed().as_secs_f64();
+    let result = completed_result(&posts, RESUME_JOB);
+    assert_eq!(result["stepsCompleted"], STEPS, "{result:#}");
+    let final_loss = result["finalLoss"].as_f64().expect("final loss");
+    assert!(final_loss.is_finite(), "final loss {final_loss}");
+    let adapter = output_dir.join(FILE);
+    let metadata = safetensors_metadata(&adapter);
+    for (key, expected) in [
+        ("family", "iris"),
+        ("baseModel", "iris_3b"),
+        ("irisTask", "generation"),
+        ("networkType", "lokr"),
+    ] {
+        assert_eq!(
+            metadata.get(key).and_then(Value::as_str),
+            Some(expected),
+            "adapter metadata {key}: {metadata:#?}"
+        );
+    }
+
+    // 3. The resumed adapter is applied by a generation job.
+    let base = render(
+        &settings,
+        &posts,
+        &project_object,
+        "iris-lokr-base",
+        json!([]),
+    )
+    .await;
+    let tuned = render(
+        &settings,
+        &posts,
+        &project_object,
+        "iris-lokr-tuned",
+        json!([{
+            "id": "lora_iris_lokr",
+            "name": "Iris LoKr smoke",
+            "family": "iris",
+            "networkType": "lokr",
+            "installedPath": adapter.display().to_string(),
+            "weight": 1.0
+        }]),
+    )
+    .await;
+    let mean_abs_diff = base
+        .pixels
+        .iter()
+        .zip(&tuned.pixels)
+        .map(|(a, b)| (*a as f64 - *b as f64).abs())
+        .sum::<f64>()
+        / base.pixels.len() as f64;
+    assert!(
+        mean_abs_diff > 0.5,
+        "the resumed LoKr adapter must change the render at a fixed seed (mean |Δ| {mean_abs_diff:.3})"
+    );
+    eprintln!(
+        "RESULT status=pass trainer=iris_3b network=lokr backend={} canceled_at_step={stopped_at} \
+         resumed_to={STEPS} first_s={first_seconds:.1} resume_s={resume_seconds:.1} \
+         final_loss={final_loss:.4} adapter_effect_mean_abs_diff={mean_abs_diff:.3}",
+        if cfg!(target_os = "macos") {
+            "mlx"
+        } else {
+            "candle"
+        },
+    );
+}

@@ -72,6 +72,7 @@ on:
         options:
           - catalog
           - qwen-image-2-1-app-lifecycle
+          - iris-mlx-real-weights
         default: catalog
       inference_sha:
         description: "App lifecycle only: exact final inference pin (40 hex). The dispatched branch/tag must resolve to the exact source SHA supplied as ref."
@@ -86,6 +87,11 @@ on:
           - primary
           - secondary
         default: primary
+      iris_smoke_filter:
+        description: "Iris MLX real-weights only (sc-25690): all | inference | training | <one smoke test name> | cleanup."
+        required: false
+        type: string
+        default: all
       backend:
         description: "Which lane to walk. mlx runs on a Mac, candle on the Windows CUDA box."
         required: true
@@ -241,6 +247,17 @@ jobs:
       source_sha: ${{ inputs.ref }}
       inference_sha: ${{ inputs.inference_sha }}
       runner_target: ${{ inputs.qwen_app_runner_target }}
+  iris-mlx-real-weights:
+    if: ${{ inputs.profile == 'iris-mlx-real-weights' }}
+    permissions:
+      contents: read
+    # sc-25690 (epic 25678): the Iris-3B worker real-weight smokes on nax-macos-2, at the dispatch's
+    # exact commit (`ref` must be that 40-hex SHA). Like the app proof above it skips BOTH catalog
+    # jobs: no walk, no commit, no push, no PR.
+    uses: ./.github/workflows/iris-mlx-real-weights.yml
+    with:
+      source_sha: ${{ inputs.ref }}
+      filter: ${{ inputs.iris_smoke_filter }}
   mlx:
     if: ${{ (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'mlx' }}
     name: mlx catalog campaign
