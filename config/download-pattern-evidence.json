@@ -5359,6 +5359,22 @@
       ]
     },
     {
+      "key": "facebook/dinov2-base@f9e44c814b77203eaa57a6bdbbd535f21ede1415",
+      "repo": "facebook/dinov2-base",
+      "revision": "f9e44c814b77203eaa57a6bdbbd535f21ede1415",
+      "resolvedSha": "f9e44c814b77203eaa57a6bdbbd535f21ede1415",
+      "servedRepo": "facebook/dinov2-base",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "config.json",
+        "model.safetensors",
+        "preprocessor_config.json",
+        "pytorch_model.bin"
+      ]
+    },
+    {
       "key": "hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987",
       "repo": "hexgrad/Kokoro-82M",
       "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",

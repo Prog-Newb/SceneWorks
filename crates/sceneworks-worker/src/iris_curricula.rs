@@ -234,18 +234,6 @@ pub fn resolve_iris_plan(
     backbone_dir: &Path,
     plan: &TrainingPlan,
 ) -> Result<ResolvedIrisPlan, IrisPlanRefusal> {
-    use gen_core::iris::train::{IrisTrainPlan, TrainFlowDefaults};
-    let refuse = |error: gen_core::Error| {
-        let kind = gen_core::iris::train::dist::dist_error(&error)
-            .map(dist_error_kind)
-            .unwrap_or("invalid");
-        IrisPlanRefusal {
-            kind: kind.to_owned(),
-            message: format!("Iris 3B training refused this configuration: {error}"),
-        }
-    };
-    let config = gen_core::iris::IrisConfig::from_dir(backbone_dir).map_err(refuse)?;
-    let flow = TrainFlowDefaults::from_dir(backbone_dir).map_err(refuse)?;
     let request = gen_core::TrainingRequest {
         items: plan
             .dataset
@@ -270,7 +258,60 @@ pub fn resolve_iris_plan(
         trigger_words: plan.output.trigger_words.clone(),
         cancel: gen_core::CancelFlag::new(),
     };
-    let resolved = IrisTrainPlan::resolve(&request, &config, &flow, &[]).map_err(refuse)?;
+    resolve_iris_request(backbone_dir, &request)
+}
+
+/// [`resolve_iris_plan`] for a bare SceneWorks config (the Studio's pre-launch check, before a
+/// dataset or a plan exists): the same engine config mapping, no items.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub fn resolve_iris_config(
+    backbone_dir: &Path,
+    config: &sceneworks_core::training::TrainingConfig,
+) -> Result<ResolvedIrisPlan, IrisPlanRefusal> {
+    let mut engine = crate::training_jobs::map_engine_config(config);
+    if config
+        .advanced
+        .get("mixedPrecision")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("fp16"))
+    {
+        engine.train_dtype = "fp16".to_owned();
+    }
+    let request = gen_core::TrainingRequest {
+        items: Vec::new(),
+        config: engine,
+        output_dir: PathBuf::new(),
+        file_name: "plan-check.safetensors".to_owned(),
+        trigger_words: Vec::new(),
+        cancel: gen_core::CancelFlag::new(),
+    };
+    resolve_iris_request(backbone_dir, &request)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_iris_request(
+    backbone_dir: &Path,
+    request: &gen_core::TrainingRequest,
+) -> Result<ResolvedIrisPlan, IrisPlanRefusal> {
+    use gen_core::iris::train::{IrisTrainPlan, TrainFlowDefaults};
+    let refuse = |error: gen_core::Error| {
+        let kind = gen_core::iris::train::dist::dist_error(&error)
+            .map(dist_error_kind)
+            .unwrap_or("invalid");
+        IrisPlanRefusal {
+            kind: kind.to_owned(),
+            message: format!("Iris 3B training refused this configuration: {error}"),
+        }
+    };
+    let config = gen_core::iris::IrisConfig::from_dir(backbone_dir).map_err(refuse)?;
+    let flow = TrainFlowDefaults::from_dir(backbone_dir).map_err(refuse)?;
+    let resolved = IrisTrainPlan::resolve(request, &config, &flow, &[]).map_err(refuse)?;
     let (train, holdout) =
         gen_core::iris::train::holdout::split_items(&request.items).map_err(refuse)?;
     let global_batch = resolved.batch_size * resolved.dist.world.world_size * resolved.grad_accum;

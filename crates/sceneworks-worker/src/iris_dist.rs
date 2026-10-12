@@ -410,9 +410,12 @@ fn read_spec(path: &Path) -> Result<RankSpec, String> {
 /// Train one rank: the SAME weights-free preflight and trainer inputs as the single-process path,
 /// the rank's world stamped onto the request, progress and the outcome written as protocol lines on
 /// `out`, cancellation read from `input` (a `cancel` line, or EOF when the coordinator is gone).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
 ))]
 pub(crate) fn run_rank_process_using(
     spec: &RankSpec,

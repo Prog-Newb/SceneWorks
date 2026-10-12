@@ -1643,6 +1643,18 @@ fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> 
     config
 }
 
+/// The shared plan-to-engine config mapping of a bare SceneWorks config (no backend finalization):
+/// the Iris pre-launch plan check (sc-25689) resolves exactly what [`map_training_config`] sends.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn map_engine_config(
+    config: &sceneworks_core::training::TrainingConfig,
+) -> TrainingConfig {
+    map_training_config(config)
+}
+
 /// The engine [`TrainingConfig`] a plan trains with: the shared mapping, the backend finalization
 /// and the Iris dtype passthrough. The one source for the real request, the Iris plan resolution and
 /// every rank process (sc-25689).

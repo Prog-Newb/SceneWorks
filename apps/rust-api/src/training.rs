@@ -1730,16 +1730,11 @@ pub(crate) async fn create_training_job(
         // co-located macOS API the declared unified-memory floor refuses an undersized Mac here,
         // before a job exists; the worker repeats the gate on every lane (VRAM on Candle).
         if sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel) {
-            let network_type = payload
-                .config
-                .advanced
-                .get("networkType")
-                .and_then(Value::as_str)
-                .unwrap_or("lora");
-            if let Some(message) = sceneworks_worker::iris_training_memory_error(
-                network_type,
-                payload.config.resolution,
-            ) {
+            // The whole run's floor (sc-25689): one rank's (+ the REPA teacher) times the ranks
+            // sharing the Mac's one GPU.
+            if let Some(message) =
+                sceneworks_worker::iris_training_run_memory_error(&payload.config)
+            {
                 return Err(ApiError::bad_request(message));
             }
         } else if training_is_full_finetune(&payload.config) {
@@ -1779,6 +1774,16 @@ pub(crate) async fn create_training_job(
     // Iris resume / new phase / load-from: the client named a previous run; SceneWorks derives the
     // checkpoint/export path from that run's trusted ids and hands it to the trainer.
     crate::iris_training::resolve_iris_run_sources(&state, &project_id, &mut plan).await?;
+    // Iris curricula / REPA / distributed (sc-25689): lineage, teacher, topology and the engine's
+    // own plan resolution, and the receipts the run and its registered output carry.
+    let iris_receipts = crate::iris_curricula::check_iris_submit(
+        &state,
+        &project_id,
+        target,
+        &plan,
+        payload.dry_run,
+    )
+    .await?;
 
     // Pre-build the LoRA registry entry the completed job will register, mirroring
     // the `lora_import` pattern: Rust owns LoRA registration. The descriptive
@@ -1873,6 +1878,12 @@ pub(crate) async fn create_training_job(
                 &plan.output.file_name,
                 is_base_checkpoint,
             );
+            if let Some(receipts) = &iris_receipts {
+                entry.insert(
+                    crate::iris_curricula::IRIS_RECEIPTS_KEY.to_owned(),
+                    receipts.clone(),
+                );
+            }
         }
     }
 
@@ -1928,6 +1939,12 @@ pub(crate) async fn create_training_job(
     job_payload.insert("outputName".to_owned(), Value::String(output_name));
     job_payload.insert("plan".to_owned(), plan_value);
     job_payload.insert("manifestEntry".to_owned(), manifest_entry);
+    if let Some(receipts) = iris_receipts {
+        job_payload.insert(
+            crate::iris_curricula::IRIS_RECEIPTS_KEY.to_owned(),
+            receipts,
+        );
+    }
     // Route-owned DATA for the model-source seam: a real training run loads this base model, so
     // it must carry the same typed identity as generation. The seam resolves and preflights it.
     job_payload.insert(

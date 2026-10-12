@@ -30,6 +30,7 @@ mod startup;
 // `pub(crate)` so the inline `#[cfg(test)]` test modules that live OUTSIDE this `tests`
 // tree (e.g. `crate::models::variant_install_tests`) can reuse the ONE crate-wide
 // `isolate_hf_cache` / `HF_ENV_LOCK` guard rather than adding a second lock (sc-13835).
+mod iris_curricula;
 mod iris_training;
 pub(crate) mod support;
 mod training;

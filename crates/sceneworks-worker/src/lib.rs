@@ -267,14 +267,14 @@ pub use iris_training::{
     allow(dead_code)
 )]
 mod iris_curricula;
+pub use iris_curricula::{
+    installed_repa_teacher, iris_stage_presets, IrisPlanRefusal, ResolvedIrisPlan,
+};
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub use iris_curricula::resolve_iris_plan;
-pub use iris_curricula::{
-    installed_repa_teacher, iris_stage_presets, IrisPlanRefusal, ResolvedIrisPlan,
-};
+pub use iris_curricula::{resolve_iris_config, resolve_iris_plan};
 // Multi-rank Iris training on one host (sc-25689): the worker launches `world_size` rank processes
 // (this same executable, re-entered through [`iris_rank_entry`]) and coordinates them.
 #[cfg_attr(

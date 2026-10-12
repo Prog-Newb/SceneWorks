@@ -150,6 +150,7 @@ use workflows::{get_asset_workflow, inspect_workflow, max_inspect_multipart_body
 // crate-root consumer.
 #[cfg(test)]
 use assets::sweep_stale_asset_uploads_before;
+mod iris_curricula;
 mod iris_training;
 mod training;
 use training::{
@@ -1519,6 +1520,14 @@ fn create_app_with_state_mode(
             "/api/v1/training/data-walk",
             get(iris_training::training_data_walk),
         )
+        .route(
+            "/api/v1/training/iris/stage-presets",
+            get(iris_curricula::iris_stage_presets),
+        )
+        .route(
+            "/api/v1/training/iris/plan-check",
+            post(iris_curricula::iris_plan_check),
+        )
         .route("/api/v1/catalogs", get(list_catalogs).post(create_catalog))
         .route("/api/v1/catalogs/attach", post(attach_catalog))
         .route(
@@ -1719,6 +1728,10 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/training/jobs",
             post(create_training_job),
+        )
+        .route(
+            "/api/v1/training/jobs/:job_id/iris-metrics",
+            get(iris_curricula::iris_training_metrics),
         )
         .route(
             "/api/v1/projects/:project_id/files/*relative_path",
