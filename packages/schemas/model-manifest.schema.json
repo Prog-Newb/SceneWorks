@@ -1795,10 +1795,11 @@
                 "description": "Candle/CUDA SEQUENTIAL-residency peak or conservative high-water VRAM (GB) at the vramMeasuredPixels geometry, keyed by quant tier — the largest single working set when the provider loads→uses→drops each component in phase order (text encoders dropped before the DiT). The sibling measured flag says whether it is calibrated evidence. Always ≤ the resident vramGbByTier. Present only for sequential-capable providers (the candle FLUX lane, epic 10765 sc-10769). The fit-gate consults it as the SECOND-stage check (sc-10856): when the resident peak forces sequential offload but this peak still exceeds free VRAM, reject before load instead of running into a reactive OOM. Absent this number the gate keeps its best-effort behavior (run sequentially, reactive-OOM backstop).",
                 "additionalProperties": { "type": "number" }
               },
-              "promptBatchImageGb": {
+              "imageActivationGbPerMegapixel": {
                 "type": "number",
                 "exclusiveMinimum": 0,
-                "description": "DECLARED (never measured) activation working set, in GB at <= 1024² output, of ONE extra image of a native prompt batch (image.maxPromptBatchImages, sc-25681). The Candle fit gate charges (images − 1) × this × max(1, megapixels) on top of the single-image resident and sequential predictions, so a batch is never admitted on a floor sized for one image. Required by any Candle-routed entry declaring image.maxPromptBatchImages: without it the gate refuses a batch before load."
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/image_jobs/lane_controls.rs", "anchor": "get(\"imageActivationGbPerMegapixel\")" }],
+                "description": "DECLARED (never measured) pixel-space activation working set, in GB, of ONE image per output megapixel (1024² = 1 MP), for an entry whose candle.minMemoryGb / sequentialPeakGb floors carry exactly one image at <= 1024² (sc-25681 native prompt batch, sc-25684 area). The Candle fit gate charges this × (images × max(1, megapixels) − 1) on top of the resident and sequential predictions, so neither a native prompt batch (image.maxPromptBatchImages) nor an output above 1024² is admitted on a floor sized for one 1024² image. Required by any Candle-routed entry declaring image.maxPromptBatchImages: without it the gate refuses a batch before load."
               },
               "supportsSequentialOffload": {
                 "type": "boolean",

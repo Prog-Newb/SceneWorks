@@ -7102,6 +7102,73 @@ mod download_receipt_tests {
         }
     }
 
+    /// sc-25684 (E4): Iris-3B RESTORATION is its own task install too — exactly the three `upscaler/`
+    /// export files at the pinned revision, NO co-requisite (no text encoder), installed only when all
+    /// three are present; neither the generation backbone's root files nor the `depth/` export make
+    /// it installed. Same on every platform (both lanes serve it).
+    #[test]
+    fn iris_restoration_installs_from_its_own_task_closure_without_a_text_encoder() {
+        let _env = isolate_hf_cache();
+        let base = builtin_models_entry("iris_3b_restore");
+        assert_eq!(base.get("type").and_then(Value::as_str), Some("utility"));
+        for os in ["macos", "windows", "linux"] {
+            let temp = tempfile::tempdir().unwrap();
+            let data_dir = temp.path();
+            let mut model = base.clone();
+            retain_downloads_for_os(&mut model, os);
+            assert!(
+                model_co_requisite_downloads(&model).is_empty(),
+                "{os}: restoration needs no text encoder or backbone component"
+            );
+            let context = model_download_context(&model).unwrap().unwrap();
+            assert_eq!(context.repo, "speridlabs/iris-3b", "{os}");
+            assert_eq!(
+                context.files,
+                [
+                    "upscaler/config.yaml",
+                    "upscaler/model.safetensors",
+                    "upscaler/empty_prompt.safetensors"
+                ],
+                "{os}"
+            );
+            let snapshot = huggingface_repo_cache_path(data_dir, &context.repo)
+                .unwrap()
+                .join("snapshots/7445443349bc9abe3c96f01ff793e2098ca012b3");
+            // The OTHER tasks' complete installs are not a restoration install.
+            std::fs::create_dir_all(snapshot.join("depth")).unwrap();
+            std::fs::create_dir_all(snapshot.join("upscaler")).unwrap();
+            for file in [
+                "config.yaml",
+                "model.safetensors",
+                "depth/config.yaml",
+                "depth/model.safetensors",
+                "depth/empty_prompt.safetensors",
+            ] {
+                std::fs::write(snapshot.join(file), b"weights").unwrap();
+            }
+            let absent = install_state_for(Some(context.clone()), &model, data_dir);
+            assert!(
+                !absent.installed,
+                "{os}: other tasks do not install restoration"
+            );
+            for file in &context.files[..2] {
+                std::fs::write(snapshot.join(file), b"weights").unwrap();
+            }
+            let torn = install_state_for(Some(context.clone()), &model, data_dir);
+            assert!(
+                !torn.installed && torn.cache_incomplete,
+                "{os}: two of three export files is a repairable partial install"
+            );
+            std::fs::write(snapshot.join(&context.files[2]), b"weights").unwrap();
+            let installed = install_state_for(Some(context), &model, data_dir);
+            assert!(
+                installed.installed,
+                "{os}: the complete restoration export is installed: {:?}",
+                installed.missing_required_files
+            );
+        }
+    }
+
     /// sc-13681 / sc-13686: each MOSS TTS entry advertises its RVQ codec as a HARD component
     /// coRequisite (`moss_ttsd_v05` → XY_Tokenizer, `moss_tts_realtime` → MOSS-Audio-Tokenizer). Because
     /// install-state gates on hard coRequisites, a MOSS entry stays not-installed until the codec
@@ -13899,6 +13966,88 @@ mod variant_delete_tests {
                     "deleting {deleted} removes its own {rel}"
                 );
             }
+        }
+    }
+
+    /// sc-25684 (E4): ALL THREE Iris task installs — generation (root files), depth (`depth/`) and
+    /// restoration (`upscaler/`) — share the `speridlabs/iris-3b` snapshot, and the two task exports
+    /// ship byte-identical `empty_prompt.safetensors` (one shared blob). Deleting any one task through
+    /// the SHIPPED catalog removes exactly its own files and keeps every other task's files AND their
+    /// blob contents — including a blob the deleted task shared with a kept one — and never touches
+    /// the generation task's Qwen3-VL text encoder when a depth or restoration task is deleted.
+    #[tokio::test]
+    async fn deleting_any_iris_task_keeps_every_other_tasks_files_and_shared_blobs() {
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .unwrap();
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        let catalog = manifest["models"].as_array().unwrap().clone();
+        let entry = |id: &str| catalog.iter().find(|e| e["id"] == id).unwrap().clone();
+        let generation: &[&str] = &["config.yaml", "model.safetensors"];
+        let depth: &[&str] = &[
+            "depth/config.yaml",
+            "depth/model.safetensors",
+            "depth/empty_prompt.safetensors",
+        ];
+        let restoration: &[&str] = &[
+            "upscaler/config.yaml",
+            "upscaler/model.safetensors",
+            "upscaler/empty_prompt.safetensors",
+        ];
+        for (deleted, removed, kept) in [
+            ("iris_3b", generation, [depth, restoration]),
+            ("iris_3b_depth", depth, [generation, restoration]),
+            ("iris_3b_restore", restoration, [generation, depth]),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let data_dir = tmp.path();
+            let repo = huggingface_repo_cache_path(data_dir, "speridlabs/iris-3b").unwrap();
+            for (index, rel) in generation
+                .iter()
+                .chain(depth)
+                .chain(restoration)
+                .enumerate()
+            {
+                if rel.ends_with("empty_prompt.safetensors") {
+                    // Both task exports point at ONE blob.
+                    seed(&repo, rel, "empty-prompt-blob", 7);
+                } else {
+                    seed(&repo, rel, &format!("blob{index}"), 10 + index);
+                }
+            }
+            let encoder =
+                huggingface_repo_cache_path(data_dir, "Qwen/Qwen3-VL-4B-Instruct").unwrap();
+            seed(&encoder, "config.json", "encoder-config", 5);
+            let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+            remove_whole_model_artifacts(
+                &catalog,
+                deleted,
+                &entry(deleted),
+                data_dir,
+                &allowed_roots,
+                true,
+            )
+            .await
+            .unwrap();
+            let snapshot = repo.join("snapshots/rev");
+            for rel in removed {
+                assert!(
+                    !snapshot.join(rel).exists(),
+                    "deleting {deleted} removes its own {rel}"
+                );
+            }
+            for rel in kept.iter().flat_map(|files| files.iter()) {
+                let bytes = std::fs::read(snapshot.join(rel))
+                    .unwrap_or_else(|error| panic!("deleting {deleted} broke {rel}: {error}"));
+                assert!(!bytes.is_empty(), "deleting {deleted} emptied {rel}");
+            }
+            assert!(
+                encoder.join("snapshots/rev/config.json").exists(),
+                "deleting {deleted} must not touch the text encoder's own repo"
+            );
         }
     }
 

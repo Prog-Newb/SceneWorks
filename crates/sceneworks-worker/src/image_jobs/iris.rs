@@ -570,8 +570,28 @@ mod tests {
         seen: Vec<Seen>,
         /// The adapter stack the loader was handed (`LoadSpec::adapters`).
         loaded_adapters: Vec<gen_core::AdapterSpec>,
+        /// The residency policy the loader was handed (`LoadSpec::offload_policy`); read by the
+        /// Candle-only staged-admission test.
+        #[cfg_attr(target_os = "macos", allow(dead_code))]
+        loaded_offload: Option<gen_core::OffloadPolicy>,
         stopped_on_cancel: bool,
         project_files: Vec<std::path::PathBuf>,
+        /// The task switch around the job (sc-25684), recorded only by [`run_iris_task_switch`].
+        switch: Option<TaskSwitch>,
+    }
+
+    /// What the process-global caches held around one generation job that started with a
+    /// restoration transform resident and was followed by a restoration cold load.
+    #[derive(Debug)]
+    struct TaskSwitch {
+        /// The transform was still resident after the generation job.
+        transform_resident_after_generation: bool,
+        /// The resident generator's component ids after the generation job (`None` = none).
+        generator_after_generation: Option<Vec<String>>,
+        /// The resident generator's component ids after the restoration cold load.
+        generator_after_restoration: Option<Vec<String>>,
+        /// The transform was resident after the restoration cold load.
+        transform_resident_after_restoration: bool,
     }
 
     fn files_under(root: &Path) -> Vec<std::path::PathBuf> {
@@ -639,6 +659,32 @@ mod tests {
         memory_cap_gb: &str,
         adapters: &[TestAdapter],
     ) -> ArmRun {
+        run_iris_arm_inner(
+            behavior,
+            cancel_requested,
+            extra,
+            memory_cap_gb,
+            adapters,
+            false,
+        )
+    }
+
+    /// One completed generation job between two restoration loads (sc-25684): a restoration
+    /// transform is made resident in the process-global transform cache first, the iris arm runs,
+    /// then a restoration transform cold-loads again — all under one env lock so no other test
+    /// touches the global caches in between.
+    fn run_iris_task_switch() -> ArmRun {
+        run_iris_arm_inner(ArmBehavior::Completes, false, json!({}), "64", &[], true)
+    }
+
+    fn run_iris_arm_inner(
+        behavior: ArmBehavior,
+        cancel_requested: bool,
+        extra: Value,
+        memory_cap_gb: &str,
+        adapters: &[TestAdapter],
+        task_switch: bool,
+    ) -> ArmRun {
         // The arm admits against the host's memory before loading; pin an emulated budget so the
         // outcome does not depend on the host (a 7 GiB hosted runner otherwise refuses the request
         // before the arm under test is reached, and a GPU-less runner yields no budget at all).
@@ -681,6 +727,7 @@ mod tests {
         let loads = Arc::new(Mutex::new(0_u32));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let loaded_adapters = Arc::new(Mutex::new(Vec::new()));
+        let loaded_offload = Arc::new(Mutex::new(None));
         let stopped_on_cancel = Arc::new(Mutex::new(false));
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -688,8 +735,15 @@ mod tests {
             .build()
             .unwrap();
         // `block_on` polls the arm on THIS thread, so the thread-local capture sees its events.
-        let ((outcome, posts, asset_writes), _logged) = with_captured_tracing(|| {
+        let restoration_export = tempfile::tempdir().unwrap();
+        let ((outcome, posts, asset_writes, switch), _logged) = with_captured_tracing(|| {
             runtime.block_on(async {
+                if task_switch {
+                    crate::transform_cache::load_stub_into_global_cache(restoration_export.path())
+                        .await
+                        .unwrap();
+                    assert!(crate::transform_cache::global_transform_resident().await);
+                }
                 let (base_url, posts) = spawn_job_api(cancel_requested).await;
                 let mut settings = settings_at(data.path());
                 settings.api_url = base_url;
@@ -727,8 +781,10 @@ mod tests {
                 let loader_seen = Arc::clone(&seen);
                 let loader_stopped = Arc::clone(&stopped_on_cancel);
                 let loader_adapters = Arc::clone(&loaded_adapters);
+                let loader_offload = Arc::clone(&loaded_offload);
                 let loader = move |_engine: &str, spec: &LoadSpec| {
                     *loader_loads.lock().unwrap() += 1;
+                    *loader_offload.lock().unwrap() = Some(spec.offload_policy);
                     *loader_adapters.lock().unwrap() = spec.adapters.clone();
                     Ok(Box::new(IrisArmProbe {
                         descriptor,
@@ -769,12 +825,34 @@ mod tests {
                     .await
                     .expect("the iris arm finished");
                 let posts = posts.lock().unwrap().clone();
-                (outcome, posts, asset_writes)
+                let switch = if task_switch {
+                    let transform_resident_after_generation =
+                        crate::transform_cache::global_transform_resident().await;
+                    let generator_after_generation =
+                        crate::generator_cache::global_generator_resident().await;
+                    // A restoration cold load (the production pre-load hook evicts the generator).
+                    let second_export = tempfile::tempdir().unwrap();
+                    crate::transform_cache::load_stub_into_global_cache(second_export.path())
+                        .await
+                        .unwrap();
+                    Some(TaskSwitch {
+                        transform_resident_after_generation,
+                        generator_after_generation,
+                        generator_after_restoration:
+                            crate::generator_cache::global_generator_resident().await,
+                        transform_resident_after_restoration:
+                            crate::transform_cache::global_transform_resident().await,
+                    })
+                } else {
+                    None
+                };
+                (outcome, posts, asset_writes, switch)
             })
         });
         let generate_calls = *calls.lock().unwrap();
         let seen = seen.lock().unwrap().clone();
         let loaded_adapters = loaded_adapters.lock().unwrap().clone();
+        let loaded_offload = *loaded_offload.lock().unwrap();
         let stopped_on_cancel = *stopped_on_cancel.lock().unwrap();
         let load_calls = *loads.lock().unwrap();
         ArmRun {
@@ -785,8 +863,10 @@ mod tests {
             generate_calls,
             seen,
             loaded_adapters,
+            loaded_offload,
             stopped_on_cancel,
             project_files: files_under(project.path()),
+            switch,
         }
     }
 
@@ -1179,7 +1259,8 @@ mod tests {
 
     /// An emulated budget that admits ONE weightless 64² Iris image but not eight: the MLX generic
     /// estimate charges its activation term per batched image; the Candle gate adds
-    /// `(images − 1) × candle.promptBatchImageGb` to the 24 GB floor (8 images: 66 GB).
+    /// `(images × max(1, MP) − 1) × candle.imageActivationGbPerMegapixel` to the 24 GB floor (8
+    /// images: 66 GB).
     #[cfg(target_os = "macos")]
     const BATCH_ADMISSION_CAP_GB: &str = "40";
     #[cfg(not(target_os = "macos"))]
@@ -1322,7 +1403,7 @@ mod tests {
     /// eight-image native batch BEFORE load, instead of admitting it on a one-image estimate.
     ///
     /// *Mutation that reds this:* `request_batch` back to a constant 1 (MLX) /
-    /// `native_batch_overlay_bytes` back to 0 (Candle).
+    /// `declared_activation_overlay_bytes` back to 0 (Candle).
     #[test]
     fn a_native_prompt_batch_is_admitted_against_its_whole_image_count() {
         let cap = BATCH_ADMISSION_CAP_GB;
@@ -1341,6 +1422,105 @@ mod tests {
             other => panic!("an 8-image batch must be refused before load, got {other:?}"),
         }
         assert_eq!(batch.load_calls, 0, "refused before the loader ran");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // sc-25684 (S6) — admission above the 1024² the floors were declared at.
+    // ---------------------------------------------------------------------------------------
+
+    /// A budget that admits a weightless 1024² image but not a 2048² one: on MLX the generic estimate
+    /// scales its activation term with output megapixels; on Candle the gate adds
+    /// `candle.imageActivationGbPerMegapixel × (MP − 1)` (2048²: +18 GB on the 24 GB floor).
+    #[cfg(target_os = "macos")]
+    const AREA_ADMISSION_CAP_GB: &str = "40";
+    #[cfg(not(target_os = "macos"))]
+    const AREA_ADMISSION_CAP_GB: &str = "28";
+
+    /// The limits allow 2048² but every floor was declared at 1024²: a 4 MP request is admitted
+    /// against its area — refused BEFORE load on a budget that fits 1024² — never admitted on the
+    /// 1024² floor and never silently resized.
+    ///
+    /// *Mutation that reds this:* `declared_activation_overlay_bytes` back to the batch-only
+    /// `(images − 1) × …` (Candle) / `generic_headroom_bytes` without the megapixel scale (MLX).
+    #[test]
+    fn an_output_above_1024_squared_is_admitted_against_its_area() {
+        let cap = AREA_ADMISSION_CAP_GB;
+        let square = run_iris_arm_with_memory_cap(
+            ArmBehavior::Fails,
+            false,
+            json!({ "width": 1024, "height": 1024 }),
+            cap,
+        );
+        assert_eq!(square.load_calls, 1, "1024² fits: {:?}", square.outcome);
+        let large = run_iris_arm_with_memory_cap(
+            ArmBehavior::Fails,
+            false,
+            json!({ "width": 2048, "height": 2048 }),
+            cap,
+        );
+        match &large.outcome {
+            Err(crate::error::WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("iris_3b"), "{message}")
+            }
+            other => panic!("a 2048² render must be refused before load, got {other:?}"),
+        }
+        assert_eq!(large.load_calls, 0, "refused before the loader ran");
+        assert!(large.asset_writes.is_empty());
+        assert!(large.project_files.is_empty(), "{:?}", large.project_files);
+    }
+
+    /// Generation ↔ restoration task switching keeps ONE Iris task model resident: a generation job
+    /// evicts a resident restoration transform before its own load, and loads the backbone WITH its
+    /// `text_encoder` component; a restoration cold load then evicts that generator — and the text
+    /// encoder with it (restoration runs without one). Depth's side is pinned in
+    /// `depth_jobs::tests::a_depth_job_evicts_a_resident_generator_or_transform_before_loading`.
+    ///
+    /// *Mutations that red this:* drop `evict_resident_transform()` from the generator cache entry
+    /// points (the transform survives the generation job) / the transform cache's
+    /// `evict_resident_generator_before_transform_load` hook (the generator and its text encoder
+    /// survive the restoration load).
+    #[test]
+    fn generation_and_restoration_evict_each_other_and_the_text_encoder_leaves_with_its_generator()
+    {
+        let run = run_iris_task_switch();
+        run.outcome.as_ref().unwrap();
+        assert_eq!(run.load_calls, 1);
+        let switch = run.switch.expect("task switch recorded");
+        assert!(
+            !switch.transform_resident_after_generation,
+            "the generation job must evict the resident restoration transform: {switch:?}"
+        );
+        assert_eq!(
+            switch.generator_after_generation,
+            Some(vec![gen_core::iris::TEXT_ENCODER_COMPONENT.to_owned()]),
+            "the generator is resident with its text encoder: {switch:?}"
+        );
+        assert_eq!(
+            switch.generator_after_restoration, None,
+            "a restoration cold load evicts the generator and its text encoder: {switch:?}"
+        );
+        assert!(switch.transform_resident_after_restoration, "{switch:?}");
+    }
+
+    /// On CUDA a resident restoration transform holds real VRAM that the free-VRAM probe would count
+    /// as occupied — while the generator cache evicts it anyway on load — so the Candle arm evicts it
+    /// BEFORE probing (a stub transform holds no VRAM, so this is pinned on the source order; the
+    /// eviction itself is pinned by the task-switch test above).
+    ///
+    /// *Mutation that reds this:* move/drop the `evict_resident_transform()` before the probe.
+    #[test]
+    fn the_candle_arm_evicts_a_resident_transform_before_probing_vram() {
+        let base = include_str!("base.rs");
+        let body = &base[base
+            .find("async fn generate_candle_stream_using(")
+            .expect("candle arm")..];
+        let evict = body
+            .find("crate::transform_cache::evict_resident_transform().await?")
+            .expect("the candle arm evicts a resident transform");
+        let probe = body
+            .find("crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await")
+            .expect("the candle arm probes VRAM");
+        assert!(evict < probe, "evict before the probe");
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1370,27 +1550,54 @@ mod tests {
             );
             assert_eq!(
                 crate::vram_gate::predicted_sequential_peak_gb(&iris, tier),
-                Some(21.4 + crate::vram_gate::HEADROOM_GB),
-                "{tier}: the staged bound (recorded resident peak + reserve)"
+                Some(12.0 + crate::vram_gate::HEADROOM_GB),
+                "{tier}: the measured staged peak + reserve"
             );
         }
     }
 
-    /// A card under the floor gets a typed refusal BEFORE the loader runs — not a load that OOMs.
+    /// sc-25684: a 16 GB card runs a 1024² Iris image STAGED (the measured 12.0 GB staged peak +
+    /// 2 GB reserve fits; the 24 GB resident floor does not) — the loader is handed
+    /// `OffloadPolicy::Sequential` — while a 2048² image on the same card (+18 GB of declared
+    /// activations) and any image on a 12 GB card are refused BEFORE the loader runs.
+    ///
+    /// *Mutations that red this:* the staged row back to the resident 21.4 (16 GB refused), or
+    /// `declared_activation_overlay_bytes` ignoring area (2048² admitted).
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
-    fn a_card_under_the_iris_candle_floor_is_refused_before_load() {
-        let run = run_iris_arm_with_memory_cap(ArmBehavior::Fails, false, json!({}), "16");
-        match &run.outcome {
-            Err(crate::error::WorkerError::InvalidPayload(message)) => assert!(
-                message.contains("iris_3b") && message.contains("VRAM"),
-                "the refusal names the model and its VRAM need: {message}"
-            ),
-            other => panic!("a 16 GB card must be refused before load, got {other:?}"),
+    fn a_16_gb_card_runs_1024_staged_and_refuses_what_does_not_fit() {
+        let staged = run_iris_arm_with_memory_cap(
+            ArmBehavior::Fails,
+            false,
+            json!({ "width": 1024, "height": 1024 }),
+            "16",
+        );
+        assert_eq!(staged.load_calls, 1, "{:?}", staged.outcome);
+        assert_eq!(
+            staged.loaded_offload,
+            Some(gen_core::OffloadPolicy::Sequential),
+            "a 16 GB card loads staged"
+        );
+        for (extra, cap) in [
+            (json!({ "width": 2048, "height": 2048 }), "16"),
+            (json!({ "width": 1024, "height": 1024 }), "12"),
+        ] {
+            let run = run_iris_arm_with_memory_cap(ArmBehavior::Fails, false, extra.clone(), cap);
+            match &run.outcome {
+                Err(crate::error::WorkerError::InvalidPayload(message)) => assert!(
+                    message.contains("iris_3b") && message.contains("VRAM"),
+                    "{extra} on {cap} GB: the refusal names the model and its VRAM need: {message}"
+                ),
+                other => {
+                    panic!("{extra} on a {cap} GB card must be refused before load, got {other:?}")
+                }
+            }
+            assert_eq!(
+                run.load_calls, 0,
+                "{extra} on {cap} GB: refused before the loader ran"
+            );
+            assert!(run.asset_writes.is_empty(), "{:?}", run.asset_writes);
+            assert!(run.project_files.is_empty(), "{:?}", run.project_files);
         }
-        assert_eq!(run.load_calls, 0, "refused before the loader ran");
-        assert_eq!(run.generate_calls, 0);
-        assert!(run.asset_writes.is_empty(), "{:?}", run.asset_writes);
-        assert!(run.project_files.is_empty(), "{:?}", run.project_files);
     }
 }

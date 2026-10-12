@@ -515,8 +515,19 @@ async fn spawn_job_api(cancel_requested: bool, reject_completion: bool) -> (Stri
     (format!("http://{address}"), posts)
 }
 
+/// A model resident in a process-global cache when the depth job starts (sc-25684 task switching).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Resident {
+    /// A warm generator in the generator cache (the Iris generator carries its text encoder there).
+    Generator,
+    /// A resident restoration transform in the transform cache.
+    Transform,
+}
+
 struct JobRun {
     outcome: WorkerResult<()>,
+    /// Whether a generator / a transform was still resident in the global caches after the job.
+    resident_after: (bool, bool),
     posts: Vec<Value>,
     load_calls: u32,
     seen: Option<(u32, u32, DepthResolution)>,
@@ -558,6 +569,7 @@ struct JobSetup {
     memory_cap_gb: &'static str,
     orientation: Option<u16>,
     resolution: Value,
+    resident: Option<Resident>,
 }
 
 impl Default for JobSetup {
@@ -570,6 +582,7 @@ impl Default for JobSetup {
             memory_cap_gb: "64",
             orientation: Some(6),
             resolution: json!({ "mode": "capped", "maxSide": 1024 }),
+            resident: None,
         }
     }
 }
@@ -618,7 +631,25 @@ fn run_job(setup: JobSetup) -> JobRun {
         .build()
         .unwrap();
     let project_id = project.id.clone();
-    let (outcome, posts) = runtime.block_on(async {
+    let resident_weights = tempfile::tempdir().unwrap();
+    let (outcome, posts, resident_after) = runtime.block_on(async {
+        match setup.resident {
+            Some(Resident::Generator) => {
+                crate::generator_cache::load_stub_into_global_cache(resident_weights.path())
+                    .await
+                    .unwrap();
+                assert!(crate::generator_cache::global_generator_resident()
+                    .await
+                    .is_some());
+            }
+            Some(Resident::Transform) => {
+                crate::transform_cache::load_stub_into_global_cache(resident_weights.path())
+                    .await
+                    .unwrap();
+                assert!(crate::transform_cache::global_transform_resident().await);
+            }
+            None => {}
+        }
         let (base_url, posts) =
             spawn_job_api(setup.cancel_requested, setup.reject_completion).await;
         let mut settings = settings_at(data.path());
@@ -654,12 +685,19 @@ fn run_job(setup: JobSetup) -> JobRun {
         .await
         .expect("the depth job finished");
         let posts = posts.lock().unwrap().clone();
-        (outcome, posts)
+        let resident_after = (
+            crate::generator_cache::global_generator_resident()
+                .await
+                .is_some(),
+            crate::transform_cache::global_transform_resident().await,
+        );
+        (outcome, posts, resident_after)
     });
     let load_calls = *loads.lock().unwrap();
     let seen = *seen.lock().unwrap();
     JobRun {
         outcome,
+        resident_after,
         posts,
         load_calls,
         seen,
@@ -877,6 +915,46 @@ fn missing_incomplete_and_over_budget_jobs_fail_typed_before_loading() {
     assert_eq!(torn.load_calls, 0);
 
     let refused = run_job(JobSetup {
+        memory_cap_gb: "4",
+        ..JobSetup::default()
+    });
+    assert!(refused
+        .outcome
+        .as_ref()
+        .unwrap_err()
+        .to_string()
+        .starts_with("[iris_depth_memory_admission]"));
+    assert_eq!(refused.load_calls, 0);
+    assert!(refused.depth_files().is_empty());
+}
+
+// ---- task switching (sc-25684) -------------------------------------------------------------------
+
+/// Generation ↔ depth ↔ restoration share one GPU budget: a depth job evicts a warm generator (and
+/// the text encoder staged inside it) or a resident restoration transform BEFORE it admits and loads
+/// its own estimator, so two Iris task models are never resident together over the cap. The
+/// estimator itself loads with no text encoder and no components (asserted by the loader in
+/// `run_job`), and leaves nothing resident after the job.
+///
+/// *Mutation that reds this:* drop the `evict_resident_engines()` call in the job body.
+#[test]
+fn a_depth_job_evicts_a_resident_generator_or_transform_before_loading() {
+    for resident in [Resident::Generator, Resident::Transform] {
+        let run = run_job(JobSetup {
+            resident: Some(resident),
+            ..JobSetup::default()
+        });
+        run.outcome.as_ref().unwrap();
+        assert_eq!(run.load_calls, 1, "{resident:?}");
+        assert_eq!(
+            run.resident_after,
+            (false, false),
+            "{resident:?} must be evicted by the depth job"
+        );
+    }
+    // Over-budget refusals still leave typed outcomes and no files after the switch.
+    let refused = run_job(JobSetup {
+        resident: Some(Resident::Generator),
         memory_cap_gb: "4",
         ..JobSetup::default()
     });

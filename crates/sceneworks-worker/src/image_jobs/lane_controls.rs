@@ -163,39 +163,45 @@ pub(crate) fn resolve_native_prompt_batch(
     Ok(Some(batch))
 }
 
-/// The DECLARED extra working set of a native prompt batch on the Candle lane, in bytes (sc-25681):
-/// every image beyond the first adds its pixel-space activations,
-/// `(images − 1) × candle.promptBatchImageGb × max(1, width·height / 1024²)`. The single-image
-/// floors (`candle.minMemoryGb` / `sequentialPeakGb`) already carry one image; the area term never
-/// shrinks below 1024² (the floors were declared there). `0` for an ordinary request. A batch on an
-/// entry that declares no per-image term is refused before load rather than admitted on a floor
-/// sized for one image. S6 (sc-25684) owns the measured value.
+/// The DECLARED pixel-space activation overlay of a Candle image request, in bytes, charged on top of
+/// the single-image floors (`candle.minMemoryGb` / `sequentialPeakGb`, which carry ONE image at
+/// <= 1024²): `candle.imageActivationGbPerMegapixel × (images × max(1, width·height / 1024²) − 1)`.
+///
+/// One term covers both ways a request renders more pixels than the floors were declared at — the
+/// extra images of a native prompt batch (sc-25681) and an output above 1024² (sc-25684: Iris allows
+/// 2048², whose activations are 4× the 1024² ones; both engines run fused attention, so the transient
+/// is linear in tokens). The area never shrinks below 1024² (the floors were declared there). `0` for
+/// a single image at <= 1 MP, and for an entry that declares no term on an ordinary request (its
+/// legacy floors stand). A batch on an entry that declares no term is refused before load rather than
+/// admitted on a floor sized for one image.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-pub(crate) fn native_batch_overlay_bytes(
+pub(crate) fn declared_activation_overlay_bytes(
     request: &ImageRequest,
     batch: Option<&NativePromptBatch>,
     width: u32,
     height: u32,
 ) -> WorkerResult<u64> {
-    let Some(batch) = batch else {
+    let images = batch.map_or(1, NativePromptBatch::images);
+    let megapixels = (f64::from(width) * f64::from(height) / (1024.0 * 1024.0)).max(1.0);
+    let units = f64::from(images) * megapixels - 1.0;
+    if units <= 0.0 {
         return Ok(0);
-    };
-    let per_image_gb = request
+    }
+    let per_megapixel_gb = request
         .model_manifest_entry
         .get("candle")
-        .and_then(|candle| candle.get("promptBatchImageGb"))
+        .and_then(|candle| candle.get("imageActivationGbPerMegapixel"))
         .and_then(Value::as_f64)
-        .filter(|gb| gb.is_finite() && *gb > 0.0)
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "{}: no declared per-image memory for a prompt batch (candle.promptBatchImageGb); \
-                 send one job per prompt",
-                request.model
-            ))
-        })?;
-    let megapixels = (f64::from(width) * f64::from(height) / (1024.0 * 1024.0)).max(1.0);
-    let extra_images = f64::from(batch.images().saturating_sub(1));
-    Ok((extra_images * per_image_gb * megapixels * crate::fit_gate::BYTES_PER_GIB).round() as u64)
+        .filter(|gb| gb.is_finite() && *gb > 0.0);
+    match per_megapixel_gb {
+        Some(gb) => Ok((units * gb * crate::fit_gate::BYTES_PER_GIB).round() as u64),
+        None if batch.is_some() => Err(WorkerError::InvalidPayload(format!(
+            "{}: no declared per-image memory for a prompt batch \
+             (candle.imageActivationGbPerMegapixel); send one job per prompt",
+            request.model
+        ))),
+        None => Ok(0),
+    }
 }
 
 /// One adapter's identity, resolved once per job before load: what was requested, from where,
@@ -329,6 +335,74 @@ mod tests {
             "modelManifestEntry": { "id": "m", "image": image },
         });
         ImageRequest::from_payload(payload.as_object().unwrap())
+    }
+
+    fn sized_request(candle: Value) -> ImageRequest {
+        let payload = json!({
+            "projectId": "p",
+            "model": "iris_3b",
+            "prompt": "x",
+            "modelManifestEntry": { "id": "iris_3b", "candle": candle },
+        });
+        ImageRequest::from_payload(payload.as_object().unwrap())
+    }
+
+    /// sc-25684: one declared per-megapixel term charges every image-megapixel beyond the one 1024²
+    /// image the floors carry — the extra images of a batch AND the extra area of an output above
+    /// 1024² (and of every batched image at that size). Below 1024² nothing is credited back.
+    ///
+    /// *Mutations that red this:* the sc-25681 formula `(images − 1) × gb × max(1, MP)` (charges
+    /// 2048² single images nothing and a 2-image 2048² batch 24 instead of 42 GB); dropping the
+    /// `.max(1.0)` (a 512² batch of two would be charged 0.5 instead of 6).
+    #[test]
+    fn the_declared_overlay_scales_with_images_and_area() {
+        let gib = |gb: f64| (gb * crate::fit_gate::BYTES_PER_GIB).round() as u64;
+        let declared = sized_request(json!({ "imageActivationGbPerMegapixel": 6.0 }));
+        let batch = |prompts: usize, count: u32| NativePromptBatch {
+            prompts: (0..prompts).map(|i| format!("p{i}")).collect(),
+            count,
+        };
+        let overlay = |b: Option<&NativePromptBatch>, w: u32, h: u32| {
+            declared_activation_overlay_bytes(&declared, b, w, h).unwrap()
+        };
+        assert_eq!(
+            overlay(None, 1024, 1024),
+            0,
+            "the floors carry one 1024² image"
+        );
+        assert_eq!(
+            overlay(None, 1344, 768),
+            0,
+            "under 1 MP is inside the floor"
+        );
+        assert_eq!(
+            overlay(None, 512, 512),
+            0,
+            "nothing below 1024² is credited back"
+        );
+        assert_eq!(overlay(None, 2048, 2048), gib(18.0), "4 MP: three extra MP");
+        assert_eq!(overlay(None, 2048, 1024), gib(6.0), "2 MP: one extra MP");
+        assert_eq!(overlay(Some(&batch(2, 1)), 512, 512), gib(6.0));
+        assert_eq!(overlay(Some(&batch(2, 4)), 1024, 1024), gib(42.0));
+        assert_eq!(
+            overlay(Some(&batch(2, 1)), 2048, 2048),
+            gib(42.0),
+            "two 4 MP images are eight image-MP, seven beyond the floor"
+        );
+
+        // An entry that declares no term keeps its legacy floors for one image at any size, but a
+        // batch on it is refused rather than admitted on a one-image floor.
+        let undeclared = sized_request(json!({ "minMemoryGb": 24 }));
+        assert_eq!(
+            declared_activation_overlay_bytes(&undeclared, None, 2048, 2048).unwrap(),
+            0
+        );
+        let error = declared_activation_overlay_bytes(&undeclared, Some(&batch(2, 1)), 1024, 1024)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("imageActivationGbPerMegapixel"),
+            "{error}"
+        );
     }
 
     fn honouring() -> Capabilities {
