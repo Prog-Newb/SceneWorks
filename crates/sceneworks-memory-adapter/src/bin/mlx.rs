@@ -27403,7 +27403,10 @@ mod ltx_tests {
         let error = consume_ltx_canary_watchdog_attestation_stream(&request, missing_adapter)
             .expect_err("campaign entry must require authenticated phases");
         missing_thread.join().unwrap();
-        assert!(error.contains("action-bound authenticated provider phase contract"));
+        assert!(
+            error.contains("action-bound authenticated provider phase contract"),
+            "{error}"
+        );
 
         let (adapter, mut watchdog) = UnixStream::pair().unwrap();
         let mut attestation = LtxCanaryWatchdogAttestation {

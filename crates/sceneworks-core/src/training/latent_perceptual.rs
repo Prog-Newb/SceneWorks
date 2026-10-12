@@ -83,7 +83,7 @@ pub const LATENT_LOSSES: [LatentLossSpec; 2] = [VAE_ANCHOR, LATENT_LPIPS];
 /// platforms (technique flags are static per target, sc-24830): every target whose trainer has an x0
 /// decoder ([`super::depth_anchoring::x0_decoder_for_trainer`]) and drives the shared aux-loss
 /// builder, i.e. exactly the depth-anchoring targets. A worker test pins this to the descriptors.
-pub const VAE_ANCHOR_TARGETS: [&str; 16] = [
+pub const VAE_ANCHOR_TARGETS: [&str; 18] = [
     "z_image_turbo_lora",
     "sdxl_lora",
     "illustrious_xl_v1_lora",
@@ -100,6 +100,8 @@ pub const VAE_ANCHOR_TARGETS: [&str; 16] = [
     "ltx_video_lora",
     "ltx_2_5_video_lora",
     "mage_flow_base_lora",
+    "qwen_image_2_1_lora",
+    "qwen_image_2_1_edit_lora",
 ];
 
 /// Builtin targets whose trainer declares E-LatentLPIPS (`techniques.latent_lpips_loss`) on both

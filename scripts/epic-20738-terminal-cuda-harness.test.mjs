@@ -211,11 +211,12 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // (sc-2125), the sc-24830 tiny decoders, the sc-24831 FaceMesh-v2 re-host, the sc-24833 FLUX.2
   // VAE / E-LatentLPIPS weights, and sc-24832's ViTPose+ base and HybrIK / Sapiens re-hosts, plus main's
   // YuE1 / YuE2 / Wan-VACE entries from the final main sync (135 keys), and sc-25213's ostris Z-Image-Turbo
-  // de-distill training adapter (136 keys). The Illustrious file censuses below are
+  // de-distill training adapter (136 keys), and the TAEQI2.1 tiny decoder of the Qwen Image 2.1 trainer's
+  // decoded-x0 losses (137 keys). The Illustrious file censuses below are
   // the real subject of this test and did NOT move — which is the point of asserting them beside the
   // digest.
   assert.equal(current.downloadEvidenceSha256,
-    "d5234f090c9612d8f423bcc01f5b4af7a4375f7b52a5399ee984ab7a67f3dc79");
+    "cc86ec216ff857331e6472015e8a3da10ecac5983bc7f8974d11b6804e44991e");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 
@@ -3294,7 +3295,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
           derivedSidecarRoot: path.join(scratch, "derived-candle-device-cache"),
           missingStore: path.join(scratch, "persistent-missing-file"),
           expectedNonModelPaths: [
-            { kind: "cargoTarget", path: path.resolve(sceneworks, "target") },
+            { kind: "cargoTarget", path: path.resolve(process.env.CARGO_TARGET_DIR ?? path.join(sceneworks, "target")) },
             { kind: "cargoHome", path: path.resolve(process.env.CARGO_HOME ?? path.join(process.env.USERPROFILE ?? scratch, ".cargo")) },
             { kind: "campaignOutput", path: output },
             { kind: "pythonVenv", path: path.dirname(path.dirname(path.resolve("python"))) },

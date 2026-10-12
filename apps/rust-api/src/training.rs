@@ -1981,6 +1981,18 @@ pub(crate) async fn create_training_job(
     // model installed and room on disk. A dry run only resolves the plan, so it
     // is exempt — that is how you preview a plan before installing the model.
     if !payload.dry_run {
+        // A base whose licence binds derivatives (Qwen Image 2.1's Qwen RESEARCH licence, epic 24107
+        // E12) needs the user's explicit acceptance before a run starts. The Training Studio shows
+        // the notice and sends the assertion; this is the backstop for every other client.
+        if let Some(error) = training_license_acknowledgment_error(target, &payload.extra) {
+            return Err(error);
+        }
+        // A kernel with no candle trainer can never be claimed off-Mac, so a real run here would
+        // sit queued forever. Refuse it with the reason instead.
+        if let Some(message) = training_host_unavailable_message(target, cfg!(target_os = "macos"))
+        {
+            return Err(ApiError::bad_request(message));
+        }
         if let Some(message) = training_base_unavailable_message(
             training_base_model_status(&data_dir, target),
             &target.base_model,
@@ -2109,6 +2121,18 @@ pub(crate) async fn create_training_job(
     {
         provenance.retain(|_, value| !value.is_null());
     }
+    // A trained adapter is a derivative of its base, so it records the base's licence (epic 24107
+    // E12 — a Qwen Image 2.1 adapter inherits the Qwen RESEARCH licence). `baseModel` is already
+    // recorded above; `register_trained_lora` keeps these descriptive fields verbatim.
+    if let Some(entry) = manifest_entry.as_object_mut() {
+        entry.extend(trained_adapter_license_fields(target));
+        // An instruction-edit target (sc-24161) produces an EDIT adapter: record it the way the
+        // engine stamps the adapter's own metadata (`trainingMode=edit`), so the library can tell
+        // an edit adapter from a text-to-image one under the same `qwen-image-2-1` family.
+        if sceneworks_core::training::training_target_trains_edit_pairs(target) {
+            entry.insert("trainingMode".to_owned(), Value::String("edit".to_owned()));
+        }
+    }
 
     // A control overlay registers as a ControlNet, not a LoRA (sc-10165, B4): swap the LoRA-shaped
     // descriptive fields (networkType/triggerWords/family) for its inference-side control identity — the
@@ -2204,6 +2228,18 @@ pub(crate) async fn create_training_job(
     job_payload.insert("manifestEntry".to_owned(), manifest_entry);
     if let Some(prepass) = subject_mask_prepass {
         job_payload.insert("subjectMaskPrepass".to_owned(), prepass);
+    }
+    // The acceptance this route already enforced travels with the job, so a retry/duplicate (which
+    // re-validates the stored payload through the raw-job gate) of an accepted run still passes.
+    // Stamped only from an actual assertion (never for an unacknowledged dry run), so flipping a
+    // stored dry run to a real one through retry/duplicate still hits the gate.
+    if sceneworks_core::training::training_target_requires_license_acknowledgment(target)
+        && training_license_acknowledgment_error(target, &payload.extra).is_none()
+    {
+        job_payload.insert(
+            crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+            Value::Bool(true),
+        );
     }
     // Route-owned DATA for the model-source seam: a real training run loads this base model, so
     // it must carry the same typed identity as generation. The seam resolves and preflights it.
@@ -2503,7 +2539,18 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
             // snapshots/. Descend into the main snapshot so callers get a usable component
             // root, exactly as inference does. Fall back to the cache root when no snapshot is
             // materialized yet (the path need not exist at dry-run time).
-            if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
+            let snapshots = huggingface_snapshot_dirs(&cache_path);
+            // Hand the LTX-2.3 trainer the snapshot that actually carries the packed `q4/` tier: on a
+            // cache split across two bundle revisions that is not always the ranked-first one, and the
+            // worker loads `plan.target.baseModelPath` verbatim, so the gate and the path it records
+            // must agree on one snapshot (#2953). With no complete tier anywhere — a dry run against an
+            // uninstalled base — this falls through to the shared resolution below unchanged.
+            if is_ltx23_packed_training_target(target) {
+                if let Some(snapshot) = ltx_q4_training_snapshot(&snapshots) {
+                    return snapshot.join("q4").display().to_string();
+                }
+            }
+            if let Some(snapshot) = snapshots.into_iter().next() {
                 return tiered_turnkey_train_dir(snapshot, target)
                     .display()
                     .to_string();
@@ -2572,11 +2619,10 @@ fn bf16_component_tree_present(bf16: &FsPath) -> bool {
 
 /// LTX is the packed-training exception to the dense-tier rule: both native trainers run QLoRA
 /// directly against the SceneWorks turnkey's `q4/` tier and its sibling Gemma encoder. Pin the exact
-/// LTX files plus every Gemma shard named by its index so a partial generation-only or torn
-/// co-requisite download cannot pass the run gate.
-fn ltx_q4_training_tier_present(snapshot: &FsPath) -> bool {
+/// LTX files so a partial, generation-only download cannot pass the run gate.
+fn ltx_q4_tier_files_present(snapshot: &FsPath) -> bool {
     let q4 = snapshot.join("q4");
-    let q4_present = [
+    [
         "quantize_config.json",
         "transformer.safetensors",
         "connector.safetensors",
@@ -2584,12 +2630,75 @@ fn ltx_q4_training_tier_present(snapshot: &FsPath) -> bool {
         "vae_encoder.safetensors",
     ]
     .iter()
-    .all(|file| q4.join(file).is_file());
-    if !q4_present {
-        return false;
-    }
+    .all(|file| q4.join(file).is_file())
+}
 
-    sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete(&snapshot.join("gemma"))
+/// Whether this target runs QLoRA against the FLAT packed `q4/` LTX-2.3 turnkey tier — as opposed to
+/// LTX-2.5's nested `dev/q4/` identity, or the dense `bf16/` tier every other tiered turnkey trains on.
+fn is_ltx23_packed_training_target(target: &TrainingTarget) -> bool {
+    target.kernel == "ltx_mlx_lora" && target.base_model != "ltx_2_5"
+}
+
+/// The LTX-2.3 turnkey snapshot whose packed `q4/` tier is complete, searched across EVERY
+/// materialized snapshot of the repo cache rather than only the ranked-first one.
+///
+/// Hugging Face keeps each filtered download under the revision it was fetched at, so a real install
+/// straddles two snapshots whenever the bundle pin moves: an install predating the sc-18853 bump
+/// keeps `q4/` under the parent revision while any later fetch materializes the bumped one.
+/// Generation tolerates exactly that split — the worker scans both bundle revisions for a complete
+/// tier (`ltx_bundle_subdir_across_revisions`, sc-18853) — so a gate that reads one snapshot refuses
+/// a real run whose weights the trainer would have loaded happily. That is the
+/// "installed for generation, but training needs the packed q4 tier" dead end in #2953. Ranked order
+/// is preserved, so the `refs/main` / fullest snapshot still wins when several carry the tier.
+fn ltx_q4_training_snapshot(snapshots: &[PathBuf]) -> Option<&PathBuf> {
+    snapshots
+        .iter()
+        .find(|snapshot| ltx_q4_tier_files_present(snapshot))
+}
+
+/// How the LTX-2.3 Gemma-3 co-requisite is named to the user when it is what blocks a real run.
+/// Names the `gemma/` directory as well as the encoder, because the manifest installs it as its own
+/// filtered download (`files: ["gemma/*"]`, ~26 GB) separate from the `q4/` tier — so "the model is
+/// installed" and "this encoder is installed" are genuinely independent facts on disk.
+pub(crate) const LTX_GEMMA_CO_REQUISITE: &str =
+    "Gemma-3 text encoder co-requisite (the bundle's `gemma/`)";
+
+/// Whether a complete Gemma-3 co-requisite is reachable for an LTX-2.3 run: the snapshot the tier
+/// resolved from first, then its siblings.
+///
+/// The trainer resolves its `LoadSpec::text_encoder` through the worker's `bundled_ltx_gemma_dir`,
+/// which already scans sibling revisions for precisely this reason (sc-14377 — "Hugging Face can
+/// retain different filtered downloads in different snapshot revisions"). Requiring `gemma/` inside
+/// the tier's own snapshot made this gate stricter than the loader it exists to predict, so a
+/// split-cache install was refused at submit even though the trainer resolves it.
+fn ltx_gemma_co_requisite_present(snapshots: &[PathBuf], tier_snapshot: &FsPath) -> bool {
+    use sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete;
+    gemma_text_encoder_dir_is_complete(&tier_snapshot.join("gemma"))
+        || snapshots.iter().any(|snapshot| {
+            snapshot.as_path() != tier_snapshot
+                && gemma_text_encoder_dir_is_complete(&snapshot.join("gemma"))
+        })
+}
+
+/// Pre-flight status for the LTX-2.3 packed lane over a materialized turnkey cache: `Ready` only when
+/// a complete `q4/` tier AND a complete Gemma co-requisite are both reachable somewhere in it.
+///
+/// Otherwise the two blockers are reported SEPARATELY, because they are separate downloads with
+/// separate remedies: no complete packed tier anywhere is `TrainingTierMissing`, while a complete
+/// tier whose Gemma encoder is absent or torn is `TrainingCoRequisiteMissing` (#2953). Never
+/// `Missing` — the repo itself is on disk by the time this runs.
+fn ltx23_packed_training_status(snapshots: &[PathBuf]) -> TrainingBaseStatus {
+    match ltx_q4_training_snapshot(snapshots) {
+        Some(snapshot) if ltx_gemma_co_requisite_present(snapshots, snapshot) => {
+            TrainingBaseStatus::Ready
+        }
+        // The packed tier is complete and the Gemma encoder is not: report THAT, rather than a
+        // tier the user already has. These two causes carry different remedies, and collapsing
+        // them is what left #2953 unexitable — "install the packed q4 tier" to someone whose q4
+        // tier is already whole is advice that cannot work however many times it is followed.
+        Some(_) => TrainingBaseStatus::TrainingCoRequisiteMissing(LTX_GEMMA_CO_REQUISITE),
+        None => TrainingBaseStatus::TrainingTierMissing,
+    }
 }
 
 /// LTX-2.5 is also packed-Q4 training, but its undistilled training identity is nested under
@@ -2632,7 +2741,13 @@ fn training_tier_present(snapshot: &FsPath, target: &TrainingTarget) -> bool {
     if target.base_model == "ltx_2_5" {
         ltx25_q4_training_tier_present(snapshot)
     } else if target.kernel == "ltx_mlx_lora" {
-        ltx_q4_training_tier_present(snapshot)
+        // Single-snapshot form. `training_base_model_status` routes the LTX-2.3 lane through
+        // `ltx23_packed_training_status` instead, which searches the whole repo cache (#2953); this
+        // arm remains the conservative fallback for a hypothetical packed target with no tier split.
+        ltx_q4_tier_files_present(snapshot)
+            && sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete(
+                &snapshot.join("gemma"),
+            )
     } else {
         bf16_component_tree_present(&snapshot.join("bf16"))
     }
@@ -3010,7 +3125,9 @@ pub(crate) fn validate_lora_id_component(lora_id: &str) -> Result<(), ApiError> 
 /// Outcome of the pre-flight training-base check. Splitting "nothing on disk" from "the model is
 /// installed for generation but its dense training tier isn't" lets the run-gate give the second case
 /// an actionable "install the training tier" message instead of a bare "not installed" — the exact
-/// confusion the #1694 fix surfaced (sc-13860, AC #4). Both non-`Ready` states block a real run.
+/// confusion the #1694 fix surfaced (sc-13860, AC #4). `TrainingCoRequisiteMissing` carries that same
+/// principle one step further for a tier whose sibling downloads can be absent independently (#2953).
+/// Every non-`Ready` state blocks a real run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrainingBaseStatus {
     /// The dense training weights are present on disk — a real run can proceed.
@@ -3018,6 +3135,11 @@ pub(crate) enum TrainingBaseStatus {
     /// The base repo IS on disk but its family-specific training tier is absent (`bf16/` generally,
     /// packed `q4/` for LTX).
     TrainingTierMissing,
+    /// The family-specific training tier IS complete, but a separately-downloaded co-requisite the
+    /// trainer loads alongside it — named by the payload — is absent or torn. Distinct from
+    /// [`TrainingBaseStatus::TrainingTierMissing`] because the remedy is different: re-installing the
+    /// tier cannot fix it, so blaming the tier sends the user round a loop they cannot exit (#2953).
+    TrainingCoRequisiteMissing(&'static str),
     /// Nothing for this base is on disk — the model was never installed.
     Missing,
 }
@@ -3042,12 +3164,21 @@ pub(crate) fn training_base_model_status(
         .filter(|repo| !repo.is_empty())
     {
         if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
+            let snapshots = huggingface_snapshot_dirs(&cache_path);
+            // LTX-2.3 QLoRA reads the packed `q4/` tier plus the sibling Gemma encoder, and both can
+            // sit in a DIFFERENT snapshot than the ranked-first one on an install whose bundle pin has
+            // moved — a split the generation lane and the trainer's own text-encoder resolver both
+            // accommodate. Search the whole repo cache so this gate stops refusing installs the
+            // trainer would load (#2953).
+            if is_ltx23_packed_training_target(target) && !snapshots.is_empty() {
+                return ltx23_packed_training_status(&snapshots);
+            }
             // Tiered-turnkey re-host (epic 9992 Krea 2 Raw): training reads the DENSE `bf16/` tier, but
             // generation may have installed only the q4/q8 default. The repo-level completion marker does
             // NOT certify a tier (sc-9909), so require the bf16 component tree specifically — otherwise
             // the run-gate would green-light training on a repo that has no dense weights to train. A
             // turnkey on disk without that tier is `TrainingTierMissing`, not `Missing`.
-            if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
+            if let Some(snapshot) = snapshots.into_iter().next() {
                 if target.base_model == "ltx_2_5" || snapshot_is_tiered_turnkey(&snapshot) {
                     return if training_tier_present(&snapshot, target) {
                         TrainingBaseStatus::Ready
@@ -3071,7 +3202,30 @@ pub(crate) fn training_base_model_status(
     if model_is_installed(&managed) {
         return TrainingBaseStatus::Ready;
     }
+    // Split-repo bases (Qwen Image 2.1): the dense training base and the quantized generation tiers
+    // live in DIFFERENT repos, so "the training repo is absent" is not the same as "nothing is
+    // installed". A host that installed only the q8/q4 re-host for generation gets the actionable
+    // "install the bf16 tier" answer (QLoRA is a non-goal), not a bare "not installed".
+    if quantized_generation_repos(&target.base_model)
+        .iter()
+        .filter_map(|repo| huggingface_repo_cache_path(data_dir, repo))
+        .any(|cache_path| !huggingface_snapshot_dirs(&cache_path).is_empty())
+    {
+        return TrainingBaseStatus::TrainingTierMissing;
+    }
     TrainingBaseStatus::Missing
+}
+
+/// The quantized-tier generation repos of a base whose dense training tier is a SEPARATE repo (the
+/// target's `base_model_repo`). Qwen Image 2.1 ships bf16 as the upstream `Qwen/Qwen-Image-2.1`
+/// snapshot and q8/q4 as the `SceneWorks/qwen-image-2-1-mlx` re-host (epic 24107 S5), and its
+/// trainer runs only on the dense base (sc-24159; QLoRA is an epic non-goal). Pinned to the
+/// manifest by `quantized_generation_repos_match_the_manifest_tiers`.
+pub(crate) fn quantized_generation_repos(base_model: &str) -> &'static [&'static str] {
+    match base_model {
+        "qwen_image_2_1" => &["SceneWorks/qwen-image-2-1-mlx"],
+        _ => &[],
+    }
 }
 
 /// Thin boolean wrapper over [`training_base_model_status`]: `true` only when the dense training
@@ -3085,11 +3239,145 @@ pub(crate) fn training_base_model_installed(data_dir: &FsPath, target: &Training
     )
 }
 
+/// The refusal for a real run against a target whose base licence requires acceptance
+/// (`ui.requiresLicenseAcknowledgment`) when the request does not assert `licenseAcknowledged:
+/// true`, or `None` when the run may proceed. Same status + machine code as the pre-download gate
+/// (`models::LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE`), so a client handles both refusals one way.
+pub(crate) fn training_license_acknowledgment_error(
+    target: &TrainingTarget,
+    request_extra: &sceneworks_core::contracts::ExtraFields,
+) -> Option<ApiError> {
+    if !sceneworks_core::training::training_target_requires_license_acknowledgment(target) {
+        return None;
+    }
+    let acknowledged = request_extra
+        .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if acknowledged {
+        return None;
+    }
+    let license = target
+        .ui
+        .get("license")
+        .and_then(Value::as_str)
+        .unwrap_or("its base model's licence");
+    Some(ApiError {
+        status: StatusCode::FORBIDDEN,
+        detail: format!(
+            "Training '{}' requires accepting {license} first: adapters trained from '{}' are \
+             derivatives that inherit its restrictions. Accept the licence notice in the Training \
+             Studio, or send `licenseAcknowledged: true` to assert that the user has accepted it.",
+            target.name, target.base_model
+        ),
+        code: Some(crate::models::LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+        context: None,
+    })
+}
+
+/// The raw-job twin of the typed route's licence gate (`POST /api/v1/jobs`, retry, duplicate): a
+/// `lora_train` / `control_training` payload whose plan names a licence-bound target — by target id
+/// OR by kernel, so a hand-built plan cannot dodge it with a made-up id — and is not an explicit dry
+/// run must carry `licenseAcknowledged: true`. The typed route stamps it on the jobs it accepted.
+pub(crate) fn raw_training_payload_license_error(payload: &JsonObject) -> Option<ApiError> {
+    if payload.get("dryRun").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let plan_target = payload.get("plan").and_then(|plan| plan.get("target"));
+    let field = |key: &str| {
+        plan_target
+            .and_then(|target| target.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+    };
+    let (target_id, kernel) = (field("targetId"), field("kernel"));
+    builtin_training_targets()
+        .targets
+        .iter()
+        .filter(|target| {
+            target_id == Some(target.id.as_str()) || kernel == Some(target.kernel.as_str())
+        })
+        .find_map(|target| {
+            let extra = payload
+                .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+                .map(|value| {
+                    sceneworks_core::contracts::ExtraFields::from([(
+                        crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+                        value.clone(),
+                    )])
+                })
+                .unwrap_or_default();
+            training_license_acknowledgment_error(target, &extra)
+        })
+}
+
+/// The refusal for a hand-built `lora_train` plan on the raw `POST /api/v1/jobs` route whose
+/// instruction-edit shape contradicts its kernel (sc-24161): references under a captioned-only kernel
+/// or a reference-less item under an edit kernel. The typed route's target-level check never sees
+/// these plans, and both Qwen Image 2.1 kernels share one engine trainer, so this is the submit-time
+/// twin of the worker's own floor (`sceneworks_core::training::edit_pair_kernel_shape_error`).
+pub(crate) fn raw_training_payload_edit_shape_error(payload: &JsonObject) -> Option<ApiError> {
+    let plan = payload.get("plan")?;
+    let kernel = plan
+        .get("target")
+        .and_then(|target| target.get("kernel"))
+        .and_then(Value::as_str)?
+        .trim();
+    let items = plan
+        .get("dataset")
+        .and_then(|dataset| dataset.get("items"))
+        .and_then(Value::as_array)?;
+    sceneworks_core::training::edit_pair_kernel_shape_error(
+        kernel,
+        items.iter().map(|item| {
+            item.get("referenceImagePaths")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len)
+        }),
+    )
+    .map(ApiError::bad_request)
+}
+
+/// The refusal for a real run that no worker on this host can ever claim, or `None`. Off-Mac only
+/// candle workers run training, so a kernel outside `CANDLE_ROUTED_TRAINING_KERNELS` (none of the
+/// shipped targets since sc-24160 gave Qwen Image 2.1 its candle lane) would queue forever.
+/// `macos_host` is a parameter so both sides are testable.
+pub(crate) fn training_host_unavailable_message(
+    target: &TrainingTarget,
+    macos_host: bool,
+) -> Option<String> {
+    if macos_host || sceneworks_core::jobs_store::training_kernel_is_candle_routed(&target.kernel) {
+        return None;
+    }
+    Some(format!(
+        "Training '{}' runs on Apple Silicon (native MLX) only; this host has no trainer for it \
+         (kernel '{}'), so the run would never start. Train it on a Mac.",
+        target.name, target.kernel
+    ))
+}
+
+/// The licence fields a trained adapter's library entry inherits from its target (`ui.license` /
+/// `ui.licenseUrl`). Empty for a target that declares no licence, so existing entries are unchanged.
+pub(crate) fn trained_adapter_license_fields(target: &TrainingTarget) -> JsonObject {
+    ["license", "licenseUrl"]
+        .into_iter()
+        .filter_map(|key| {
+            target
+                .ui
+                .get(key)
+                .filter(|value| value.as_str().is_some_and(|text| !text.trim().is_empty()))
+                .map(|value| (key.to_owned(), value.clone()))
+        })
+        .collect()
+}
+
 /// The 400 detail to reject a real run whose base model isn't training-ready, or `None` when it is.
-/// The two blocking states get DISTINCT messages: `Missing` keeps the historical "not installed …
-/// install it from the model catalog" wording, while `TrainingTierMissing` says the model IS installed
-/// (for generation) but training needs its family-specific tier — dense bf16 generally, packed q4
-/// for LTX QLoRA. Split out as a pure fn so the wording is unit-testable without the API.
+/// Every blocking state gets a DISTINCT message, because each has its own remedy: `Missing` keeps the
+/// historical "not installed … install it from the model catalog" wording; `TrainingTierMissing` says
+/// the model IS installed (for generation) but training needs its family-specific tier — dense bf16
+/// generally, packed q4 for LTX QLoRA; and `TrainingCoRequisiteMissing` says the tier is there and
+/// names the co-requisite that isn't, so the reader is not sent to re-install weights they already
+/// hold (#2953). Split out as a pure fn so the wording is unit-testable without the API.
 pub(crate) fn training_base_unavailable_message(
     status: TrainingBaseStatus,
     base_model: &str,
@@ -3108,6 +3396,12 @@ pub(crate) fn training_base_unavailable_message(
                  model catalog before starting a real training run (dry runs work without it)."
             ))
         }
+        TrainingBaseStatus::TrainingCoRequisiteMissing(co_requisite) => Some(format!(
+            "The training tier for base model '{base_model}' is installed, but the {co_requisite} \
+             that training loads alongside it is missing or incomplete. Re-install '{base_model}' \
+             from the model catalog to fetch it, then start the real training run again (dry runs \
+             work without it)."
+        )),
         TrainingBaseStatus::Missing => Some(format!(
             "Base model '{base_model}' is not installed. Install it from the model catalog before \
              starting a real training run (dry runs work without it)."
