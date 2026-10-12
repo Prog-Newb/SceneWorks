@@ -27399,6 +27399,7 @@ mod ltx_tests {
             missing_watchdog
                 .write_all(format!("{base}\n").as_bytes())
                 .unwrap();
+            missing_watchdog
         });
         let error = consume_ltx_canary_watchdog_attestation_stream(&request, missing_adapter)
             .expect_err("campaign entry must require authenticated phases");
@@ -27602,6 +27603,7 @@ mod ltx_tests {
                 bad_watchdog
                     .write_all(format!("{mutated}\n").as_bytes())
                     .unwrap();
+                bad_watchdog
             });
             let error = consume_ltx_canary_watchdog_attestation_stream(&request, bad_adapter)
                 .expect_err("profile, list and order mutations must fail closed");
@@ -27703,6 +27705,7 @@ mod ltx_tests {
                 bad_watchdog
                     .write_all(format!("{changed}\n").as_bytes())
                     .unwrap();
+                bad_watchdog
             });
             let error = consume_ltx_canary_watchdog_attestation_stream(&request, bad_adapter)
                 .expect_err("SC-20318 phase profile/list/order mutations must fail");
@@ -28011,6 +28014,7 @@ mod ltx_tests {
             fake_watchdog
                 .write_all(format!("{swap_gated}\n").as_bytes())
                 .expect("send swap-gated attestation");
+            fake_watchdog
         });
         let error = consume_ltx_canary_watchdog_attestation_stream(&request, fake_adapter)
             .expect_err("an arbitrary swap reserve must not enter the reviewed canary bounds");
@@ -28025,6 +28029,7 @@ mod ltx_tests {
             fake_watchdog
                 .write_all(format!("{percent_gated}\n").as_bytes())
                 .expect("send percent-gated attestation");
+            fake_watchdog
         });
         let error = consume_ltx_canary_watchdog_attestation_stream(&request, fake_adapter)
             .expect_err("a redundant percentage floor must not enter the reviewed canary bounds");
@@ -28040,6 +28045,7 @@ mod ltx_tests {
             fake_watchdog
                 .write_all(format!("{weakened}\n").as_bytes())
                 .expect("send weakened attestation");
+            fake_watchdog
         });
         let error = consume_ltx_canary_watchdog_attestation_stream(&request, fake_adapter)
             .expect_err("weakened runtime floor must not attest");
