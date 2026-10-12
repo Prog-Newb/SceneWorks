@@ -476,7 +476,7 @@ mod tests {
     fn task_objective_floors_gate_per_lane() {
         use sceneworks_core::training::iris::{depth, restore};
         let depth = depth::iris_depth_target().defaults;
-        // 480×640, batch 1: MLX 80 (+4 reserve), CUDA 84.
+        // 480×640, batch 1: MLX 80 (+4 reserve), CUDA 90 (sc-25690: the measured 512² peak + slope).
         assert!(iris_plan_memory_refusal("mlx", "iris_3b_depth", &depth, 1, Some(84.0)).is_none());
         let under = iris_plan_memory_refusal("mlx", "iris_3b_depth", &depth, 1, Some(83.0))
             .expect("83 GB − 4 GB reserve < 80");
@@ -485,10 +485,10 @@ mod tests {
             "{under}"
         );
         assert!(
-            iris_plan_memory_refusal("candle", "iris_3b_depth", &depth, 1, Some(84.0)).is_none()
+            iris_plan_memory_refusal("candle", "iris_3b_depth", &depth, 1, Some(90.0)).is_none()
         );
         assert!(
-            iris_plan_memory_refusal("candle", "iris_3b_depth", &depth, 1, Some(83.0)).is_some()
+            iris_plan_memory_refusal("candle", "iris_3b_depth", &depth, 1, Some(89.0)).is_some()
         );
         assert!(iris_plan_memory_refusal("mlx", "iris_3b_depth", &depth, 1, None).is_some());
         let mut big = depth.clone();

@@ -32,8 +32,8 @@
 use serde_json::{Map, Value};
 
 use super::{
-    boolean, finite_in, invalid, iris_options, iris_training_memory_floor_gb, one_of, string_list,
-    whole, RESUME_FROM_JOB_KEY,
+    boolean, finite_in, invalid, iris_full_activation_checkpointing,
+    iris_generation_memory_floor_gb, iris_options, one_of, string_list, whole, RESUME_FROM_JOB_KEY,
 };
 use crate::training::{
     TrainingConfig, TrainingDataset, TrainingPlanError, TrainingTargetLimitError,
@@ -736,7 +736,12 @@ pub fn iris_rank_memory_floor_gb(lane: &str, config: &TrainingConfig) -> Option<
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("lora");
-    let base = iris_training_memory_floor_gb(lane, network, config.resolution)?;
+    let base = iris_generation_memory_floor_gb(
+        lane,
+        network,
+        config.resolution,
+        iris_full_activation_checkpointing(config),
+    )?;
     let options = iris_options(config).ok()?;
     Some(
         base + if iris_repa_enabled(&options) {

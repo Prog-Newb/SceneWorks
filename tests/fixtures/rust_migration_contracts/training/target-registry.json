@@ -2255,7 +2255,7 @@
         ]
       },
       "memoryFloors": {
-        "basis": "Declared floors (no measurement campaign): MLX LoRA 256px peak 15.3 GB and Candle LoRA 256px peak 21.8 GB on the real 3B backbone; larger resolutions and full fine-tuning are conservative declarations. An MLX floor is judged against unified memory minus the macOS/app reserve the MLX generation gate holds out. A machine under its floor is refused before the model loads.",
+        "basis": "Full fine-tune rows at 512px and 1024px are MEASURED (epic 25678 terminal campaign: MLX peak 84.6 GB at 512px, 110.0 GB at 1024px, 101.5 GB at 1024px with activation checkpointing; Candle 97.6 GB at 512px and 92.2 GB at 1024px with activation checkpointing, plus a 2 GB allocator reserve). Candle 1024px without checkpointing exceeded a 96 GB card, so its row is extrapolated. Adapter rows and the 256px full rows are declared from 256px LoRA peaks (MLX 15.3 GB, Candle 21.8 GB). `full_ac` is a full fine-tune under full activation checkpointing. An MLX floor is judged against unified memory minus the macOS/app reserve the MLX generation gate holds out. A machine under its floor is refused before the model loads.",
         "lanes": {
           "candle": {
             "adapter": {
@@ -2264,9 +2264,14 @@
               "512": 32
             },
             "full": {
-              "1024": 104,
+              "1024": 125,
               "256": 80,
-              "512": 88
+              "512": 100
+            },
+            "full_ac": {
+              "1024": 95,
+              "256": 80,
+              "512": 95
             }
           },
           "mlx": {
@@ -2276,9 +2281,14 @@
               "512": 24
             },
             "full": {
-              "1024": 104,
+              "1024": 110,
               "256": 80,
-              "512": 88
+              "512": 85
+            },
+            "full_ac": {
+              "1024": 102,
+              "256": 80,
+              "512": 85
             }
           }
         },
@@ -2414,14 +2424,14 @@
       },
       "irisObjective": "depth",
       "memoryFloors": {
-        "basis": "Declared floors (no measurement campaign) keyed by the pixels of one micro-batch (batch size × training height × width). Evidence: a full fine-tune of the 3B depth model at 128×128, batch 1, peaked at 59.0 GB on MLX and 64.6 GB on CUDA; larger micro-batches are conservative declarations. An MLX floor is judged against unified memory minus the macOS/app reserve. A machine under its floor is refused before the model loads, and a micro-batch above the last row is refused rather than admitted without a bound.",
+        "basis": "Declared floors (no measurement campaign) keyed by the pixels of one micro-batch (batch size × training height × width). Evidence: a full fine-tune of the 3B depth model at batch 1 peaked at 59.0 / 72.7 / 110.1 GB on MLX at 128² / 512² / 1024², and at 64.6 / 85.9 GB on CUDA at 128² / 512²; CUDA 1024² exceeded a 96 GB card, so the larger CUDA rows are extrapolated from the MLX curve plus the measured CUDA−MLX gap. An MLX floor is judged against unified memory minus the macOS/app reserve. A machine under its floor is refused before the model loads, and a micro-batch above the last row is refused rather than admitted without a bound.",
         "key": "microBatchPixels",
         "lanes": {
           "candle": {
-            "1048576": 116,
+            "1048576": 126,
             "16384": 68,
-            "307200": 84,
-            "589824": 100
+            "307200": 90,
+            "589824": 104
           },
           "mlx": {
             "1048576": 112,
@@ -2554,7 +2564,7 @@
       },
       "irisObjective": "restoration",
       "memoryFloors": {
-        "basis": "Declared floors (no measurement campaign) keyed by the pixels of one micro-batch (batch size × crop²). Evidence at a 256² crop, batch 1: LoRA peaked at 25.2 GB on MLX and 29.3 GB on CUDA; the paper's full fine-tune at 87.5 GB on MLX and ~93.7 GB on CUDA. Larger crops are conservative declarations. An MLX floor is judged against unified memory minus the macOS/app reserve. A machine under its floor is refused before the model loads, and a micro-batch above the last row is refused rather than admitted without a bound.",
+        "basis": "Declared floors (no measurement campaign) keyed by the pixels of one micro-batch (batch size × crop²). Evidence at a 256² crop, batch 1: LoRA peaked at 25.2 GB on MLX and 29.3 GB on CUDA; the paper's full fine-tune at 87.5 GB on MLX and ~93.7 GB on CUDA, and at a 512² crop 101.1 GB on MLX and 101.8 GB on CUDA. At 1024² it needs more than 115 GB on MLX and more than a 96 GB card on CUDA (measured lower bounds), so the 1024² rows stay declared above them. An MLX floor is judged against unified memory minus the macOS/app reserve. A machine under its floor is refused before the model loads, and a micro-batch above the last row is refused rather than admitted without a bound.",
         "key": "microBatchPixels",
         "lanes": {
           "candle": {
@@ -2565,7 +2575,7 @@
             },
             "full": {
               "1048576": 140,
-              "262144": 110,
+              "262144": 104,
               "65536": 94
             }
           },
@@ -2577,7 +2587,7 @@
             },
             "full": {
               "1048576": 128,
-              "262144": 104,
+              "262144": 102,
               "65536": 92
             }
           }

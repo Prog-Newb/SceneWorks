@@ -124,18 +124,26 @@ const UNREAD_ADVANCED_KEYS: [&str; 7] = [
 /// masters, AdamW, batch 1 at 128×128): MLX peak phys_footprint 59.0 GB (nax-macos-2, run
 /// 38136750391); Candle/CUDA VRAM peak 64.6 GB (RTX PRO 6000, run 38133787177). Nearly all of it is
 /// the full-model state (f32 masters + grads + AdamW moments), so the 16 384-pixel rows are that peak
-/// rounded up (Candle adding the 2 GB allocator reserve); larger micro-batches scale the activation
-/// term conservatively. Nothing larger has been run, so a micro-batch above the last row is refused
-/// rather than admitted unbounded. S6 (sc-25684) replaces these with measured values.
+/// rounded up (Candle adding the 2 GB allocator reserve).
+///
+/// The epic-25678 terminal campaign (sc-25690, `train_memory_probe`, batch 1, two steps + export,
+/// whole-process peak) MEASURED 512² (262 144 px) and 1024² (1 048 576 px): MLX phys_footprint
+/// 72.65 GB and 110.08 GB (nax-macos-2, inference run 38292137908) — inside the declared 80 / 112
+/// rows; Candle device VRAM 85.9 GB at 512² (RTX PRO 6000, run 38291037726), so the 307 200 row is
+/// that peak plus the measured MLX per-pixel activation slope to 307 200 px (+2.1 GB) and the
+/// reserve. Candle 1024² ran out of memory on a 96 GB card with 101.3 GB free; the Candle 589 824 /
+/// 1 048 576 rows are EXTRAPOLATED as the MLX value at that size (measured 1024², linear between
+/// the two measured sizes) plus the measured Candle−MLX gap at 512² (+13.3 GB) and the reserve. A
+/// micro-batch above the last row is refused rather than admitted unbounded.
 const DEPTH_FLOORS_GB: [(&str, u64, u32); 8] = [
     ("mlx", 16_384, 64),
     ("mlx", 307_200, 80),
     ("mlx", 589_824, 96),
     ("mlx", 1_048_576, 112),
     ("candle", 16_384, 68),
-    ("candle", 307_200, 84),
-    ("candle", 589_824, 100),
-    ("candle", 1_048_576, 116),
+    ("candle", 307_200, 90),
+    ("candle", 589_824, 104),
+    ("candle", 1_048_576, 126),
 ];
 
 /// The training size `[height, width]` a depth config runs at: `iris.depth_size`, else the square
@@ -189,8 +197,10 @@ fn memory_floors_json() -> Value {
         "key": "microBatchPixels",
         "basis": "Declared floors (no measurement campaign) keyed by the pixels of one micro-batch \
                   (batch size × training height × width). Evidence: a full fine-tune of the 3B depth \
-                  model at 128×128, batch 1, peaked at 59.0 GB on MLX and 64.6 GB on CUDA; larger \
-                  micro-batches are conservative declarations. An MLX floor is judged against unified \
+                  model at batch 1 peaked at 59.0 / 72.7 / 110.1 GB on MLX at 128² / 512² / 1024², \
+                  and at 64.6 / 85.9 GB on CUDA at 128² / 512²; CUDA 1024² exceeded a 96 GB card, \
+                  so the larger CUDA rows are extrapolated from the MLX curve plus the measured \
+                  CUDA−MLX gap. An MLX floor is judged against unified \
                   memory minus the macOS/app reserve. A machine under its floor is refused before the \
                   model loads, and a micro-batch above the last row is refused rather than admitted \
                   without a bound.",
@@ -760,7 +770,7 @@ mod tests {
         let mut config = config();
         // 480×640 × 1 = 307 200 px.
         assert_eq!(depth_memory_floor_gb("mlx", &config), Some(80));
-        assert_eq!(depth_memory_floor_gb("candle", &config), Some(84));
+        assert_eq!(depth_memory_floor_gb("candle", &config), Some(90));
         config.advanced["iris"]["depth_size"] = json!([128, 128]);
         config.resolution = 128;
         assert_eq!(depth_memory_floor_gb("mlx", &config), Some(64));

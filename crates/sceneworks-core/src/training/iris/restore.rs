@@ -109,19 +109,24 @@ const UNREAD_ADVANCED_KEYS: [&str; 6] = [
 /// batch 1, bf16, EMA, two steps): LoRA rank 8 — MLX guard peak 25.2 GB (nax-macos-2, run
 /// 38140601912), CUDA VRAM peak 29.3 GB (run 38137202298); the paper's FULL fine-tune — MLX 87.5 GB,
 /// CUDA ~93.7 GiB. The 65 536-pixel rows are those peaks rounded up (Candle adapter adding the 2 GB
-/// allocator reserve; the Candle full row is the measured peak itself, which ran on the 96 GB card);
-/// larger crops scale the activation, LPIPS and critic terms conservatively. A micro-batch above the
-/// last row is refused rather than admitted unbounded. S6 (sc-25684) replaces these with measured
-/// values.
+/// allocator reserve; the Candle full row is the measured peak itself, which ran on the 96 GB card).
+/// The epic-25678 terminal campaign (sc-25690, `train_memory_probe`: the paper recipe, batch 1, two
+/// steps + export, whole-process peak) MEASURED the full fine-tune at a 512² crop (262 144 px): MLX
+/// 101.13 GB (nax-macos-2, inference run 38292137908), Candle 101.8 GB of device VRAM (RTX PRO 6000,
+/// run 38291037726, + the 2 GB reserve). At 1024² MLX passed 115 GB (the guard's stop at 116.75 GB —
+/// a measured LOWER bound) and Candle ran out of memory on a 96 GB card, so the 1 048 576 full rows
+/// stay declared above those bounds. Adapter rows above 65 536 px scale the activation, LPIPS and
+/// critic terms conservatively. A micro-batch above the last row is refused rather than admitted
+/// unbounded.
 const RESTORE_FLOORS_GB: [(&str, &str, u64, u32); 12] = [
     ("mlx", "full", 65_536, 92),
-    ("mlx", "full", 262_144, 104),
+    ("mlx", "full", 262_144, 102),
     ("mlx", "full", 1_048_576, 128),
     ("mlx", "adapter", 65_536, 28),
     ("mlx", "adapter", 262_144, 36),
     ("mlx", "adapter", 1_048_576, 56),
     ("candle", "full", 65_536, 94),
-    ("candle", "full", 262_144, 110),
+    ("candle", "full", 262_144, 104),
     ("candle", "full", 1_048_576, 140),
     ("candle", "adapter", 65_536, 32),
     ("candle", "adapter", 262_144, 40),
@@ -179,7 +184,9 @@ fn memory_floors_json() -> Value {
         "basis": "Declared floors (no measurement campaign) keyed by the pixels of one micro-batch \
                   (batch size × crop²). Evidence at a 256² crop, batch 1: LoRA peaked at 25.2 GB on \
                   MLX and 29.3 GB on CUDA; the paper's full fine-tune at 87.5 GB on MLX and ~93.7 GB \
-                  on CUDA. Larger crops are conservative declarations. An MLX floor is judged against \
+                  on CUDA, and at a 512² crop 101.1 GB on MLX and 101.8 GB on CUDA. At 1024² it \
+                  needs more than 115 GB on MLX and more than a 96 GB card on CUDA (measured \
+                  lower bounds), so the 1024² rows stay declared above them. An MLX floor is judged against \
                   unified memory minus the macOS/app reserve. A machine under its floor is refused \
                   before the model loads, and a micro-batch above the last row is refused rather than \
                   admitted without a bound.",
