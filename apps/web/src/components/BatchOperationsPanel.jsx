@@ -91,7 +91,9 @@ export function BatchOperationsPanel({
   const [seed, setSeed] = useState("");
   // Depth params (sc-25682).
   const [depthResolution, setDepthResolution] = useState(DEFAULT_DEPTH_RESOLUTION);
-  const [depthModel, setDepthModel] = useState(defaultDepthModel);
+  // `null` = untouched: follows `defaultDepthModel` (re-derived by the host from the live catalog).
+  const [depthModelChoice, setDepthModel] = useState(null);
+  const depthModel = depthModelChoice ?? defaultDepthModel;
 
   const count = assets.length;
   const running = items != null;

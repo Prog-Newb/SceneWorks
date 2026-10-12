@@ -2063,7 +2063,7 @@ fn training_file_with_suffix(file_name: &str, suffix: &str) -> String {
 /// Best-effort and purely informational: the worker and LoRA registration both drive off the job
 /// payload, never this file, so any dir/serialize/write failure is logged and swallowed rather
 /// than failing the training submit.
-async fn write_training_config_snapshot(output_dir: &std::path::Path, plan: &Value) {
+pub(crate) async fn write_training_config_snapshot(output_dir: &std::path::Path, plan: &Value) {
     if let Err(error) = tokio::fs::create_dir_all(output_dir).await {
         tracing::warn!(
             event = "training_config_snapshot_dir_failed",

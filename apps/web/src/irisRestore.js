@@ -41,6 +41,20 @@ export function irisRestoreInstalled(models) {
   return irisRestoreModel(models)?.installState === "installed";
 }
 
+// Whether ANY Iris restoration model can run: the release `iris_3b_restore` export or an installed
+// trained restoration model (which runs from its own export, without the release install).
+export function irisRestoreRunnable(models) {
+  return irisRestoreInstalled(models) || trainedTaskModels(models, "restoration").length > 0;
+}
+
+// The restoration model a fresh selection runs: the release export when installed ("" = release),
+// else the first installed trained restoration model, else the release (whose missing install the
+// plan / job then names).
+export function defaultRestoreModel(models) {
+  if (irisRestoreInstalled(models)) return "";
+  return trainedTaskModels(models, "restoration")[0]?.id ?? "";
+}
+
 // A usable scale: any positive finite number, else null (never coerced to another value).
 export function normalizeIrisScale(value) {
   const number = typeof value === "string" ? Number(value.trim()) : Number(value);

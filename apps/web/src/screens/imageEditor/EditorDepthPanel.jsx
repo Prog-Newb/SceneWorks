@@ -37,7 +37,10 @@ export function EditorDepthPanel({ working, dirty }) {
     token = "",
   } = useAppContext();
   const [resolution, setResolution] = useState(DEFAULT_DEPTH_RESOLUTION);
-  const [irisModel, setIrisModel] = useState(() => defaultDepthModel(models));
+  // `null` = untouched: the default follows the catalog (it may load late, or a trained depth model
+  // may be installed later) until the user picks a model or reopens one.
+  const [irisModelChoice, setIrisModel] = useState(null);
+  const irisModel = irisModelChoice ?? defaultDepthModel(models);
   const [jobId, setJobId] = useState(null);
   const [submitError, setSubmitError] = useState(null);
   const [submitting, setSubmitting] = useState(false);

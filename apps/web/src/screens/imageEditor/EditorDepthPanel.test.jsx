@@ -51,6 +51,18 @@ describe("Image Editor depth tool (sc-25682)", () => {
     );
   const button = (label) => [...container.querySelectorAll("button")].find((b) => b.textContent.trim() === label);
 
+  // Round 2 (4): the model default follows the catalog until the user picks — a catalog that loads
+  // after mount (or a trained depth model installed later) is honoured.
+  it("re-derives the default depth model while the selection is untouched", async () => {
+    apiFetch.mockResolvedValue({ id: "job-depth" });
+    await render({ models: [] });
+    const trained = { id: "my_depth", name: "My depth", installState: "installed", trainedCheckpoint: { task: "depth" } };
+    await render({ models: [{ id: "iris_3b_depth", installState: "missing" }, trained] });
+    expect(button("Estimate depth").disabled).toBe(false);
+    await act(async () => button("Estimate depth").click());
+    expect(JSON.parse(apiFetch.mock.calls[0][2].body).irisModel).toBe("my_depth");
+  });
+
   it("estimates from the saved source with the chosen resolution, shows progress, cancels, opens the result", async () => {
     apiFetch.mockResolvedValue({ id: "job-depth" });
     await render({});

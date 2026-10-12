@@ -406,7 +406,7 @@ pub(crate) async fn retry_job(
     request: AxumRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     let mut payload = retry_job_request_from_body(request).await?;
-    refuse_iris_training_rerun(&state, &job_id).await?;
+    guard_iris_training_rerun(&state, &job_id, false).await?;
     if let Some(job) = crate::generation::replay_vector_prompt_workflow(
         state.clone(),
         &job_id,
@@ -439,18 +439,24 @@ pub(crate) async fn retry_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
-/// An Iris training rerun (retry / duplicate) whose source run already wrote checkpoints or an export
-/// into the output folder the rerun would reuse is refused typed (S9a); every other job is untouched.
-async fn refuse_iris_training_rerun(state: &AppState, job_id: &str) -> Result<(), ApiError> {
+/// The Iris training rerun guard (S9a, [`crate::iris_training::guard_iris_training_rerun`]): a
+/// retry of a run another job still writes, or that already checkpointed / exported, is refused
+/// typed; a duplicate gets its own output id — the returned payload changes. Every other job is
+/// untouched (`None`).
+async fn guard_iris_training_rerun(
+    state: &AppState,
+    job_id: &str,
+    duplicate: bool,
+) -> Result<Option<JsonObject>, ApiError> {
     let source = store_call(state.clone(), {
         let job_id = job_id.to_owned();
         move |store, _timeout| store.get_job(&job_id)
     })
     .await;
     match source {
-        Ok(job) => crate::iris_training::refuse_iris_rerun_into_used_output(state, &job).await,
+        Ok(job) => crate::iris_training::guard_iris_training_rerun(state, &job, duplicate).await,
         // A missing job is the store's own 404 on the retry/duplicate below.
-        Err(_) => Ok(()),
+        Err(_) => Ok(None),
     }
 }
 
@@ -472,7 +478,7 @@ pub(crate) async fn duplicate_job(
     Path(job_id): Path<String>,
     ApiJson(mut payload): ApiJson<DuplicateJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    refuse_iris_training_rerun(&state, &job_id).await?;
+    let fresh_output = guard_iris_training_rerun(&state, &job_id, true).await?;
     if let Some(job) = crate::generation::replay_vector_prompt_workflow(
         state.clone(),
         &job_id,
@@ -491,6 +497,10 @@ pub(crate) async fn duplicate_job(
         false,
     )
     .await?;
+    // An Iris training duplicate trains under its own output id (merged last: never overridable).
+    if let Some(fresh_output) = fresh_output {
+        payload.payload_changes.extend(fresh_output);
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
         store.duplicate_job(
             &job_id,

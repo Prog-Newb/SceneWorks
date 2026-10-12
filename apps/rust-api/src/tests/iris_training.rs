@@ -491,11 +491,13 @@ pub(super) async fn complete(
     body
 }
 
-/// S9a: every fresh submit mints its own output folder, and a retry / duplicate (which copies the
-/// plan, output folder included) of a run that already saved checkpoints is refused typed instead of
-/// starting a fresh run on top of them. A run that wrote nothing retries as before.
+/// S9a: one output id is one run. Every fresh submit mints its own output folder; a DUPLICATE
+/// (which copies the payload) is a new run under its own fresh output id and folder — also of a
+/// queued job, and twice over; a RETRY keeps the run's output id, so it is refused while another job
+/// still writes that output and once the run has a complete checkpoint (resume it) — but a run that
+/// died before its first COMPLETE checkpoint retries as before.
 #[tokio::test]
-async fn an_iris_rerun_never_starts_fresh_on_top_of_saved_checkpoints() {
+async fn an_iris_rerun_never_shares_an_output_with_another_run() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
@@ -504,9 +506,6 @@ async fn an_iris_rerun_never_starts_fresh_on_top_of_saved_checkpoints() {
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, one_item()).await;
     let config = iris_target(&app).await["defaults"].clone();
-
-    let (_, first) = submit(&app, &project_id, &dataset_id, config.clone(), false).await;
-    let (_, second) = submit(&app, &project_id, &dataset_id, config.clone(), false).await;
     let output_dir = |job: &Value| {
         std::path::PathBuf::from(
             job["payload"]["plan"]["output"]["outputDir"]
@@ -514,49 +513,98 @@ async fn an_iris_rerun_never_starts_fresh_on_top_of_saved_checkpoints() {
                 .unwrap(),
         )
     };
-    assert_ne!(
-        output_dir(&first),
-        output_dir(&second),
-        "each fresh run gets its own output folder"
-    );
-
-    // The first run saved a checkpoint, then failed.
-    let job_id = first["id"].as_str().unwrap().to_owned();
-    claim_training_job_as_mlx_worker(&app, &job_id).await;
-    let stem = first["payload"]["plan"]["output"]["fileName"]
-        .as_str()
-        .unwrap()
-        .trim_end_matches(".safetensors")
-        .to_owned();
-    let checkpoint = output_dir(&first).join(format!("{stem}.checkpoints/step_00000002"));
-    std::fs::create_dir_all(&checkpoint).unwrap();
-    std::fs::write(checkpoint.join("state.json"), b"{}").unwrap();
-    complete(&app, &job_id, "failed", json!({})).await;
-    for action in ["retry", "duplicate"] {
-        let (status, error) = request(
-            app.clone(),
-            "POST",
-            &format!("/api/v1/jobs/{job_id}/{action}"),
-            json!({ "payloadChanges": {} }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{action}: {error}");
+    let output_id = |job: &Value| {
+        job["payload"]["manifestEntry"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let stem = |job: &Value| {
+        job["payload"]["plan"]["output"]["fileName"]
+            .as_str()
+            .unwrap()
+            .trim_end_matches(".safetensors")
+            .to_owned()
+    };
+    let rerun = |job_id: String, action: &'static str| {
+        let app = app.clone();
+        async move {
+            request(
+                app,
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{action}"),
+                json!({ "payloadChanges": {} }),
+            )
+            .await
+        }
+    };
+    let refused_in_use = |status: StatusCode, error: &Value| {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
         assert_eq!(error["code"], "iris_training_refused", "{error}");
         assert_eq!(error["context"]["kind"], "output_in_use", "{error}");
-    }
+    };
+    let fresh_run = |source: &Value, copy: &Value| {
+        assert_ne!(output_id(copy), output_id(source), "{copy:#}");
+        assert_ne!(output_dir(copy), output_dir(source));
+        assert!(output_dir(copy).ends_with(output_id(copy)), "{copy:#}");
+        assert_eq!(
+            copy["payload"]["plan"]["output"]["loraId"],
+            json!(output_id(copy))
+        );
+        assert!(
+            !copy["payload"].to_string().contains(&output_id(source)),
+            "no trace of the source's output id: {copy:#}"
+        );
+    };
 
-    // A run that wrote nothing retries as before.
-    let clean_id = second["id"].as_str().unwrap().to_owned();
-    claim_training_job_as_mlx_worker(&app, &clean_id).await;
-    complete(&app, &clean_id, "failed", json!({})).await;
-    let (status, retried) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/jobs/{clean_id}/retry"),
-        json!({ "payloadChanges": {} }),
-    )
-    .await;
+    let (_, first) = submit(&app, &project_id, &dataset_id, config.clone(), false).await;
+
+    // ---- a run with a COMPLETE checkpoint: retry refused (resume it), duplicate twice is fine --------
+    let job_id = first["id"].as_str().unwrap().to_owned();
+    claim_training_job_as_mlx_worker(&app, &job_id).await;
+    let checkpoints = output_dir(&first).join(format!("{}.checkpoints", stem(&first)));
+    std::fs::create_dir_all(checkpoints.join("step_00000002")).unwrap();
+    complete(&app, &job_id, "failed", json!({})).await;
+    // An INCOMPLETE checkpoint (no state.json) is not a resumable run: the retry is allowed...
+    let (status, retried) = rerun(job_id.clone(), "retry").await;
     assert_eq!(status, StatusCode::CREATED, "{retried}");
+    assert_eq!(
+        output_id(&retried),
+        output_id(&first),
+        "a retry is the same run"
+    );
+    // ...and a second retry while the first is queued is refused, as is retrying again later.
+    let (status, error) = rerun(job_id.clone(), "retry").await;
+    refused_in_use(status, &error);
+    let retried_id = retried["id"].as_str().unwrap().to_owned();
+    claim_training_job_as_mlx_worker(&app, &retried_id).await;
+    std::fs::write(checkpoints.join("step_00000002/state.json"), b"{}").unwrap();
+    complete(&app, &retried_id, "failed", json!({})).await;
+    let (status, error) = rerun(retried_id.clone(), "retry").await;
+    refused_in_use(status, &error);
+    assert!(error.to_string().contains("Resume"), "{error}");
+    let (status, one) = rerun(retried_id.clone(), "duplicate").await;
+    assert_eq!(status, StatusCode::CREATED, "{one}");
+    let (status, two) = rerun(retried_id.clone(), "duplicate").await;
+    assert_eq!(status, StatusCode::CREATED, "{two}");
+    fresh_run(&first, &one);
+    fresh_run(&first, &two);
+    assert_ne!(
+        output_id(&one),
+        output_id(&two),
+        "each duplicate is its own run"
+    );
+
+    // ---- a queued run (nothing claims it): retry refused (it is the writer), a duplicate is a
+    // separate run with its own output --------------------------------------------------------------
+    let (_, second) = submit(&app, &project_id, &dataset_id, config.clone(), false).await;
+    assert_ne!(output_dir(&first), output_dir(&second));
+    let queued_id = second["id"].as_str().unwrap().to_owned();
+    let (status, error) = rerun(queued_id.clone(), "retry").await;
+    refused_in_use(status, &error);
+    let (status, copy) = rerun(queued_id.clone(), "duplicate").await;
+    assert_eq!(status, StatusCode::CREATED, "{copy}");
+    fresh_run(&second, &copy);
 }
 
 /// A LoRA run's adapter registers as an Iris generation adapter with its task identity; per-item
