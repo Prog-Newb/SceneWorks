@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "579668b3b23ee7dd1ea37bd0ad79695b9397cb6d",
+    "inferenceRevision": "25231d15b582dc90d332a1f3a41ff45b8032f5b2",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -380,6 +380,8 @@
     "ltx_2_5_video_lora": "ltx_2_5",
     "ltx_video_lora": "ltx_2_3",
     "mage_flow_base_lora": "mage_flow_base",
+    "qwen_image_2_1_edit_lora": "qwen_image_2_1",
+    "qwen_image_2_1_lora": "qwen_image_2_1",
     "sd3_5_large_lora": "sd3_5_large",
     "sd3_5_medium_lora": "sd3_5_medium",
     "sdxl_lora": "sdxl",
