@@ -335,6 +335,13 @@ pub(crate) async fn check_iris_submit(
     }
 
     // ---- the engine's own resolution ------------------------------------------------------------
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        )),
+        allow(unused_mut)
+    )]
     let mut resolved = Value::Null;
     if !dry_run {
         if let Some(backbone) = installed_backbone(state, target) {

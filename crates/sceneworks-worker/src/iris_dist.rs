@@ -976,7 +976,13 @@ fn fleet_failure_message(failures: &[RankFailure], world_size: usize) -> String 
 /// Fake rank processes for the fleet tests: the test binary itself, re-entered on the ignored
 /// [`tests::fake_iris_rank_process`] test, which plays one rank according to
 /// `SCENEWORKS_FAKE_RANK_BEHAVIOR` and records its environment under `SCENEWORKS_FAKE_RANK_RECORD`.
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
 pub(crate) mod test_support {
     use super::*;
 
@@ -1053,7 +1059,13 @@ pub(crate) mod test_support {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
 mod tests {
     use super::*;
 

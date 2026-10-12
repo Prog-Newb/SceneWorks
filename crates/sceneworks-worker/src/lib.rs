@@ -264,7 +264,7 @@ pub use iris_training::{
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     )),
-    allow(dead_code)
+    allow(dead_code, unused_imports)
 )]
 mod iris_curricula;
 pub use iris_curricula::{
@@ -282,7 +282,7 @@ pub use iris_curricula::{resolve_iris_config, resolve_iris_plan};
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     )),
-    allow(dead_code)
+    allow(dead_code, unused_imports)
 )]
 mod iris_dist;
 pub use iris_dist::iris_rank_entry;
