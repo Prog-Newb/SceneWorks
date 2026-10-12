@@ -3680,13 +3680,15 @@ pub fn build_training_plan(
     if input.dataset.items.is_empty() {
         return Err(TrainingPlanError::EmptyDataset);
     }
+    // The dataset's shape (edit pairs vs captioned items) is judged first, so an edit dataset on a
+    // non-edit target is refused as such before any target-specific item check.
+    validate_dataset_shape_for_target(input.target, input.dataset)?;
     if iris::is_iris_training_kernel(&input.target.kernel) {
         iris::validate_iris_dataset(input.target, &input.config, input.dataset)?;
         if iris::iris_objective(input.target) == Some(iris::IrisObjective::Generation) {
             iris::curricula::validate_iris_holdout(&input.config, input.dataset)?;
         }
     }
-    validate_dataset_shape_for_target(input.target, input.dataset)?;
 
     let trigger_words = match input.config.trigger_word.as_deref().map(str::trim) {
         Some(word) if !word.is_empty() => vec![word.to_owned()],

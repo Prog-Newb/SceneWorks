@@ -3036,6 +3036,15 @@ fn adapter_noise_is_gated_on_the_target_flags() {
         .targets
         .iter()
         .filter(|target| target.output_kind != TrainingOutputKind::ControlBranch)
+        .filter(|target| {
+            // The Iris-3B trainers declare no epic 2123 technique, so they advertise neither flag.
+            let iris = sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel);
+            if iris {
+                assert!(!target_supports_weight_noise(target), "{}", target.id);
+                assert!(!target_supports_gradient_noise(target), "{}", target.id);
+            }
+            !iris
+        })
         .collect();
     assert!(!lora_targets.is_empty());
     for target in &lora_targets {
@@ -3102,7 +3111,16 @@ fn resolution_buckets_are_refused_at_submit_on_targets_that_do_not_advertise_the
         .filter(|target| !target_supports_resolution_buckets(target))
         .map(|target| target.id.as_str())
         .collect();
-    assert_eq!(withheld, ["ltx_2_5_video_lora"]);
+    // The Iris-3B trainers declare no epic 2123 technique (they bucket by their own shape_policy).
+    assert_eq!(
+        withheld,
+        [
+            "ltx_2_5_video_lora",
+            "iris_3b_generation",
+            "iris_3b_depth",
+            "iris_3b_restore"
+        ]
+    );
 
     let buckets = |target: &sceneworks_core::training::TrainingTarget| {
         let allowed = target.limits["resolutions"]
@@ -3168,7 +3186,16 @@ fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
         .filter(|target| !target_supports_depth_anchoring(target))
         .map(|target| target.id.as_str())
         .collect();
-    assert_eq!(unsupported, ["krea_2_control"]);
+    // The Iris-3B trainers declare no epic 2123 technique.
+    assert_eq!(
+        unsupported,
+        [
+            "krea_2_control",
+            "iris_3b_generation",
+            "iris_3b_depth",
+            "iris_3b_restore"
+        ]
+    );
 
     for target in &registry.targets {
         with_weight(target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
@@ -3211,7 +3238,17 @@ fn subject_mask_loss_is_refused_at_submit_on_targets_that_do_not_advertise_it() 
         .filter(|target| !target_supports_subject_mask_loss(target))
         .map(|target| target.id.as_str())
         .collect();
-    assert_eq!(unsupported, ["krea_2_control", "ltx_2_5_video_lora"]);
+    // The Iris-3B trainers declare no epic 2123 technique.
+    assert_eq!(
+        unsupported,
+        [
+            "krea_2_control",
+            "ltx_2_5_video_lora",
+            "iris_3b_generation",
+            "iris_3b_depth",
+            "iris_3b_restore"
+        ]
+    );
     for target in &registry.targets {
         with_mask(target, false).unwrap_or_else(|e| panic!("{} off: {e}", target.id));
         match (
@@ -3750,7 +3787,17 @@ fn face_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
             .filter(|target| !supports(target))
             .map(|target| target.id.as_str())
             .collect();
-        assert_eq!(unsupported, ["krea_2_control"], "{key}");
+        // The Iris-3B trainers declare no epic 2123 technique.
+        assert_eq!(
+            unsupported,
+            [
+                "krea_2_control",
+                "iris_3b_generation",
+                "iris_3b_depth",
+                "iris_3b_restore"
+            ],
+            "{key}"
+        );
         for target in &registry.targets {
             assert_eq!(
                 supports(target),

@@ -122,7 +122,9 @@ fn platform_effective_training_catalog_advertises_adapter_noise_support() {
     for candle in [false, true] {
         let registry = crate::training::effective_training_targets_for_candle(candle);
         for target in &registry.targets {
-            let adapter = target.id != "krea_2_control";
+            // The Iris-3B trainers declare no epic 2123 technique.
+            let adapter = target.id != "krea_2_control"
+                && !sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel);
             assert_eq!(
                 sceneworks_core::training::target_supports_weight_noise(target),
                 adapter,
@@ -165,7 +167,7 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
         .targets
         .iter()
         .map(|target| target.id.clone())
-        .filter(|id| id != "krea_2_control")
+        .filter(|id| id != "krea_2_control" && !id.starts_with("iris_3b"))
         .collect();
     assert_eq!(mlx, all);
     assert!(mlx.iter().any(|id| id == "z_image_turbo_lora"));
