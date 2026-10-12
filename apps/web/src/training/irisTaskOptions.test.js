@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import workerReport from "./irisDatasetReport.fixture.json";
 
 import { irisDepthTarget, irisJob, irisRestoreTarget, irisTarget } from "./iris.testSupport.js";
 import { irisMemoryFloors, irisObjective, irisPreviousRuns } from "./irisOptions.js";
@@ -194,21 +195,17 @@ describe("task memory floors and previous runs", () => {
 });
 
 describe("dataset check summary", () => {
-  it("counts, explains the policy and lists the first non-ok items", () => {
-    const summary = irisCheckSummary({
-      policy: "skip",
-      trainable: 2,
-      invalid: 1,
-      errors: 0,
-      configError: null,
-      items: [
-        { itemId: "a", status: "ok" },
-        { itemId: "b", displayName: "b.png", status: "invalid", reason: "too few valid pixels" },
-      ],
-    });
-    expect(summary.counts).toBe("2 trainable · 1 invalid · 0 unreadable");
-    expect(summary.policy).toMatch(/dropped/);
+  // The worker's real report shape (a worker test compares this fixture with a real report).
+  it("counts the ok items as trainable, states readiness, explains the policy and lists the problems", () => {
+    const summary = irisCheckSummary(workerReport);
+    expect(summary.counts).toBe("1 trainable · 0 invalid · 1 unreadable");
+    expect(summary.ready).toBe(false);
+    expect(summary.state).toMatch(/Blocked/);
+    expect(summary.policy).toMatch(/Aligned pairs/);
     expect(summary.problems.map((item) => item.itemId)).toEqual(["b"]);
+    const ready = irisCheckSummary({ ...workerReport, errors: 0, trainable: true, items: workerReport.items.slice(0, 1) });
+    expect(ready.ready).toBe(true);
+    expect(ready.state).toBe("Ready to train");
   });
 });
 

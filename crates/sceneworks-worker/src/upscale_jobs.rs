@@ -1543,7 +1543,7 @@ pub(crate) async fn run_iris_restore_job_using(
         loader,
         source_image,
         params,
-        trained_model,
+        trained_model.clone(),
         |current, total| {
             progress_payload(
                 JobStatus::Running,
@@ -1559,7 +1559,7 @@ pub(crate) async fn run_iris_restore_job_using(
     .await?;
     let plan = outcome.plan;
     let (out_w, out_h) = (outcome.image.width(), outcome.image.height());
-    let record = crate::iris_restore::applied_settings_record(&plan);
+    let record = crate::iris_restore::applied_settings_record(&plan, trained_model.as_deref());
 
     let source_name = payload
         .get("displayName")
@@ -1567,13 +1567,21 @@ pub(crate) async fn run_iris_restore_job_using(
         .map(str::to_owned)
         .or(source_display)
         .unwrap_or_else(|| "Image".to_owned());
-    let workflow = crate::image_jobs::workflow_source(settings, &job.payload)
-        .and_then(|payload| crate::image_jobs::standalone_restore_workflow_share(&payload, &plan));
+    let workflow = crate::image_jobs::workflow_source(settings, &job.payload).and_then(|payload| {
+        crate::image_jobs::standalone_restore_workflow_share(
+            &payload,
+            &plan,
+            trained_model.as_deref(),
+        )
+    });
     let written = match crate::image_jobs::reattach_alpha(outcome.image, source_alpha.as_ref()) {
         crate::image_jobs::GeneratedPixels::Rgb(rgb) => image::DynamicImage::ImageRgb8(rgb),
         crate::image_jobs::GeneratedPixels::Rgba(rgba) => image::DynamicImage::ImageRgba8(rgba),
     };
-    let model = crate::iris_restore::IRIS_RESTORE_MODEL_ID;
+    // A trained restoration model (sc-25688) is the asset's model, like a trained depth model.
+    let model = trained_model
+        .as_deref()
+        .unwrap_or(crate::iris_restore::IRIS_RESTORE_MODEL_ID);
     let display_name = format!(
         "{source_name} ({})",
         crate::iris_restore::display_suffix(&plan)

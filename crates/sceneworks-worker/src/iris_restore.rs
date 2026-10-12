@@ -616,11 +616,17 @@ pub(crate) async fn restore_image_using(
 /// The applied-settings record a restored asset carries (`rawAdapterSettings.upscale`), which the
 /// Image Studio / Editor read back to reopen the exact request. Everything here is the APPLIED value
 /// (the resolved scale and colour fix, the plan the engine ran).
-pub(crate) fn applied_settings_record(plan: &RestorationPlan) -> serde_json::Value {
-    serde_json::json!({
+///
+/// `trained_model` is the trained restoration model the job ran (sc-25688), `None` for the release
+/// export: the record names it as `model` and as `irisModel` (the control a reopen selects it by).
+pub(crate) fn applied_settings_record(
+    plan: &RestorationPlan,
+    trained_model: Option<&str>,
+) -> serde_json::Value {
+    let mut record = serde_json::json!({
         "enabled": true,
         "engine": sceneworks_core::image_restoration::IRIS_RESTORE_ENGINE,
-        "model": IRIS_RESTORE_MODEL_ID,
+        "model": trained_model.unwrap_or(IRIS_RESTORE_MODEL_ID),
         "scale": plan.scale,
         "inputSizing": match plan.input_sizing {
             InputSizing::Budgeted => "budgeted",
@@ -632,7 +638,11 @@ pub(crate) fn applied_settings_record(plan: &RestorationPlan) -> serde_json::Val
         "width": plan.output.width,
         "height": plan.output.height,
         "plan": RestorePlanView::from_plan(plan),
-    })
+    });
+    if let Some(model) = trained_model {
+        record["irisModel"] = serde_json::json!(model);
+    }
+    record
 }
 
 /// A display-name suffix that cannot overstate the result: a budget-downscaled restore names the

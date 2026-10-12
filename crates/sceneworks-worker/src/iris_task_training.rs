@@ -503,7 +503,8 @@ pub fn trained_task_export_dir(
     let run = data_dir.join("models").join("finetunes").join(model_id);
     let run = std::fs::canonicalize(&run).map_err(|_| {
         format!(
-            "the trained {label} model {model_id} is not installed (its training output is              missing) — pick another model or retrain it"
+            "the trained {label} model {model_id} is not installed (its training output is \
+             missing) — pick another model or retrain it"
         )
     })?;
     let mut candidates: Vec<PathBuf> = std::fs::read_dir(&run)
@@ -534,11 +535,12 @@ pub fn trained_task_export_dir(
         }
     }
     Err(match last_error {
-        Some(error) => format!(
-            "the trained model {model_id} is not an Iris {label} export: {error}"
-        ),
+        Some(error) => {
+            format!("the trained model {model_id} is not an Iris {label} export: {error}")
+        }
         None => format!(
-            "the trained {label} model {model_id} has no complete export (config.yaml,              model.safetensors, empty_prompt.safetensors)"
+            "the trained {label} model {model_id} has no complete export (config.yaml, \
+             model.safetensors, empty_prompt.safetensors)"
         ),
     })
 }
@@ -1001,16 +1003,16 @@ mod tests {
         stage_export_dir(&restore_run.join("r"), UPSCALER_CONFIG);
         trained_task_export_dir(data.path(), "finetune_restore1", IrisTask::Restoration).unwrap();
         assert!(trained_task_export_dir(data.path(), "../escape", IrisTask::Depth).is_err());
-        assert!(
-            trained_task_export_dir(data.path(), "finetune_none", IrisTask::Depth)
-                .unwrap_err()
-                .contains("not installed")
+        assert_eq!(
+            trained_task_export_dir(data.path(), "finetune_none", IrisTask::Depth).unwrap_err(),
+            "the trained depth model finetune_none is not installed (its training output is \
+             missing) — pick another model or retrain it"
         );
         std::fs::remove_file(run.join("my_depth/empty_prompt.safetensors")).unwrap();
-        assert!(
-            trained_task_export_dir(data.path(), "finetune_depth1", IrisTask::Depth)
-                .unwrap_err()
-                .contains("no complete export")
+        assert_eq!(
+            trained_task_export_dir(data.path(), "finetune_depth1", IrisTask::Depth).unwrap_err(),
+            "the trained depth model finetune_depth1 has no complete export (config.yaml, \
+             model.safetensors, empty_prompt.safetensors)"
         );
     }
 
@@ -1190,6 +1192,284 @@ mod tests {
         assert_eq!(report["items"][0]["status"], "ok", "{report:#}");
         assert_eq!(report["items"][1]["status"], "error", "{report:#}");
         assert_eq!(report["trainable"], false);
+
+        // The Training Studio's fixture IS this report (only the engine's reason wording, which
+        // carries temp paths, is normalized): the web summary is tested against the real shape.
+        let normalized = |mut value: Value| {
+            for item in value["items"].as_array_mut().unwrap() {
+                if !item["reason"].is_null() {
+                    item["reason"] = json!("<reason>");
+                }
+            }
+            value
+        };
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../apps/web/src/training/irisDatasetReport.fixture.json"
+        ))
+        .unwrap();
+        assert_eq!(normalized(report), normalized(fixture));
+    }
+
+    /// The upload-time pair check agrees with the engine's own per-item pass (`validate_item`, run by
+    /// the dataset report) on every crop-compatible pair: aligned ×1/×2/×4 pairs pass both, a skewed
+    /// or non-integer pair fails both. (Whether a ×f pair also holds the run's crop depends on the
+    /// run config, so only the report — which has it — judges that.)
+    #[test]
+    fn the_upload_pair_check_agrees_with_the_engine_item_check() {
+        let _env = isolate();
+        let data = tempfile::tempdir().unwrap();
+        stage_export_dir(&pinned_export(data.path(), "upscaler"), UPSCALER_CONFIG);
+        let root = data.path().join("ds");
+        std::fs::create_dir_all(root.join("images")).unwrap();
+        std::fs::create_dir_all(root.join("sidecars")).unwrap();
+        let cases: [((u32, u32), (u32, u32)); 8] = [
+            ((256, 256), (256, 256)),
+            ((256, 256), (128, 128)),
+            ((256, 256), (64, 64)),
+            ((512, 256), (128, 64)),
+            ((256, 256), (60, 64)),
+            ((256, 256), (128, 64)),
+            ((512, 256), (128, 128)),
+            ((256, 256), (96, 96)),
+        ];
+        let mut items = Vec::new();
+        let mut upload = Vec::new();
+        for (index, ((w, h), (lw, lh))) in cases.iter().enumerate() {
+            let id = format!("p{index}");
+            image::RgbImage::new(*w, *h)
+                .save(root.join(format!("images/{id}.png")))
+                .unwrap();
+            image::RgbImage::new(*lw, *lh)
+                .save(root.join(format!("sidecars/{id}.png")))
+                .unwrap();
+            upload.push(
+                check_degraded_sidecar(
+                    &root.join(format!("sidecars/{id}.png")),
+                    &root.join(format!("images/{id}.png")),
+                )
+                .is_ok(),
+            );
+            items.push(json!({
+                "id": id, "path": format!("images/{id}.png"), "displayName": id,
+                "caption": {"text": "", "source": "manual", "triggerWords": []},
+                "addedAt": "2026-10-11T00:00:00Z", "irisDegradedImage": format!("sidecars/{id}.png")
+            }));
+        }
+        let dataset: sceneworks_core::training::TrainingDataset = serde_json::from_value(json!({
+            "schemaVersion": 1, "id": "ds", "version": 1, "projectId": "p", "name": "ds",
+            "modality": "image", "status": "ready", "createdAt": "2026-10-11T00:00:00Z",
+            "updatedAt": "2026-10-11T00:00:00Z", "items": items
+        }))
+        .unwrap();
+        let mut config = sceneworks_core::training::iris::restore::iris_restore_target().defaults;
+        config.resolution = 256;
+        let report = iris_task_dataset_report(
+            data.path(),
+            IrisObjective::Restoration,
+            &config,
+            &dataset,
+            &root,
+        );
+        assert_eq!(report["policy"], "pairs", "{report:#}");
+        let engine: Vec<bool> = report["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["status"] == "ok")
+            .collect();
+        assert_eq!(
+            upload,
+            [true, true, true, true, false, false, false, false],
+            "{report:#}"
+        );
+        assert_eq!(upload, engine, "{report:#}");
+    }
+
+    /// The restoration target's defaults ARE the engine's published recipe, read back through the
+    /// worker's own SceneWorks → engine config translation, and its options bag carries the engine's
+    /// recipe constants.
+    #[test]
+    fn restoration_defaults_are_the_engine_recipe() {
+        let target = sceneworks_core::training::iris::restore::iris_restore_target();
+        let engine = sw_config_to_engine(&target.defaults);
+        let recipe = restore_train::recipe_training_config();
+        assert_eq!(engine.learning_rate, restore_train::RECIPE_LR);
+        assert_eq!(engine.learning_rate, recipe.learning_rate);
+        assert_eq!(engine.weight_decay, restore_train::RECIPE_WEIGHT_DECAY);
+        assert_eq!(engine.weight_decay, recipe.weight_decay);
+        assert_eq!(engine.resolution, restore_train::RECIPE_RESOLUTION);
+        assert_eq!(
+            sceneworks_core::training::iris::restore::RECIPE_RESOLUTION,
+            restore_train::RECIPE_RESOLUTION
+        );
+        assert_eq!(target.defaults.advanced["networkType"], json!("full"));
+        assert!(engine.full_finetune && recipe.full_finetune);
+        assert_eq!(engine.lr_scheduler, recipe.lr_scheduler);
+        assert_eq!(engine.lr_scheduler, gen_core::LrSchedule::Constant);
+        assert_eq!(engine.lr_warmup_steps, recipe.lr_warmup_steps);
+        assert_eq!(engine.lr_warmup_steps, 0);
+        assert_eq!(engine.optimizer, recipe.optimizer);
+        assert_eq!(engine.optimizer, "adamw");
+        let bag = &target.defaults.advanced["iris_restore"];
+        let weights = restore_train::RECIPE_LOSS_WEIGHTS;
+        assert_eq!(bag["loss_l2"], json!(weights.l2));
+        assert_eq!(bag["loss_lpips"], json!(weights.lpips));
+        assert_eq!(bag["loss_gan"], json!(weights.gan));
+        assert_eq!(bag["gan_real_label"], json!(restore_train::GAN_REAL_LABEL));
+        let (b1, b2) = restore_train::RECIPE_BETAS;
+        assert_eq!(bag["betas"], json!([b1, b2]));
+        assert_eq!(bag["gradient_clip"], json!(restore_train::RECIPE_CLIP));
+        assert_eq!(
+            bag["critic_gradient_clip"],
+            json!(restore_train::RECIPE_CLIP)
+        );
+        assert_eq!(bag["ema_decay"], json!(restore_train::RECIPE_EMA_DECAY));
+    }
+
+    /// The depth target's defaults ARE the engine's paper recipe (`apply_paper_recipe`): the global
+    /// batch and optimizer-step count survive the batch × accumulation split.
+    #[test]
+    fn depth_defaults_are_the_engine_paper_recipe() {
+        use sceneworks_core::training::iris::depth as sw_depth;
+        let target = sw_depth::iris_depth_target();
+        let defaults = &target.defaults;
+        let engine = shape_task_config(sw_config_to_engine(defaults), IrisObjective::Depth);
+        let mut recipe = TrainingConfig::default();
+        depth_train::apply_paper_recipe(&mut recipe);
+        assert_eq!(engine.learning_rate, depth_train::PAPER_LEARNING_RATE);
+        assert_eq!(engine.learning_rate, recipe.learning_rate);
+        assert_eq!(engine.weight_decay, depth_train::PAPER_WEIGHT_DECAY);
+        assert_eq!(engine.weight_decay, recipe.weight_decay);
+        assert_eq!(engine.lr_scheduler, recipe.lr_scheduler);
+        assert_eq!(engine.lr_warmup_steps, recipe.lr_warmup_steps);
+        assert_eq!(engine.optimizer, recipe.optimizer);
+        assert!(engine.full_finetune && recipe.full_finetune);
+        assert_eq!(defaults.advanced["lossType"], json!(recipe.loss_type));
+        assert_eq!(engine.loss_type, recipe.loss_type);
+        assert_eq!(
+            defaults.batch_size * defaults.gradient_accumulation,
+            depth_train::PAPER_GLOBAL_BATCH
+        );
+        assert_eq!(
+            recipe.batch_size * recipe.gradient_accumulation,
+            depth_train::PAPER_GLOBAL_BATCH
+        );
+        assert_eq!(defaults.steps % defaults.gradient_accumulation, 0);
+        assert_eq!(
+            defaults.steps / defaults.gradient_accumulation,
+            depth_train::PAPER_STEPS
+        );
+        assert_eq!(recipe.steps, depth_train::PAPER_STEPS);
+        assert_eq!(
+            sw_depth::PAPER_GLOBAL_BATCH,
+            depth_train::PAPER_GLOBAL_BATCH
+        );
+        assert_eq!(sw_depth::PAPER_OPTIMIZER_STEPS, depth_train::PAPER_STEPS);
+        let bag = &defaults.advanced["iris"];
+        assert_eq!(
+            bag["gradient_weight"],
+            json!(depth_train::DEFAULT_GRADIENT_WEIGHT)
+        );
+        assert_eq!(
+            bag["low_percentile"],
+            json!(depth_train::DEFAULT_LOW_PERCENTILE)
+        );
+        assert_eq!(
+            bag["high_percentile"],
+            json!(depth_train::DEFAULT_HIGH_PERCENTILE)
+        );
+        let (b1, b2) = depth_train::DEFAULT_BETAS;
+        assert_eq!(bag["betas"], json!([b1, b2]));
+        assert_eq!(
+            bag["gradient_clip"],
+            json!(depth_train::DEFAULT_GRADIENT_CLIP)
+        );
+        assert_eq!(bag["hflip_prob"], json!(depth_train::DEFAULT_HFLIP_PROB));
+        assert_eq!(
+            bag["min_valid_pixels"],
+            json!(depth_train::MIN_VALID_PIXELS_FLOOR)
+        );
+        assert_eq!(
+            bag["preview_items"],
+            json!(depth_train::DEFAULT_PREVIEW_ITEMS)
+        );
+    }
+
+    /// The client allow-lists are the engines' option keys minus the path options SceneWorks resolves
+    /// from a trusted previous job — as SETS, so a key added to (or dropped from) either side fails.
+    #[test]
+    fn the_client_option_allow_lists_are_the_engines_keys() {
+        use std::collections::BTreeSet;
+        let client: BTreeSet<&str> =
+            sceneworks_core::training::iris::depth::DEPTH_CLIENT_OPTION_KEYS
+                .iter()
+                .copied()
+                .chain(["load_from", "resume_from"])
+                .collect();
+        let engine: BTreeSet<&str> = depth_train::DEPTH_OPTION_KEYS.iter().copied().collect();
+        assert_eq!(client, engine);
+
+        // The restoration engine keeps its list private: it must ACCEPT every client key, and its
+        // refusal of an unknown key names the full list, which must be the client keys + resume_from.
+        let restore_client = sceneworks_core::training::iris::restore::RESTORE_CLIENT_OPTION_KEYS;
+        let bag = |keys: &[&str]| TrainingConfig {
+            model_options: Map::from_iter([(
+                restore_train::OPTIONS_KEY.to_owned(),
+                Value::Object(
+                    keys.iter()
+                        .map(|key| ((*key).to_owned(), Value::Null))
+                        .collect(),
+                ),
+            )]),
+            ..TrainingConfig::default()
+        };
+        restore_train::RestoreOptions::from_config(&bag(&restore_client))
+            .expect("the engine accepts every client restoration key");
+        let refusal = restore_train::RestoreOptions::from_config(&bag(&["not_an_option"]))
+            .expect_err("an unknown key is refused")
+            .to_string();
+        let known = refusal
+            .split_once("(known: ")
+            .and_then(|(_, rest)| rest.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("the refusal names the known keys: {refusal}"));
+        let engine: BTreeSet<&str> = known.split(", ").collect();
+        let client: BTreeSet<&str> = restore_client
+            .iter()
+            .copied()
+            .chain(["resume_from"])
+            .collect();
+        assert_eq!(client, engine);
+    }
+
+    /// Each training-only resource's Model Manager entry downloads exactly the engine's pinned file:
+    /// the worker stages it by the ENGINE's repo/revision, so a drifted catalog entry would install
+    /// a file the run then cannot find.
+    #[test]
+    fn the_training_resource_catalog_entries_are_the_engines_pins() {
+        for (catalog_id, component) in RESTORE_TRAINING_RESOURCE_MODELS {
+            let resource = TRAINING_RESOURCES
+                .iter()
+                .find(|resource| resource.component == component)
+                .unwrap_or_else(|| panic!("{component} is an engine training resource"));
+            let entry = crate::training_jobs::builtin_model_manifest_entry(catalog_id)
+                .unwrap_or_else(|| panic!("{catalog_id} is in the builtin catalog"));
+            assert_eq!(entry["componentOnly"], json!(true), "{catalog_id}");
+            let downloads = entry["downloads"].as_array().unwrap();
+            assert_eq!(downloads.len(), 1, "{catalog_id}");
+            let download = &downloads[0];
+            assert_eq!(download["repo"], json!(resource.repo), "{catalog_id}");
+            assert_eq!(
+                download["revision"],
+                json!(resource.revision),
+                "{catalog_id}"
+            );
+            assert_eq!(download["files"], json!([resource.file]), "{catalog_id}");
+            assert_eq!(
+                download["estimatedSizeBytes"],
+                json!(resource.bytes),
+                "{catalog_id}"
+            );
+        }
     }
 
     /// The engine's degradation parser judges the synthetic-degradation overrides.
