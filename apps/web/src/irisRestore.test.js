@@ -7,6 +7,7 @@ import {
   isIrisEngine,
   normalizeIrisScale,
   restorePlanBodyForAssets,
+  restorePlanBodyForRenders,
   restorePlanBodyForSize,
   restorePlanItemText,
   summarizeRestorePlans,
@@ -180,5 +181,37 @@ describe("trained Iris models (sc-25687 / sc-25688)", () => {
       requestedGpu: "auto",
     });
     expect(job.body.payload.irisModel).toBe("mine_restore");
+  });
+});
+
+// S2: a Studio prompt batch plans every distinct render size — each prompt's own [WxH] directive, or
+// the Studio size for a prompt without one — instead of only the Studio default.
+describe("Iris restore plan body for Studio renders (S2)", () => {
+  it("plans the Studio size for a single render or a directive-free batch", () => {
+    expect(restorePlanBodyForRenders({ width: 1024, height: 768 })).toEqual({ width: 1024, height: 768 });
+    expect(restorePlanBodyForRenders({ width: 1024, height: 768, resolutions: [null, null] })).toEqual({
+      width: 1024,
+      height: 768,
+    });
+  });
+
+  it("plans every distinct per-prompt size, deduplicated, alongside the Studio size", () => {
+    expect(
+      restorePlanBodyForRenders({
+        width: 1024,
+        height: 768,
+        resolutions: [{ width: 768, height: 1344 }, null, { width: 768, height: 1344 }],
+      }),
+    ).toEqual({ sizes: [{ width: 768, height: 1344 }, { width: 1024, height: 768 }] });
+  });
+
+  it("plans a batch whose every prompt overrides the size at that size only", () => {
+    expect(
+      restorePlanBodyForRenders({ width: 1024, height: 768, resolutions: [{ width: 768, height: 1344 }] }),
+    ).toEqual({ width: 768, height: 1344 });
+  });
+
+  it("has nothing to plan without dimensions", () => {
+    expect(restorePlanBodyForRenders({ width: 0, height: 768 })).toBeNull();
   });
 });

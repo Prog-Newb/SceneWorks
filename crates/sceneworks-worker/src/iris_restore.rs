@@ -289,8 +289,43 @@ pub fn preview_restore_plan(
     height: u32,
     params: &IrisRestoreParams,
 ) -> Result<RestorePlanView, String> {
-    plan_restore(width, height, params, TileGeometry::RELEASE)
-        .map(|plan| RestorePlanView::from_plan(&plan))
+    preview_restore_plan_with(width, height, params, TileGeometry::RELEASE)
+}
+
+/// An export's fixed tile geometry (re-exported for the API's plan endpoint).
+pub type PlanGeometry = TileGeometry;
+
+/// [`preview_restore_plan`] with an explicit tile geometry (the selected model's — see
+/// [`restore_plan_geometry`]).
+pub fn preview_restore_plan_with(
+    width: u32,
+    height: u32,
+    params: &IrisRestoreParams,
+    geometry: TileGeometry,
+) -> Result<RestorePlanView, String> {
+    plan_restore(width, height, params, geometry).map(|plan| RestorePlanView::from_plan(&plan))
+}
+
+/// The tile geometry a restore with `trained_model` runs at — exactly what the job plans with: the
+/// release export's for `None` (its `config.yaml` is pinned), the TRAINED export's own `config.yaml`
+/// for a trained / imported restoration model (whose `task.tile` need not be the release's). `Err`
+/// is the refusal the job would fail with (missing model, wrong-task export).
+pub fn restore_plan_geometry(
+    data_dir: &Path,
+    trained_model: Option<&str>,
+) -> Result<TileGeometry, String> {
+    let Some(model) = trained_model else {
+        return Ok(TileGeometry::RELEASE);
+    };
+    let dir = crate::iris_task_training::trained_task_export_dir(
+        data_dir,
+        model,
+        gen_core::iris::IrisTask::Restoration,
+    )
+    .map_err(|detail| format!("Iris restoration: {detail}"))?;
+    let resources = RestorationResources::from_dir(&dir, IRIS_RESTORE_MODEL_ID)
+        .map_err(|error| format!("Iris restoration: {error}"))?;
+    Ok(resources.settings.geometry(resources.config()))
 }
 
 /// The EXIF-corrected (upright) dimensions of an image file, without decoding its pixels: the
@@ -643,6 +678,16 @@ pub(crate) fn applied_settings_record(
         record["irisModel"] = serde_json::json!(model);
     }
     record
+}
+
+/// The filename tag of a restored variant. A budget-downscaled restore is NOT `scale×` of the source,
+/// so it never carries the `iris{scale}x` tag — it names the budgeted output geometry instead (E6).
+pub(crate) fn file_tag(plan: &RestorationPlan) -> String {
+    if plan.budget_applied {
+        format!("iris_budgeted_{}x{}", plan.output.width, plan.output.height)
+    } else {
+        format!("iris{}x", format_scale(plan.scale))
+    }
 }
 
 /// A display-name suffix that cannot overstate the result: a budget-downscaled restore names the

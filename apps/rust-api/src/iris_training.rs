@@ -169,6 +169,166 @@ pub(crate) async fn trusted_previous_output_dir(
     )
 }
 
+/// The Iris training plan of a `LoraTrain` job (`None` for every other job).
+fn iris_training_plan(job: &JobSnapshot) -> Option<TrainingPlan> {
+    if !matches!(job.job_type, JobType::LoraTrain) {
+        return None;
+    }
+    let plan: TrainingPlan = serde_json::from_value(job.payload.get("plan")?.clone()).ok()?;
+    is_iris_training_kernel(&plan.target.kernel).then_some(plan)
+}
+
+/// The output id (the registered model / adapter id, and the output directory's name) a training
+/// job writes and registers under.
+fn training_output_id(job: &JobSnapshot) -> Option<&str> {
+    job.payload
+        .get("manifestEntry")
+        .and_then(|entry| entry.get("id"))
+        .and_then(Value::as_str)
+}
+
+fn output_in_use(message: String) -> ApiError {
+    ApiError::typed(
+        StatusCode::BAD_REQUEST,
+        message.clone(),
+        "iris_training_refused",
+        json!({ "kind": "output_in_use", "message": message }),
+    )
+}
+
+/// Replace every occurrence of `from` inside the strings of `value` (an output id is
+/// `lora_<32 hex>` / `finetune_<32 hex>`, so it never occurs by accident).
+fn replace_in_strings(value: &mut Value, from: &str, to: &str) {
+    match value {
+        Value::String(text) if text.contains(from) => *text = text.replace(from, to),
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| replace_in_strings(item, from, to)),
+        Value::Object(object) => object
+            .values_mut()
+            .for_each(|item| replace_in_strings(item, from, to)),
+        _ => {}
+    }
+}
+
+/// The guard on rerunning an Iris training job (S9a).
+///
+/// `retry_job` / `duplicate_job` copy a training job's payload verbatim — its plan's output
+/// directory AND its output id (`manifestEntry.id`), which is the id the completion registrar
+/// registers the export under. One output id is one run: two jobs sharing it write the same export
+/// and register over the same model / adapter, whatever the trainer does with an earlier run's
+/// checkpoints (at the sc-25690 inference bump the trainer moves a foreign run's checkpoints aside
+/// to `<root>.prior-<n>` — `retire_foreign_checkpoints` — instead of resuming them, so a fresh
+/// run in a used directory no longer mixes checkpoints, but the export and registration still
+/// collide). So:
+///
+/// * a **duplicate** is a NEW run: it gets a fresh output id and directory (`Some(changes)` — the
+///   rewritten `plan` + `manifestEntry` to merge over the copied payload), like YuE2's
+///   `refresh_block_for_duplicate`;
+/// * a **retry** is another attempt of the SAME run under the same output id, so it is refused
+///   while any queued / running job writes that output id (the source itself included), and once
+///   the run has a complete checkpoint (resume it instead) or an export (it finished — duplicate it
+///   or submit a new run). A run that died before its first complete checkpoint retries as before.
+pub(crate) async fn guard_iris_training_rerun(
+    state: &AppState,
+    job: &JobSnapshot,
+    duplicate: bool,
+) -> Result<Option<JsonObject>, ApiError> {
+    let Some(plan) = iris_training_plan(job) else {
+        return Ok(None);
+    };
+    let Some(output_id) = training_output_id(job).map(str::to_owned) else {
+        return Ok(None);
+    };
+    validate_lora_id_component(&output_id)?;
+    if duplicate {
+        let prefix = output_id
+            .split_once('_')
+            .map(|(prefix, _)| prefix)
+            .unwrap_or("lora");
+        let fresh_id = format!("{prefix}_{}", Uuid::new_v4().simple());
+        let mut fresh = job.clone();
+        for key in ["plan", "manifestEntry"] {
+            if let Some(value) = fresh.payload.get_mut(key) {
+                replace_in_strings(value, &output_id, &fresh_id);
+            }
+        }
+        // The directory the registrar will recompute from the fresh id must be the one the plan
+        // now names, or the run would write where nothing registers it.
+        let fresh_dir = trusted_previous_output_dir(state, &fresh).await?;
+        let planned_dir = fresh
+            .payload
+            .get("plan")
+            .and_then(|plan| plan.pointer("/output/outputDir"))
+            .and_then(Value::as_str)
+            .map(PathBuf::from);
+        if planned_dir.as_deref() != Some(fresh_dir.as_path()) {
+            return Err(ApiError::internal(format!(
+                "duplicating training job {}: its output folder does not follow its output id",
+                job.id
+            )));
+        }
+        let mut changes = JsonObject::new();
+        for key in ["plan", "manifestEntry"] {
+            if let Some(value) = fresh.payload.remove(key) {
+                changes.insert(key.to_owned(), value);
+            }
+        }
+        if let Some(plan) = changes.get("plan") {
+            crate::training::write_training_config_snapshot(&fresh_dir, plan).await;
+        }
+        return Ok(Some(changes));
+    }
+
+    // ---- retry: the same output id -----------------------------------------------------------
+    let active = store_call(state.clone(), {
+        let project_id = job.project_id.clone();
+        move |store, _timeout| store.list_jobs(project_id.as_deref(), None, 500)
+    })
+    .await?;
+    if let Some(writer) = active.iter().find(|other| {
+        matches!(other.job_type, JobType::LoraTrain)
+            && !matches!(
+                other.status,
+                JobStatus::Completed
+                    | JobStatus::Failed
+                    | JobStatus::Canceled
+                    | JobStatus::Interrupted
+            )
+            && training_output_id(other) == Some(output_id.as_str())
+    }) {
+        return Err(output_in_use(format!(
+            "Training job {} is still queued or running into this run's output ({output_id}); \
+             wait for it to finish or cancel it before retrying. Duplicate the run to train a \
+             separate copy.",
+            writer.id
+        )));
+    }
+    let Ok(output_dir) = trusted_previous_output_dir(state, job).await else {
+        return Ok(None);
+    };
+    let Some(stem) = file_stem(&plan.output.file_name) else {
+        return Ok(None);
+    };
+    if newest_complete_checkpoint(&output_dir.join(format!("{stem}.checkpoints"))).is_some() {
+        return Err(output_in_use(format!(
+            "Training run {} already saved a complete checkpoint; a retry would start the run \
+             over under the same output. Resume it (or start a new phase from it) in the Training \
+             Studio, or duplicate it to train a separate copy.",
+            job.id
+        )));
+    }
+    if output_dir.join(&stem).exists() || output_dir.join(&plan.output.file_name).exists() {
+        return Err(output_in_use(format!(
+            "Training run {} already exported its result; a retry would overwrite it and its \
+             registration. Duplicate the run (a duplicate trains under its own output) or submit a \
+             new run.",
+            job.id
+        )));
+    }
+    Ok(None)
+}
+
 /// A complete checkpoint (`step_XXXXXXXX/state.json`) under a run's checkpoint root, newest first.
 fn newest_complete_checkpoint(root: &FsPath) -> Option<PathBuf> {
     let mut steps: Vec<(u64, PathBuf)> = std::fs::read_dir(root)

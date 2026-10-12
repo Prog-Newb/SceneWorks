@@ -372,6 +372,74 @@ pub struct EstimateDepthArgs {
     pub resolution_mode: Option<String>,
     #[schemars(description = "Max side in pixels for \"capped\" (64-8192, default 1024).")]
     pub max_side: Option<u32>,
+    #[schemars(
+        description = "A trained Iris depth model to run instead of the release \"Iris 3B Depth\": the id of a list_models entry whose trainedCheckpoint.task is \"depth\". Omit for the release model."
+    )]
+    pub iris_model: Option<String>,
+}
+
+/// Arguments for `restore_image` (Iris-3B restoration, sc-25683): an `image_upscale` job on the
+/// `iris` engine, through the generic `POST /api/v1/jobs` route the Image Editor and Library use.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreImageArgs {
+    #[schemars(description = "Project id (from list_projects).")]
+    pub project_id: String,
+    #[schemars(
+        description = "The image asset to restore. It is not modified; the result is a new linked asset."
+    )]
+    pub source_asset_id: String,
+    #[schemars(
+        description = "Output scale, any positive factor (default 4; 1 = restore without enlarging). The output is floor(input x scale) per side of the PROCESSED input (see inputSizing)."
+    )]
+    pub scale: Option<f64>,
+    #[schemars(
+        description = "\"budgeted\" (default) first downscales a large source into the model's trained input budget (short side 512, long side 1024) — the result is then `scale`x of that budgeted input, NOT of the original; \"original\" processes the source at its own size (slower, more memory; refused rather than budgeted when it does not fit)."
+    )]
+    pub input_sizing: Option<String>,
+    #[schemars(description = "Colour correction against the input (default true).")]
+    pub color_fix: Option<bool>,
+    #[schemars(
+        description = "A trained Iris restoration model to run instead of the release \"Iris 3B Restoration\": the id of a list_models entry whose trainedCheckpoint.task is \"restoration\". Omit for the release model."
+    )]
+    pub iris_model: Option<String>,
+}
+
+/// The `POST /api/v1/jobs` body for [`RestoreImageArgs`]. Only provided controls are sent, so the
+/// API's own defaults (4x, budgeted, colour fix on) stay authoritative.
+pub(crate) fn restore_job_body(args: &RestoreImageArgs) -> Result<Value, String> {
+    let mut payload = Map::new();
+    payload.insert("projectId".to_owned(), json!(args.project_id));
+    payload.insert("sourceAssetId".to_owned(), json!(args.source_asset_id));
+    payload.insert("engine".to_owned(), json!("iris"));
+    if let Some(scale) = args.scale {
+        if !(scale.is_finite() && scale > 0.0) {
+            return Err("scale must be a positive number".to_owned());
+        }
+        payload.insert("scale".to_owned(), json!(scale));
+    }
+    if let Some(sizing) = args.input_sizing.as_deref() {
+        if !matches!(sizing, "budgeted" | "original") {
+            return Err(format!(
+                "inputSizing must be \"budgeted\" or \"original\", not {sizing:?}"
+            ));
+        }
+        payload.insert("inputSizing".to_owned(), json!(sizing));
+    }
+    if let Some(color_fix) = args.color_fix {
+        payload.insert("colorFix".to_owned(), json!(color_fix));
+    }
+    if let Some(model) = args.iris_model.as_deref().filter(|model| !model.is_empty()) {
+        payload.insert("irisModel".to_owned(), json!(model));
+    }
+    Ok(json!({
+        "type": "image_upscale",
+        "projectId": args.project_id,
+        // The generic jobs route requires it; "auto" is the scheduler's own choice, as the
+        // typed image/video/depth routes default it.
+        "requestedGpu": "auto",
+        "payload": payload,
+    }))
 }
 
 /// The `POST /api/v1/image/depth/jobs` body for [`EstimateDepthArgs`].
@@ -390,11 +458,15 @@ pub(crate) fn depth_job_body(args: &EstimateDepthArgs) -> Result<Value, String> 
             ))
         }
     };
-    Ok(json!({
+    let mut body = json!({
         "projectId": args.project_id,
         "sourceAssetId": args.source_asset_id,
         "resolution": resolution,
-    }))
+    });
+    if let Some(model) = args.iris_model.as_deref().filter(|model| !model.is_empty()) {
+        body["irisModel"] = json!(model);
+    }
+    Ok(body)
 }
 
 /// Arguments for the generic job-polling tools (`get_job_status` /
@@ -436,7 +508,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "List the generation model catalog. Returns compact entries: id (use as the model for a job), name, family, type (image/video), capabilities, installState, defaults (resolution/steps/guidanceScale/count), the supported resolutions/durations/fps menus, the sampler menu (samplers) and image sampling-control declarations (imageControls: supportsSchedulerShift / supportsCfgInterval / captionOverflowPolicies / negativePromptRequiresGuidance / maxPromptBatchImages), minSteps, the reference-media caps (maxReferenceAssets / maxSourceClipAssets / maxReferenceAudioAssets / maxCombinedReferenceAssets), promptGuide, and any licence-required attribution string. An fps menu is EXHAUSTIVE — an off-menu fps is refused, never rounded. A durations menu lists the model's exactly renderable clip lengths: a duration outside the model's hard min/max bounds is refused, but an in-range off-menu value is silently snapped onto the model's frame lattice (MiniMax-H3 rounds UP to the next 17n+5 rung) — send a menu value to get exactly the length you asked for."
+        description = "List the generation model catalog. Returns compact entries: id (use as the model for a job), name, family, type (image/video), capabilities, installState, defaults (resolution/steps/guidanceScale/count), the supported resolutions/durations/fps menus, the sampler menu (samplers) and image sampling-control declarations (imageControls: supportsSchedulerShift / supportsCfgInterval / captionOverflowPolicies / negativePromptRequiresGuidance / maxPromptBatchImages), minSteps, the reference-media caps (maxReferenceAssets / maxSourceClipAssets / maxReferenceAudioAssets / maxCombinedReferenceAssets), promptGuide, any licence-required attribution string, and for a trained model its trainedCheckpoint {task, engineModel, baseModel} (task \"generation\" → use the id as generate_image's model; \"depth\" / \"restoration\" → estimate_depth's / restore_image's irisModel). An fps menu is EXHAUSTIVE — an off-menu fps is refused, never rounded. A durations menu lists the model's exactly renderable clip lengths: a duration outside the model's hard min/max bounds is refused, but an in-range off-menu value is silently snapped onto the model's frame lattice (MiniMax-H3 rounds UP to the next 17n+5 rung) — send a menu value to get exactly the length you asked for."
     )]
     async fn list_models(&self) -> Result<CallToolResult, ErrorData> {
         let models = self
@@ -448,7 +520,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "List the LoRA adapter catalog (built-in, imported and trained). Returns compact entries: id, name, family, compatibleFamilies, triggerWords, defaultWeight, installState. Optionally filter by model family and/or project."
+        description = "List the LoRA adapter catalog (built-in, imported and trained). Returns compact entries: id, name, family, compatibleFamilies, triggerWords, defaultWeight, installState, and for an Iris adapter its irisTask / baseModel / networkType (an Iris image job accepts only generation adapters trained on its engine — a trained full Iris checkpoint runs on iris_3b, so iris_3b adapters apply to it). Optionally filter by model family and/or project."
     )]
     async fn list_loras(
         &self,
@@ -706,7 +778,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "Estimate monocular depth (Iris-3B) for an existing image asset WITHOUT waiting. The result is a new depth asset: the raw float32 HxW relative log depth map (.npy, row-major <f4, affine-invariant: roughly -1 near to +1 far, NOT metric, not clamped) at the image's EXIF-corrected size, plus a separate colorized PNG preview, linked to the source image (which is not modified). Requires the \"Iris 3B Depth\" model to be installed; a request too large for the GPU memory budget is refused, never downscaled. Returns the job id; poll get_job_status, then get_job_result for the .npy and preview links."
+        description = "Estimate monocular depth (Iris-3B) for an existing image asset WITHOUT waiting. The result is a new depth asset: the raw float32 HxW relative log depth map (.npy, row-major <f4, affine-invariant: roughly -1 near to +1 far, NOT metric, not clamped) at the image's EXIF-corrected size, plus a separate colorized PNG preview, linked to the source image (which is not modified). Runs the release \"Iris 3B Depth\" model (which must be installed) or, with irisModel, an installed trained depth model (list_models entries with trainedCheckpoint.task \"depth\"; it needs no release install); a request too large for the GPU memory budget is refused, never downscaled. Returns the job id; poll get_job_status, then get_job_result for the .npy and preview links."
     )]
     async fn estimate_depth(
         &self,
@@ -732,6 +804,39 @@ impl SceneWorksMcp {
                 json!(
                     "Poll get_job_status with this jobId; once status is \"completed\", call \
                      get_job_result for the raw .npy and its preview."
+                ),
+            );
+        }
+        json_result(snapshot)
+    }
+
+    #[tool(
+        description = "Restore / upscale an existing image asset with Iris-3B WITHOUT waiting. Default 4x with the input budgeted (a large source is first downscaled to the model's 512/1024 input budget, so the result is 4x of THAT, not of the original — the result asset records the actual processing and output size); scale may be any positive factor (1 = restore only), inputSizing \"original\" processes the source at its own size, colorFix toggles colour correction, irisModel picks an installed trained restoration model (list_models entries with trainedCheckpoint.task \"restoration\"). Requires \"Iris 3B Restoration\" installed (or the trained model); a request that does not fit memory or the output bounds is refused, never silently rescaled. The source is not modified; the result is a new linked asset. Returns the job id; poll get_job_status, then get_job_result."
+    )]
+    async fn restore_image(
+        &self,
+        Parameters(args): Parameters<RestoreImageArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let body =
+            restore_job_body(&args).map_err(|message| ErrorData::invalid_params(message, None))?;
+        let job = self
+            .api
+            .post_json("/api/v1/jobs", &body)
+            .await
+            .map_err(api_error)?;
+        if job.get("id").and_then(Value::as_str).is_none() {
+            return Err(ErrorData::internal_error(
+                "restoration job submission returned no job id",
+                None,
+            ));
+        }
+        let mut snapshot = compact_job_status(&job);
+        if let Some(out) = snapshot.as_object_mut() {
+            out.insert(
+                "next".to_owned(),
+                json!(
+                    "Poll get_job_status with this jobId; once status is \"completed\", call \
+                     get_job_result for the restored image."
                 ),
             );
         }
@@ -1927,6 +2032,18 @@ pub(crate) fn compact_models(models: &Value) -> Value {
         if let Some(guide) = model.pointer("/ui/promptGuide") {
             out.insert("promptGuide".to_owned(), guide.clone());
         }
+        // A trained model's task identity (Iris full-model / depth / restoration exports): which
+        // tool it serves (generate_image's `model`, estimate_depth's / restore_image's `irisModel`)
+        // and the engine it runs on (whose LoRAs it accepts).
+        if let Some(block) = model.get("trainedCheckpoint").and_then(Value::as_object) {
+            let mut trained = Map::new();
+            for key in ["task", "engineModel", "baseModel"] {
+                if let Some(value) = block.get(key) {
+                    trained.insert(key.to_owned(), value.clone());
+                }
+            }
+            out.insert("trainedCheckpoint".to_owned(), Value::Object(trained));
+        }
         // Which LoRA families this model accepts — pairs with list_loras.
         if let Some(families) = model.pointer("/loraCompatibility/families") {
             out.insert("loraFamilies".to_owned(), families.clone());
@@ -1957,6 +2074,12 @@ pub(crate) fn compact_loras(loras: &Value) -> Value {
                 // because the numbers differ per adapter and no naming convention carries the shift.
                 "role",
                 "sampling",
+                // An Iris adapter's identity (sc-25681): the task it was trained for and the base it
+                // was trained on. The image-job gate refuses an adapter of another task or base, and
+                // family alone cannot tell Iris generation / depth / restoration adapters apart.
+                "irisTask",
+                "baseModel",
+                "networkType",
             ],
             &mut out,
         );
@@ -1984,6 +2107,21 @@ mod tests {
         assert_eq!(
             compact_projects(&full),
             json!([{ "id": "p1", "name": "My Film", "createdAt": "2026-07-07T00:00:00Z" }])
+        );
+    }
+
+    #[test]
+    fn compact_models_carries_a_trained_models_task_identity() {
+        let full = json!([{
+            "id": "my_depth_run", "name": "My depth", "type": "image",
+            "trainedCheckpoint": {
+                "engineModel": "iris_3b_depth", "family": "iris", "task": "depth",
+                "baseModel": "iris_3b_depth", "layout": "iris_depth_export"
+            }
+        }]);
+        assert_eq!(
+            compact_models(&full)[0]["trainedCheckpoint"],
+            json!({ "task": "depth", "engineModel": "iris_3b_depth", "baseModel": "iris_3b_depth" })
         );
     }
 
@@ -2060,6 +2198,22 @@ mod tests {
                 "requiresLicenseAcknowledgment": true
             }])
         );
+    }
+
+    /// S4: an Iris adapter's task and base survive the compaction, so an agent can pick an adapter
+    /// the image-job gate accepts for the model it renders with.
+    #[test]
+    fn compact_loras_keeps_an_iris_adapters_task_identity() {
+        let full = json!([{
+            "id": "lora_iris", "name": "Iris Style", "family": "iris",
+            "irisTask": "generation", "baseModel": "iris_3b", "networkType": "lokr",
+            "source": { "provider": "training", "path": "loras/lora_iris" }
+        }]);
+        let compact = compact_loras(&full);
+        assert_eq!(compact[0]["irisTask"], "generation");
+        assert_eq!(compact[0]["baseModel"], "iris_3b");
+        assert_eq!(compact[0]["networkType"], "lokr");
+        assert!(compact[0].get("source").is_none());
     }
 
     #[test]

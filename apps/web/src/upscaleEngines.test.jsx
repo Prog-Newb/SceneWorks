@@ -84,6 +84,19 @@ describe("availableUpscaleEngines", () => {
     // No lane on this platform → not offered even when installed.
     expect(availableUpscaleEngines({ features: {} }, installed).map((e) => e.key)).not.toContain("iris");
   });
+
+  // Round 2 (5): an installed trained restoration model runs without the release export.
+  it("offers Iris with only a trained restoration model installed", () => {
+    const caps = { features: { imageUpscaleIris: { supported: true } } };
+    const trained = { id: "my_restore", installState: "installed", trainedCheckpoint: { task: "restoration" } };
+    const models = [{ id: "iris_3b_restore", installState: "missing" }, trained];
+    expect(availableUpscaleEngines(caps, models).map((e) => e.key)).toContain("iris");
+    // A trained model of another task, or one not installed, does not count.
+    expect(
+      availableUpscaleEngines(caps, [{ ...trained, trainedCheckpoint: { task: "depth" } }]).map((e) => e.key),
+    ).not.toContain("iris");
+    expect(availableUpscaleEngines(caps, [{ ...trained, installState: "missing" }]).map((e) => e.key)).not.toContain("iris");
+  });
 });
 
 describe("useUpscaleEngineFallback", () => {

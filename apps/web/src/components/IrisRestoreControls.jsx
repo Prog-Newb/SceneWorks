@@ -4,6 +4,7 @@ import { useAppContextOptional } from "../context/AppContext.js";
 import {
   IRIS_INPUT_SIZINGS,
   IRIS_SCALE_PRESETS,
+  defaultRestoreModel,
   normalizeIrisScale,
   summarizeRestorePlans,
   trainedTaskModels,
@@ -46,6 +47,17 @@ export function IrisRestoreControls({ value, onChange, planBody = null, token = 
   const [preview, setPreview] = useState({ state: "idle", lines: [], error: null, blocked: false });
   const statusRef = useRef(onStatus);
   statusRef.current = onStatus;
+  const appModels = useAppContextOptional()?.models;
+  // With the release export absent, a selection that names no model runs the first installed
+  // trained restoration model — set on the value, so the host's job carries it (and re-derived when
+  // the catalog loads late or a trained model is installed later).
+  const fallbackModel = defaultRestoreModel(models ?? appModels);
+  const changeRef = useRef(onChange);
+  changeRef.current = onChange;
+  useEffect(() => {
+    if (!value?.irisModel && fallbackModel) changeRef.current?.({ ...value, irisModel: fallbackModel });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fallbackModel, value?.irisModel]);
 
   // Keep the text box in step with an external change (preset click, restored settings).
   useEffect(() => {
@@ -54,7 +66,10 @@ export function IrisRestoreControls({ value, onChange, planBody = null, token = 
   }, [value?.scale]);
 
   const scale = normalizeIrisScale(scaleText);
-  const planKey = planBody && scale ? JSON.stringify({ ...planBody, scale, inputSizing: value?.inputSizing, colorFix: value?.colorFix }) : null;
+  // The selected trained model rides along: it plans with ITS export's tile geometry (S9b).
+  const planKey = planBody && scale
+    ? JSON.stringify({ ...planBody, scale, inputSizing: value?.inputSizing, colorFix: value?.colorFix, irisModel: value?.irisModel || undefined })
+    : null;
 
   useEffect(() => {
     if (!scale) {

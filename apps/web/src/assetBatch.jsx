@@ -16,7 +16,7 @@ import { useAppContextOptional } from "./context/AppContext.js";
 import { detailCapableModels, editCapableModels } from "./imageJobs.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import { availableUpscaleEngines as upscaleEnginesForPlatform } from "./upscaleEngines.js";
-import { depthAvailability as depthAvailabilityFor } from "./depthJobs.js";
+import { defaultDepthModel as defaultDepthModelFor, depthAvailability as depthAvailabilityFor } from "./depthJobs.js";
 
 const BatchOperationsPanel = lazyInteraction(
   () => import("./components/BatchOperationsPanel.jsx"),
@@ -99,6 +99,8 @@ export function useAssetBatch() {
   const detailModels = detailCapableModels(imageModels);
   // Iris-3B depth (sc-25682): offered only with a native lane AND a complete task install.
   const depthAvailability = depthAvailabilityFor(models, macCapabilities);
+  // The batch panel gates Run on the SELECTED depth model: a trained one needs no release install.
+  const depthAvailabilityForModel = (irisModel) => depthAvailabilityFor(models, macCapabilities, irisModel ?? "");
   // Move targets a character's assets (true move, sc-10200) — NOT the character's
   // curated reference set — so only move-capable media counts.
   const availableCharacters = characters.filter((character) => !character?.archived);
@@ -373,6 +375,8 @@ export function useAssetBatch() {
     detailModels,
     availableUpscaleEngines,
     depthAvailability,
+    depthAvailabilityForModel,
+    defaultDepthModel: defaultDepthModelFor(models),
     // The Iris restoration preview plans the selection against its project (sc-25683).
     projectId: activeProject?.id ?? null,
     token,
@@ -558,6 +562,8 @@ export function AssetBatchModal({ batch }) {
       detailModels={batch.detailModels}
       upscaleEngines={batch.availableUpscaleEngines}
       depthAvailability={batch.depthAvailability}
+      depthAvailabilityFor={batch.depthAvailabilityForModel}
+      defaultDepthModel={batch.defaultDepthModel}
       initialOp={batch.batchInitialOp ?? undefined}
       projectId={batch.projectId}
       token={batch.token}

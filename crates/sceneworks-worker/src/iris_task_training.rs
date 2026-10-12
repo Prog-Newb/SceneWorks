@@ -322,54 +322,110 @@ pub struct TaskLoadInputs {
     pub components: BTreeMap<String, WeightsSource>,
 }
 
-/// Why a task run cannot start on this install (`None` = every resource it needs is installed). The
-/// API asks this at submit (a typed 400 before a job exists); the worker repeats it before load.
-pub fn iris_task_training_unavailable(
+/// A typed install refusal of an Iris training run: `kind` names the missing resource class
+/// (`missing_backbone`, `missing_text_encoder`, `missing_export`, `missing_training_resources`) and
+/// `message` the actionable fix. The API returns it as an `iris_training_refused` error at
+/// plan-check and submit; the worker repeats it before anything loads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IrisInstallRefusal {
+    pub kind: &'static str,
+    pub message: String,
+}
+
+impl IrisInstallRefusal {
+    fn new(kind: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+/// The generation backbone directory of the pinned `iris_3b` install (`config.yaml` +
+/// `model.safetensors` at the snapshot ROOT — never a task export's files), when installed.
+pub fn iris_generation_backbone_dir(data_dir: &Path) -> Option<PathBuf> {
+    installed_backbone(data_dir)
+}
+
+/// What an Iris training run of `objective` needs that is not installed (`None` = every resource it
+/// needs is installed), judged PER TASK RESOURCE at the pinned revisions — never off the shared
+/// repo's install marker, so a depth/ or upscaler/ export never makes generation look ready.
+///
+/// * generation: the root backbone (`config.yaml` + `model.safetensors`) AND the generation
+///   install's Qwen3-VL text encoder (the trainer encodes captions with it);
+/// * depth: its `depth/` export, or (`depthInit: parent`) the backbone + an empty-prompt source;
+/// * restoration: its `upscaler/` export, the pinned training-only resources, and (`init: parent`)
+///   the backbone.
+pub fn iris_training_install_refusal(
     data_dir: &Path,
     objective: IrisObjective,
     config: &sceneworks_core::training::TrainingConfig,
-) -> Option<String> {
+) -> Option<IrisInstallRefusal> {
     match objective {
-        IrisObjective::Generation => None,
+        IrisObjective::Generation => {
+            if installed_backbone(data_dir).is_none() {
+                return Some(IrisInstallRefusal::new(
+                    "missing_backbone",
+                    format!(
+                        "Iris 3B is not installed: training needs its generation backbone \
+                         (config.yaml + model.safetensors of {UPSTREAM_WEIGHTS_REPO} at \
+                         {UPSTREAM_WEIGHTS_REVISION}) — install \"Iris 3B\" in Models. A depth or \
+                         restoration install does not provide it."
+                    ),
+                ));
+            }
+            installed_generation_text_encoder(data_dir)
+                .is_none()
+                .then(|| {
+                    IrisInstallRefusal::new(
+                    "missing_text_encoder",
+                    "Iris 3B training encodes its captions with the Qwen3-VL text encoder, which \
+                     is not installed — repair \"Iris 3B\" in Models (its text encoder \
+                     co-requisite). Nothing is downloaded during training.",
+                )
+                })
+        }
         IrisObjective::Depth => {
             let parent = depth_init(config).ok() == Some(DEPTH_INIT_PARENT);
             if parent {
                 if installed_backbone(data_dir).is_none() {
-                    return Some(
+                    return Some(IrisInstallRefusal::new(
+                        "missing_backbone",
                         "A depth run from the generation backbone (depthInit: parent) needs \"Iris \
-                         3B\" (the generation install) — install it in Models."
-                            .to_owned(),
-                    );
+                         3B\" (the generation install) — install it in Models.",
+                    ));
                 }
                 // Its empty-prompt conditioning: the depth export's shipped file, else the
                 // generation install's text encoder (encoded once).
                 if installed_export(data_dir, DEPTH_SUBDIR).is_none()
                     && installed_generation_text_encoder(data_dir).is_none()
                 {
-                    return Some(
+                    return Some(IrisInstallRefusal::new(
+                        "missing_text_encoder",
                         "A depth run from the generation backbone needs the empty-prompt \
                          conditioning: install \"Iris 3B Depth\" (its empty_prompt.safetensors) or \
-                         the Iris 3B text encoder."
-                            .to_owned(),
-                    );
+                         the Iris 3B text encoder.",
+                    ));
                 }
                 None
             } else {
                 installed_export(data_dir, DEPTH_SUBDIR).is_none().then(|| {
-                    "Iris 3B Depth is not installed. Install \"Iris 3B Depth\" in Models — a depth \
-                     run fine-tunes its depth/ export (or choose depthInit: parent to start from the \
-                     generation backbone)."
-                        .to_owned()
+                    IrisInstallRefusal::new(
+                        "missing_export",
+                        "Iris 3B Depth is not installed. Install \"Iris 3B Depth\" in Models — a \
+                         depth run fine-tunes its depth/ export (or choose depthInit: parent to \
+                         start from the generation backbone).",
+                    )
                 })
             }
         }
         IrisObjective::Restoration => {
             if installed_export(data_dir, RESTORE_SUBDIR).is_none() {
-                return Some(
+                return Some(IrisInstallRefusal::new(
+                    "missing_export",
                     "Iris 3B Restoration is not installed. Install \"Iris 3B Restoration\" in \
-                     Models — a restoration run fine-tunes its upscaler/ export."
-                        .to_owned(),
-                );
+                     Models — a restoration run fine-tunes its upscaler/ export.",
+                ));
             }
             let missing: Vec<String> = restore_training_resources()
                 .iter()
@@ -379,10 +435,13 @@ pub fn iris_task_training_unavailable(
                 })
                 .collect();
             if !missing.is_empty() {
-                return Some(format!(
-                    "Restoration training needs its training-only resources installed in Models: {}. \
-                     They are never used for restoration itself.",
-                    missing.join(", ")
+                return Some(IrisInstallRefusal::new(
+                    "missing_training_resources",
+                    format!(
+                        "Restoration training needs its training-only resources installed in \
+                         Models: {}. They are never used for restoration itself.",
+                        missing.join(", ")
+                    ),
                 ));
             }
             let parent = restore_options(config)
@@ -396,12 +455,24 @@ pub fn iris_task_training_unavailable(
                 .as_deref()
                 == Some("parent");
             (parent && installed_backbone(data_dir).is_none()).then(|| {
-                "init: parent starts the restorer from the generation backbone — install \"Iris \
-                 3B\" in Models."
-                    .to_owned()
+                IrisInstallRefusal::new(
+                    "missing_backbone",
+                    "init: parent starts the restorer from the generation backbone — install \
+                     \"Iris 3B\" in Models.",
+                )
             })
         }
     }
+}
+
+/// [`iris_training_install_refusal`]'s message (`None` = every resource the run needs is
+/// installed). The worker repeats it before load.
+pub fn iris_task_training_unavailable(
+    data_dir: &Path,
+    objective: IrisObjective,
+    config: &sceneworks_core::training::TrainingConfig,
+) -> Option<String> {
+    iris_training_install_refusal(data_dir, objective, config).map(|refusal| refusal.message)
 }
 
 /// Resolve (and integrity-check) what a task trainer loads. Blocking: a restoration run hashes the

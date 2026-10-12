@@ -269,8 +269,8 @@ pub use iris_training::{
 mod iris_task_training;
 pub use iris_task_training::{
     check_degraded_sidecar, check_depth_sidecar, check_restore_degradation,
-    iris_task_dataset_report, iris_task_training_unavailable,
-    task_objective as iris_task_objective,
+    iris_generation_backbone_dir, iris_task_dataset_report, iris_task_training_unavailable,
+    iris_training_install_refusal, task_objective as iris_task_objective, IrisInstallRefusal,
 };
 // Iris-3B curricula, REPA, holdout and fp16 (sc-25689): the engine's stage presets, its plan
 // resolution (typed refusals + receipts) and the REPA teacher TRAINING resource.

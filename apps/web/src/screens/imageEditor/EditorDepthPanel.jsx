@@ -9,6 +9,7 @@ import {
   DEFAULT_DEPTH_RESOLUTION,
   DEPTH_ENDPOINT,
   buildDepthJobBody,
+  defaultDepthModel,
   depthAvailability,
   depthModelFromAsset,
   depthResolutionError,
@@ -36,12 +37,15 @@ export function EditorDepthPanel({ working, dirty }) {
     token = "",
   } = useAppContext();
   const [resolution, setResolution] = useState(DEFAULT_DEPTH_RESOLUTION);
-  const [irisModel, setIrisModel] = useState("");
+  // `null` = untouched: the default follows the catalog (it may load late, or a trained depth model
+  // may be installed later) until the user picks a model or reopens one.
+  const [irisModelChoice, setIrisModel] = useState(null);
+  const irisModel = irisModelChoice ?? defaultDepthModel(models);
   const [jobId, setJobId] = useState(null);
   const [submitError, setSubmitError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const availability = depthAvailability(models, macCapabilities);
+  const availability = depthAvailability(models, macCapabilities, irisModel);
   const sourceAssetId = working?.source?.assetId ?? null;
   const resolutionIssue = depthResolutionError(resolution);
   const job = jobId ? jobs.find((item) => item.id === jobId) ?? null : null;

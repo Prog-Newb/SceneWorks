@@ -269,6 +269,28 @@ fn small_depth_config(target: &Value) -> Value {
     config
 }
 
+/// A stored job's payload (after carrier attachment).
+async fn stored_payload(app: &axum::Router, job_id: &str) -> Value {
+    let (status, job) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{job}");
+    job["payload"].clone()
+}
+
+fn carrier_ids(payload: &Value) -> Vec<String> {
+    payload["modelManifestEntries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
 /// Depth: sidecars checked by the engine readers, the install requirement, the per-objective
 /// refusals, registration as a depth MODEL with its task identity, selection by id in the depth job
 /// (a model of another task refused), resume of the run, and delete removing the run.
@@ -361,6 +383,9 @@ async fn depth_training_registers_a_selectable_depth_model() {
         error.to_string().contains("Iris 3B Depth is not installed"),
         "{error}"
     );
+    // S8: typed like every other Iris training refusal.
+    assert_eq!(error["code"], "iris_training_refused", "{error}");
+    assert_eq!(error["context"]["kind"], "missing_export", "{error}");
     stage_task_export(&settings.data_dir, "depth", DEPTH_CONFIG);
     let mut prompts = config.clone();
     prompts["advanced"]["samplePrompts"] = json!(["a cat"]);
@@ -447,6 +472,15 @@ async fn depth_training_registers_a_selectable_depth_model() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{depth_job}");
     assert_eq!(depth_job["payload"]["irisModel"], json!(model_id));
+    // S6: the trained run carries ITS OWN entry (with the engine's depth admission overlaid) and
+    // never the release `iris_3b_depth` entry it does not load — so a disconnected library holding
+    // the release copy cannot refuse it.
+    let stored = stored_payload(&app, depth_job["id"].as_str().unwrap()).await;
+    assert_eq!(carrier_ids(&stored), vec![model_id.clone()], "{stored:#}");
+    assert_eq!(
+        stored["modelManifestEntries"][0]["depth"]["admission"]["measured"],
+        false
+    );
     let (status, refused) = request(
         app.clone(),
         "POST",
@@ -576,6 +610,12 @@ async fn restoration_training_requires_its_resources_and_registers_a_restoration
             .contains("iris_restore_train_critic_trunk"),
         "{error}"
     );
+    // S8: typed.
+    assert_eq!(error["code"], "iris_training_refused", "{error}");
+    assert_eq!(
+        error["context"]["kind"], "missing_training_resources",
+        "{error}"
+    );
     stage_training_resources(&settings.data_dir, None);
     // Aligned pairs are not synthetically degraded.
     let mut synthetic = config.clone();
@@ -651,6 +691,9 @@ async fn restoration_training_requires_its_resources_and_registers_a_restoration
     };
     let (status, job) = request(app.clone(), "POST", "/api/v1/jobs", upscale(&model_id)).await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
+    // S6: a trained restoration run never carries the release `iris_3b_restore` entry.
+    let stored = stored_payload(&app, job["id"].as_str().unwrap()).await;
+    assert_eq!(carrier_ids(&stored), vec![model_id.clone()], "{stored:#}");
     let (status, refused) = request(app.clone(), "POST", "/api/v1/jobs", upscale("sdxl")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
     // Another engine never takes an Iris control.

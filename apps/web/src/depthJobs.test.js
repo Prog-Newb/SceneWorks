@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildDepthJobBody,
+  defaultDepthModel,
   depthAssetDetails,
   depthAvailability,
   depthModelFromAsset,
@@ -23,6 +24,28 @@ describe("Iris depth contract (sc-25682)", () => {
     expect(depthAvailability([{ id: "iris_3b_depth", installState: "incomplete" }], caps(true)).reason).toMatch(/incomplete/);
     // The generation install is not a depth install.
     expect(depthAvailability([{ id: "iris_3b", installState: "installed" }], caps(true)).available).toBe(false);
+  });
+
+  // S3: a trained depth model (`depthInit: parent` training needs no release export) is runnable on
+  // its own; only the release selection needs the release install.
+  it("lets an installed trained depth model run without the release install", () => {
+    const trained = { id: "my_depth", installState: "installed", trainedCheckpoint: { task: "depth" } };
+    const releaseMissing = [{ id: "iris_3b_depth", installState: "missing" }, trained];
+    expect(depthAvailability(releaseMissing, caps(true), "my_depth")).toEqual({ available: true, reason: null });
+    expect(depthAvailability(releaseMissing, caps(true), "")).toMatchObject({ available: false });
+    expect(depthAvailability(releaseMissing, caps(true), "").reason).toMatch(/trained depth models/);
+    // The entry point (no selection yet) is offered when ANY depth model can run.
+    expect(depthAvailability(releaseMissing, caps(true)).available).toBe(true);
+    expect(depthAvailability([{ id: "iris_3b_depth", installState: "missing" }], caps(true)).available).toBe(false);
+    // A trained model that is not installed, or of another task, never satisfies the check.
+    expect(depthAvailability(releaseMissing, caps(true), "gone").reason).toMatch(/gone is not installed/);
+    const restore = { id: "my_restore", installState: "installed", trainedCheckpoint: { task: "restoration" } };
+    expect(depthAvailability([restore], caps(true), "my_restore").available).toBe(false);
+    // Still needs the native lane.
+    expect(depthAvailability(releaseMissing, caps(false), "my_depth").available).toBe(false);
+    // The picker starts on the release when installed, else the first trained model.
+    expect(defaultDepthModel(releaseMissing)).toBe("my_depth");
+    expect(defaultDepthModel([...installed, trained])).toBe("");
   });
 
   it("bounds the max side exactly like the API and always allows native", () => {
@@ -72,7 +95,24 @@ describe("Iris depth contract (sc-25682)", () => {
     expect(rows.Resolution).toBe("Capped at 1024px max side");
     expect(rows.Model).toBe("iris_3b_depth (mlx, bfloat16)");
     expect(rows["Config sha256"]).toBe("ab".repeat(32));
+    expect(rows.Weights).toBe("speridlabs/iris-3b@7445443349bc depth");
     expect(depthAssetDetails({ type: "image" })).toEqual([]);
+    // S5: a trained depth model's lineage names its Training Studio export, not the release weights.
+    const trained = Object.fromEntries(
+      depthAssetDetails({
+        type: "depth",
+        depth: {
+          model: {
+            id: "iris_3b_depth",
+            weightsSource: "training",
+            weightsRepo: null,
+            trainedModelId: "my_depth",
+            exportPath: "models/finetunes/my_depth/depth",
+          },
+        },
+      }),
+    );
+    expect(trained.Weights).toBe("trained my_depth (models/finetunes/my_depth/depth)");
   });
 });
 

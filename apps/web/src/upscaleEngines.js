@@ -14,7 +14,7 @@
 // unchanged.
 import { useEffect } from "react";
 import { UPSCALE_ENGINES, upscaleFactorsForEngine } from "./imageJobs.js";
-import { IRIS_RESTORE_ENGINE, irisRestoreInstalled } from "./irisRestore.js";
+import { IRIS_RESTORE_ENGINE, irisRestoreRunnable } from "./irisRestore.js";
 import { macUpscaleEngineBlocked } from "./macGating.js";
 
 export {
@@ -32,14 +32,15 @@ export const DEFAULT_UPSCALE_ENGINE = "real-esrgan";
 // everywhere, SeedVR2 is platform-intrinsic) — filters the shared table so both
 // studios build the dropdown identically.
 //
-// Iris restoration (sc-25683) runs cache-only from its OWN task entry (`iris_3b_restore`), so it is
-// offered only once that entry is installed — `models` is the full catalog list (absent ⇒ unknown ⇒
-// not offered). Every other engine is unaffected by `models`.
+// Iris restoration (sc-25683) runs cache-only from its OWN task entry (`iris_3b_restore`) or from an
+// installed trained restoration model (sc-25688), so it is offered once either is installed —
+// `models` is the full catalog list (absent ⇒ unknown ⇒ not offered). Every other engine is
+// unaffected by `models`.
 export function availableUpscaleEngines(macCapabilities, models) {
   return UPSCALE_ENGINES.filter(
     (engine) =>
       !macUpscaleEngineBlocked(macCapabilities, engine.key) &&
-      (engine.key !== IRIS_RESTORE_ENGINE || irisRestoreInstalled(models)),
+      (engine.key !== IRIS_RESTORE_ENGINE || irisRestoreRunnable(models)),
   );
 }
 
@@ -47,7 +48,7 @@ export function availableUpscaleEngines(macCapabilities, models) {
 // has loaded (a non-empty `models`), so a restored Iris selection is not snapped away before the
 // model list arrives.
 function irisSelectionUninstalled(engine, models) {
-  return engine === IRIS_RESTORE_ENGINE && Array.isArray(models) && models.length > 0 && !irisRestoreInstalled(models);
+  return engine === IRIS_RESTORE_ENGINE && Array.isArray(models) && models.length > 0 && !irisRestoreRunnable(models);
 }
 
 // If the currently-selected upscale engine is gated out on this platform (e.g. a

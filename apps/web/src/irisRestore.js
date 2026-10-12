@@ -41,6 +41,20 @@ export function irisRestoreInstalled(models) {
   return irisRestoreModel(models)?.installState === "installed";
 }
 
+// Whether ANY Iris restoration model can run: the release `iris_3b_restore` export or an installed
+// trained restoration model (which runs from its own export, without the release install).
+export function irisRestoreRunnable(models) {
+  return irisRestoreInstalled(models) || trainedTaskModels(models, "restoration").length > 0;
+}
+
+// The restoration model a fresh selection runs: the release export when installed ("" = release),
+// else the first installed trained restoration model, else the release (whose missing install the
+// plan / job then names).
+export function defaultRestoreModel(models) {
+  if (irisRestoreInstalled(models)) return "";
+  return trainedTaskModels(models, "restoration")[0]?.id ?? "";
+}
+
 // A usable scale: any positive finite number, else null (never coerced to another value).
 export function normalizeIrisScale(value) {
   const number = typeof value === "string" ? Number(value.trim()) : Number(value);
@@ -73,6 +87,24 @@ export function irisRestoreControls({ scale, inputSizing, colorFix, irisModel } 
 // existing assets (Editor scratch / Library selection) by id — the API measures those upright.
 export function restorePlanBodyForSize({ width, height, ...controls }) {
   return { ...irisRestoreControls(controls), width: Number(width), height: Number(height) };
+}
+
+// The plan body for a Studio render pass: the Studio size, or — for a prompt batch whose prompts
+// carry their own [WxH] directives (`resolutions`, null for a prompt without one) — every DISTINCT
+// render size, so the gate covers each render the batch will restore, not only the Studio default.
+// Without plan-able dimensions there is nothing to plan (null).
+export function restorePlanBodyForRenders({ width, height, resolutions = [] } = {}) {
+  const studio = Number(width) > 0 && Number(height) > 0 ? { width: Number(width), height: Number(height) } : null;
+  const sizes = new Map();
+  for (const resolution of resolutions.length ? resolutions : [null]) {
+    const size = resolution && Number(resolution.width) > 0 && Number(resolution.height) > 0
+      ? { width: Number(resolution.width), height: Number(resolution.height) }
+      : studio;
+    if (!size) return null;
+    sizes.set(`${size.width}x${size.height}`, size);
+  }
+  const distinct = [...sizes.values()];
+  return distinct.length === 1 ? distinct[0] : { sizes: distinct };
 }
 
 export function restorePlanBodyForAssets({ projectId, assetIds, ...controls }) {

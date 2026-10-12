@@ -60,6 +60,10 @@ export function BatchOperationsPanel({
   detailModels = [],
   upscaleEngines = [],
   depthAvailability = { available: false, reason: "Depth estimation is not available." },
+  // The selected depth model's own availability (S3): a trained depth model needs no release install.
+  // Absent → the `depthAvailability` above gates every selection.
+  depthAvailabilityFor = null,
+  defaultDepthModel = "",
   initialOp = "upscale",
   // For the Iris restoration preview (sc-25683): the selection's project and the API token.
   projectId = null,
@@ -87,7 +91,9 @@ export function BatchOperationsPanel({
   const [seed, setSeed] = useState("");
   // Depth params (sc-25682).
   const [depthResolution, setDepthResolution] = useState(DEFAULT_DEPTH_RESOLUTION);
-  const [depthModel, setDepthModel] = useState("");
+  // `null` = untouched: follows `defaultDepthModel` (re-derived by the host from the live catalog).
+  const [depthModelChoice, setDepthModel] = useState(null);
+  const depthModel = depthModelChoice ?? defaultDepthModel;
 
   const count = assets.length;
   const running = items != null;
@@ -103,7 +109,10 @@ export function BatchOperationsPanel({
   const missingModel =
     (op === "detail" && !activeDetailModel) || (op === "edit" && !activeEditModel) || (op === "upscale" && !activeEngine);
   const missingPrompt = op === "edit" && !prompt.trim();
-  const depthUnavailable = depthAvailability?.available ? null : depthAvailability?.reason || "Depth estimation is not available.";
+  const selectedDepthAvailability = depthAvailabilityFor ? depthAvailabilityFor(depthModel) : depthAvailability;
+  const depthUnavailable = selectedDepthAvailability?.available
+    ? null
+    : selectedDepthAvailability?.reason || "Depth estimation is not available.";
   const depthResolutionIssue = depthResolutionError(depthResolution);
   const restoring = op === "upscale" && Boolean(activeEngine?.restoration);
   const restorePlan = restoring ? irisPlanStatus : null;

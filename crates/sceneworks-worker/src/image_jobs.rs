@@ -3290,7 +3290,7 @@ fn write_upscaled_asset(
         None => (None, None),
     };
     let size_tag = match iris {
-        Some(iris) => format!("iris{}x", crate::iris_restore::format_scale(iris.scale)),
+        Some(iris) => crate::iris_restore::file_tag(iris),
         None => format!("up{factor}x"),
     };
 

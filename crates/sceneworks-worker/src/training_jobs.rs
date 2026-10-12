@@ -2254,6 +2254,35 @@ async fn iris_training_preflight(
     ) {
         return Err(WorkerError::InvalidPayload(refusal));
     }
+    // S7: a generation run needs the pinned root backbone AND the Qwen3-VL text encoder — repeated
+    // here (cache-only, nothing downloads) so a job enqueued before an uninstall is refused with
+    // the same words before anything loads. (Depth / restoration repeat theirs in
+    // `task_load_inputs`.)
+    if sceneworks_core::training::iris::IrisObjective::from_base_model(&plan.target.base_model)
+        == Some(sceneworks_core::training::iris::IrisObjective::Generation)
+    {
+        if let Some(refusal) = crate::iris_task_training::iris_training_install_refusal(
+            &settings.data_dir,
+            sceneworks_core::training::iris::IrisObjective::Generation,
+            &plan.config,
+        ) {
+            return Err(WorkerError::InvalidPayload(refusal.message));
+        }
+    }
+    // S11: one resident Iris engine at a time. The trainer loads its own copy of the backbone, so a
+    // warm generator (an `iris_3b` render keeps 15–22 GB resident for the idle window) or a resident
+    // restoration transform leaves first — the declared floor above is judged against the whole
+    // capacity and does not see them. Depth jobs do the same before their estimator loads.
+    let generator = crate::generator_cache::evict_cached_generator().await?;
+    let transform = crate::transform_cache::evict_resident_transform().await?;
+    if generator || transform {
+        tracing::info!(
+            event = "iris_training_evicted_resident_engines",
+            job_id = %job.id,
+            generator,
+            transform
+        );
+    }
     // The engine's own request resolution (stage lineage aside, which needs the checkpoint): every
     // typed refusal — an invalid mesh, a global-batch mismatch, a REPA layer outside the trunk, a
     // shape policy the backbone's patch cannot tile — before anything loads.
