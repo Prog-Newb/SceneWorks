@@ -1000,6 +1000,117 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
     assert!(!output_dir.exists(), "{}", output_dir.display());
 }
 
+/// Epic AT6 (sc-25690) — a FAILED export of a generation run, for the full fine-tune, the LoRA and
+/// the LoKr. The worst case is staged on purpose: the export IS on disk at the run's output path,
+/// and the job is then reported `failed`. Nothing is registered — no result flag, no catalog model,
+/// no LoRA — and the run's sources (dataset files, installed backbone + text encoder) are
+/// byte-identical. The same export reported `completed` registers, so it is the failure that
+/// withholds registration, not the files.
+#[tokio::test]
+async fn a_failed_generation_export_registers_nothing_and_leaves_its_sources_untouched() {
+    use super::iris_task_training::{model_ids, source_tree};
+    let _env = iris_env("256");
+    let temp_dir = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).unwrap();
+    seed_iris_install(&settings);
+    let project_id = project(&app).await;
+    let dataset_id = dataset(&app, &project_id, one_item()).await;
+    let target = iris_target(&app).await;
+    let lora_ids = |app: axum::Router, project_id: String| async move {
+        let (status, loras) = request(
+            app,
+            "GET",
+            &format!("/api/v1/loras?projectId={project_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{loras}");
+        loras
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|lora| lora["id"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+
+    for network in ["full", "lora", "lokr"] {
+        let mut config = target["defaults"].clone();
+        config["triggerWord"] = json!("irisstyle");
+        config["advanced"]["networkType"] = json!(network);
+        if network == "full" {
+            config["advanced"]["iris"]["init"] = json!("random");
+        }
+        let mut outcomes = Vec::new();
+        for status in ["failed", "completed"] {
+            let models_before = model_ids(&app).await;
+            let loras_before = lora_ids(app.clone(), project_id.clone()).await;
+            let (code, job) = submit(&app, &project_id, &dataset_id, config.clone(), false).await;
+            assert_eq!(code, StatusCode::CREATED, "{network}: {job}");
+            let plan = &job["payload"]["plan"];
+            let job_id = job["id"].as_str().unwrap().to_owned();
+            let output_dir =
+                std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
+            let file_name = plan["output"]["fileName"].as_str().unwrap().to_owned();
+            claim_training_job_as_mlx_worker(&app, &job_id).await;
+            std::fs::create_dir_all(&output_dir).unwrap();
+            if network == "full" {
+                let export = output_dir.join(file_name.trim_end_matches(".safetensors"));
+                std::fs::create_dir_all(&export).unwrap();
+                std::fs::write(export.join("config.yaml"), b"model: {}\n").unwrap();
+                write_test_safetensors(&export.join("model.safetensors"));
+            } else {
+                write_test_safetensors(&output_dir.join(&file_name));
+            }
+            let sources_before = source_tree(temp_dir.path());
+            assert!(
+                sources_before
+                    .keys()
+                    .any(|path| path.components().any(|part| part.as_os_str() == "datasets"))
+                    && sources_before
+                        .keys()
+                        .any(|path| path.ends_with("config.yaml")),
+                "{network}: the dataset and the install are among the sources"
+            );
+            let reported = complete(&app, &job_id, status, json!({})).await;
+            assert_eq!(reported["status"], status, "{network}: {reported}");
+            assert_eq!(
+                source_tree(temp_dir.path()),
+                sources_before,
+                "{network} ({status}): the run's sources are untouched"
+            );
+            let new_models = model_ids(&app)
+                .await
+                .into_iter()
+                .filter(|id| !models_before.contains(id))
+                .count();
+            let new_loras = lora_ids(app.clone(), project_id.clone())
+                .await
+                .into_iter()
+                .filter(|id| !loras_before.contains(id))
+                .count();
+            outcomes.push((new_models, new_loras, reported));
+        }
+        let (new_models, new_loras, reported) = &outcomes[0];
+        assert_eq!(
+            (*new_models, *new_loras),
+            (0, 0),
+            "{network}: a failed export registers nothing: {reported}"
+        );
+        assert!(
+            reported["result"].get("baseCheckpointRegistered").is_none()
+                && reported["result"].get("loraRegistered").is_none(),
+            "{network}: {reported}"
+        );
+        let (new_models, new_loras, reported) = &outcomes[1];
+        assert_eq!(
+            (*new_models, *new_loras),
+            if network == "full" { (1, 0) } else { (0, 1) },
+            "{network}: the same export, completed, registers: {reported}"
+        );
+    }
+}
+
 /// A cancel after the first optimizer step published an export: it registers; a cancel that
 /// published nothing registers nothing.
 #[tokio::test]

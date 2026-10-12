@@ -1121,7 +1121,7 @@ mod tests {
         let root = data.path().join("ds");
         std::fs::create_dir_all(root.join("images")).unwrap();
         std::fs::create_dir_all(root.join("sidecars")).unwrap();
-        for id in ["ramp", "flat", "skewed", "masked"] {
+        for id in ["ramp", "flat", "skewed", "masked", "void", "unmasked"] {
             image::RgbImage::new(64, 48)
                 .save(root.join(format!("images/{id}.png")))
                 .unwrap();
@@ -1136,6 +1136,15 @@ mod tests {
         write_npy(&root.join("sidecars/masked.npy"), 48, 64, |y, _| {
             1.0 + y as f32
         });
+        // NO valid depth pixel at all (sc-25690): a plane of zeros, and a usable ramp whose mask
+        // excludes every pixel.
+        write_npy(&root.join("sidecars/void.npy"), 48, 64, |_, _| 0.0);
+        write_npy(&root.join("sidecars/unmasked.npy"), 48, 64, |y, _| {
+            1.0 + y as f32
+        });
+        image::GrayImage::new(64, 48)
+            .save(root.join("sidecars/unmasked.mask.png"))
+            .unwrap();
         // A mask leaving a single valid pixel: under the default min_valid_pixels (2) — invalid.
         image::GrayImage::from_fn(64, 48, |x, y| {
             image::Luma([u8::from(x == 0 && y == 0) * 255])
@@ -1151,6 +1160,11 @@ mod tests {
                 (
                     "masked",
                     json!({"path": "sidecars/masked.npy", "maskPath": "sidecars/masked.mask.png"}),
+                ),
+                ("void", json!({"path": "sidecars/void.npy"})),
+                (
+                    "unmasked",
+                    json!({"path": "sidecars/unmasked.npy", "maskPath": "sidecars/unmasked.mask.png"}),
                 ),
             ],
         );
@@ -1174,10 +1188,51 @@ mod tests {
         assert_eq!(status("flat"), "invalid");
         assert_eq!(status("skewed"), "error");
         assert_eq!(status("masked"), "invalid");
+        for id in ["void", "unmasked"] {
+            let item = report["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["itemId"] == id)
+                .unwrap();
+            assert_eq!(item["status"], "invalid", "{item:#}");
+            assert_eq!(
+                item["reason"], "0 valid depth pixels (min_valid_pixels = 2)",
+                "{item:#}"
+            );
+        }
         assert_eq!(
             (report["ok"].as_u64(), report["invalid"].as_u64()),
-            (Some(1), Some(2))
+            (Some(1), Some(4))
         );
+        // A dataset of nothing but no-valid-pixel items is not trainable under either policy.
+        let void_only = depth_dataset(
+            &root,
+            &[
+                ("void", json!({"path": "sidecars/void.npy"})),
+                (
+                    "unmasked",
+                    json!({"path": "sidecars/unmasked.npy", "maskPath": "sidecars/unmasked.mask.png"}),
+                ),
+            ],
+        );
+        for policy in ["reject", "skip"] {
+            let mut config = config.clone();
+            config.advanced["iris"]["invalid_examples"] = json!(policy);
+            let report = iris_task_dataset_report(
+                data.path(),
+                IrisObjective::Depth,
+                &config,
+                &void_only,
+                &root,
+            );
+            assert_eq!(
+                (report["ok"].as_u64(), report["invalid"].as_u64()),
+                (Some(0), Some(2)),
+                "{policy}: {report:#}"
+            );
+            assert_eq!(report["trainable"], false, "{policy}: {report:#}");
+        }
         assert_eq!(report["trainable"], false);
 
         // `skip` drops the invalid items — but a misaligned one is still refused.
