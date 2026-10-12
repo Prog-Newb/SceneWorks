@@ -889,6 +889,7 @@ fn training_request_from_plan(
         .iter()
         .map(|item| {
             Ok(TrainingItem {
+                subject_mask_path: None,
                 image_path: resolve_dataset_item_path(
                     settings,
                     &plan.dataset.root_path,
@@ -1461,6 +1462,23 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         })
         .unwrap_or_default();
     TrainingConfig {
+        // Preserve the legacy training path when consuming the newer paired contract.
+        // Its additive techniques are opt-in; no noise, auxiliary model, mask, bucket or adapter
+        // is initialized by this compatibility bridge.
+        weight_noise_sigma: 0.0,
+        gradient_noise_eta: 0.0,
+        gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
+        resolution_buckets: Vec::new(),
+        depth_anchoring: Default::default(),
+        perceptual_decoder_dir: None,
+        subject_mask_loss: None,
+        body_losses: Default::default(),
+        identity_loss: Default::default(),
+        face_landmark_loss: Default::default(),
+        face_analysis_dir: None,
+        vae_anchor: Default::default(),
+        latent_lpips: Default::default(),
+        training_adapter: None,
         rank: config.rank,
         alpha: config.alpha as f32,
         learning_rate: config.learning_rate.as_f64().unwrap_or(1e-4) as f32,
@@ -3087,6 +3105,13 @@ mod tests {
                 .all(|item| item.reference_image_paths.is_empty()),
             "captioned training plans must remain captioned under the M4 edit-pair contract"
         );
+        assert!(
+            request
+                .items
+                .iter()
+                .all(|item| item.subject_mask_path.is_none()),
+            "legacy captioned plans must not open an optional subject mask"
+        );
         assert_eq!(
             std::fs::read(&bundle).expect("read swapped source"),
             swapped,
@@ -4378,6 +4403,20 @@ mod tests {
         // them trains exactly as before (no previews) rather than erroring.
         assert_eq!(cfg.sample_every, 0);
         assert!(cfg.sample_prompts.is_empty());
+        // Pin compatibility must not opt a legacy plan into noise, masks, auxiliary losses,
+        // multi-resolution sampling, or a training adapter before any trainer/weight load.
+        assert_eq!(cfg.weight_noise_sigma, 0.0);
+        assert_eq!(cfg.gradient_noise_eta, 0.0);
+        assert_eq!(
+            cfg.gradient_noise_gamma,
+            gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA
+        );
+        assert!(cfg.resolution_buckets.is_empty());
+        assert!(gen_core::train::enabled_aux_losses(&cfg).is_empty());
+        assert!(cfg.subject_mask_loss.is_none());
+        assert!(cfg.perceptual_decoder_dir.is_none());
+        assert!(cfg.face_analysis_dir.is_none());
+        assert!(cfg.training_adapter.is_none());
     }
 
     #[cfg(any(
@@ -4864,6 +4903,20 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let config = TrainingConfig {
+            weight_noise_sigma: 0.0,
+            gradient_noise_eta: 0.0,
+            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
+            resolution_buckets: Vec::new(),
+            depth_anchoring: Default::default(),
+            perceptual_decoder_dir: None,
+            subject_mask_loss: None,
+            body_losses: Default::default(),
+            identity_loss: Default::default(),
+            face_landmark_loss: Default::default(),
+            face_analysis_dir: None,
+            vae_anchor: Default::default(),
+            latent_lpips: Default::default(),
+            training_adapter: None,
             rank: 4,
             alpha: 4.0,
             learning_rate: 1e-4,
@@ -4898,6 +4951,7 @@ mod tests {
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
+                subject_mask_path: None,
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
@@ -4978,6 +5032,20 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let config = TrainingConfig {
+            weight_noise_sigma: 0.0,
+            gradient_noise_eta: 0.0,
+            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
+            resolution_buckets: Vec::new(),
+            depth_anchoring: Default::default(),
+            perceptual_decoder_dir: None,
+            subject_mask_loss: None,
+            body_losses: Default::default(),
+            identity_loss: Default::default(),
+            face_landmark_loss: Default::default(),
+            face_analysis_dir: None,
+            vae_anchor: Default::default(),
+            latent_lpips: Default::default(),
+            training_adapter: None,
             rank: 4,
             alpha: 4.0,
             learning_rate: 1e-4,
@@ -5012,6 +5080,7 @@ mod tests {
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
+                subject_mask_path: None,
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
@@ -5094,6 +5163,20 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let config = TrainingConfig {
+            weight_noise_sigma: 0.0,
+            gradient_noise_eta: 0.0,
+            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
+            resolution_buckets: Vec::new(),
+            depth_anchoring: Default::default(),
+            perceptual_decoder_dir: None,
+            subject_mask_loss: None,
+            body_losses: Default::default(),
+            identity_loss: Default::default(),
+            face_landmark_loss: Default::default(),
+            face_analysis_dir: None,
+            vae_anchor: Default::default(),
+            latent_lpips: Default::default(),
+            training_adapter: None,
             rank: 4,
             alpha: 4.0,
             learning_rate: 1e-4,
@@ -5129,6 +5212,7 @@ mod tests {
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
+                subject_mask_path: None,
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
@@ -5249,6 +5333,20 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let config = TrainingConfig {
+            weight_noise_sigma: 0.0,
+            gradient_noise_eta: 0.0,
+            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
+            resolution_buckets: Vec::new(),
+            depth_anchoring: Default::default(),
+            perceptual_decoder_dir: None,
+            subject_mask_loss: None,
+            body_losses: Default::default(),
+            identity_loss: Default::default(),
+            face_landmark_loss: Default::default(),
+            face_analysis_dir: None,
+            vae_anchor: Default::default(),
+            latent_lpips: Default::default(),
+            training_adapter: None,
             rank: 4,
             alpha: 4.0,
             learning_rate: 1e-4,
@@ -5284,6 +5382,7 @@ mod tests {
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
+                subject_mask_path: None,
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
@@ -5469,6 +5568,7 @@ mod tests {
         let preview_guidance = config.sample_guidance_scale;
         let request = TrainingRequest {
             items: vec![TrainingItem {
+                subject_mask_path: None,
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
@@ -5710,6 +5810,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).expect("output");
         let request = TrainingRequest {
             items: vec![TrainingItem {
+                subject_mask_path: None,
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
