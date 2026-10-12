@@ -2229,7 +2229,11 @@ async fn iris_training_preflight(
         crate::iris_training::mlx_training_capacity_gb()
     };
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let capacity = crate::iris_training::candle_training_capacity_gb(&settings.gpu_id).await;
+    let capacity = Some(
+        crate::iris_training::candle_training_capacity_gb(&settings.gpu_id)
+            .await
+            .map_err(WorkerError::InvalidPayload)?,
+    );
     // sc-25689: the topology this worker can host (its own device(s); more ranks than devices need
     // the explicit `share_device` opt-in), then the declared floor of the busiest device — one
     // rank's floor (+ the REPA teacher) times the ranks sharing it.

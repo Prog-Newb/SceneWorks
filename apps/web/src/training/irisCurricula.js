@@ -16,6 +16,7 @@ export const IRIS_CURRICULA_SPECS = Object.freeze({
   parent_stage: text("Parent stage"),
   run_name: text("Run name", 200),
   "tracking.project": text("Tracking project", 200),
+  "tracking.tags": { kind: "strings", label: "Tracking tags" },
   shape_policy: choice("Shape policy", ["fixed", "bucket", "area"]),
   aspect_ratio_bucket: choice("Aspect buckets", ["shared21-512", "shared21-1024"]),
   shape_align: int("Shape alignment"),

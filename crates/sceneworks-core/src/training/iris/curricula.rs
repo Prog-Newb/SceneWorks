@@ -743,6 +743,28 @@ pub fn iris_run_memory_floor_gb(lane: &str, config: &TrainingConfig, devices: u6
     u32::try_from(ranks).ok()?.checked_mul(per_rank)
 }
 
+/// How many accelerators a worker with `gpu_id` owns (`"1"` → 1, `"0,1"` → 2, `"mlx"` → 1; the
+/// CPU utility worker owns none).
+pub fn worker_device_count(gpu_id: &str) -> u64 {
+    gpu_id
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && *id != "cpu" && *id != "auto")
+        .count() as u64
+}
+
+/// The most devices any one registered GPU worker owns — the largest world a job can get without
+/// `share_device`, since a job runs on the one worker that claims it. `1` when no GPU worker is
+/// registered (every SceneWorks GPU worker owns at least one device).
+pub fn max_worker_devices<'a>(gpu_ids: impl IntoIterator<Item = &'a str>) -> u64 {
+    gpu_ids
+        .into_iter()
+        .map(worker_device_count)
+        .max()
+        .unwrap_or(0)
+        .max(1)
+}
+
 /// The topology refusal of a run on a worker that sees `devices` accelerators: more ranks than
 /// devices need the explicit `dist.world.share_device` opt-in (several ranks on one device — the
 /// same math, shared memory and compute). `None` = admissible.
@@ -1002,6 +1024,18 @@ mod tests {
         assert!(validate_iris_holdout(&plain, &dataset(vec![item("a", Some("holdout"))])).is_err());
         assert!(validate_iris_holdout(&plain, &dataset(vec![item("a", Some("val"))])).is_err());
         validate_iris_holdout(&plain, &dataset(vec![item("a", Some("train"))])).unwrap();
+    }
+
+    #[test]
+    fn the_largest_world_without_sharing_is_the_biggest_workers_device_count() {
+        assert_eq!(worker_device_count("1"), 1);
+        assert_eq!(worker_device_count("0, 1"), 2);
+        assert_eq!(worker_device_count("mlx"), 1);
+        assert_eq!(worker_device_count("cpu"), 0);
+        assert_eq!(max_worker_devices(["cpu", "0", "1"]), 1);
+        assert_eq!(max_worker_devices(["cpu", "0,1", "2"]), 2);
+        assert_eq!(max_worker_devices([]), 1);
+        assert_eq!(max_worker_devices(["cpu"]), 1);
     }
 
     #[test]

@@ -281,15 +281,69 @@ pub(crate) fn mlx_training_capacity_gb() -> Option<f64> {
     .map(|budget| budget.total_gb)
 }
 
-/// The selected NVIDIA card's VRAM (GB), honoring the `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card
-/// emulation.
+/// The VRAM (GB) one rank can count on, on the NVIDIA card(s) this worker owns, honoring the
+/// `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card emulation. A worker configured with several GPU ids
+/// (`SCENEWORKS_GPU_ID=0,1`) is judged per card: a rank lands on any of them, so the smallest
+/// card is the bound. `Err` names a card whose memory could not be read (refused, never
+/// admitted without a bound).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(crate) async fn candle_training_capacity_gb(gpu_id: &str) -> Option<f64> {
-    crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    )
-    .map(|budget| budget.total_gb)
+pub(crate) async fn candle_training_capacity_gb(gpu_id: &str) -> Result<f64, String> {
+    worker_card_capacity_gb(gpu_id, |id| async move {
+        crate::vram_gate::apply_vram_cap(
+            crate::gpu::nvidia_vram_budget_gb(&id).await,
+            crate::vram_gate::cuda_vram_cap_gb(),
+        )
+        .map(|budget| budget.total_gb)
+    })
+    .await
+}
+
+/// The GPU ids a worker's `gpu_id` names (`"1"`, `"0,1"`).
+pub(crate) fn worker_gpu_ids(gpu_id: &str) -> Vec<String> {
+    gpu_id
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && *id != "cpu" && *id != "auto")
+        .map(str::to_owned)
+        .collect()
+}
+
+/// [`candle_training_capacity_gb`] over an injectable per-card probe (`id → total GB`).
+#[cfg_attr(
+    not(any(test, all(not(target_os = "macos"), feature = "backend-candle"))),
+    allow(dead_code)
+)]
+pub(crate) async fn worker_card_capacity_gb<F, Fut>(gpu_id: &str, probe: F) -> Result<f64, String>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Option<f64>>,
+{
+    let ids = worker_gpu_ids(gpu_id);
+    if ids.is_empty() {
+        return Err(format!(
+            "Iris 3B training needs an NVIDIA GPU, but this worker's GPU id is {gpu_id:?}, so the \
+             run is refused rather than admitted without a memory bound."
+        ));
+    }
+    let mut smallest: Option<f64> = None;
+    let mut unreadable = Vec::new();
+    for id in &ids {
+        match probe(id.clone()).await {
+            Some(total) => smallest = Some(smallest.map_or(total, |gb: f64| gb.min(total))),
+            None => unreadable.push(id.clone()),
+        }
+    }
+    if !unreadable.is_empty() {
+        return Err(format!(
+            "Iris 3B training could not read the memory of GPU {} (this worker's GPUs: {}), so the \
+             run is refused rather than admitted without a memory bound. Check that nvidia-smi \
+             reports {}.",
+            unreadable.join(", "),
+            ids.join(", "),
+            if unreadable.len() == 1 { "that card" } else { "those cards" }
+        ));
+    }
+    smallest.ok_or_else(|| "no GPU memory reading".to_owned())
 }
 
 /// The submit-time twin of the worker's gate for the co-located macOS API (the training analogue of
@@ -339,6 +393,34 @@ mod tests {
 
         assert!(iris_data_walk_report(0, 1).is_none());
         assert!(iris_data_walk_report(10, 0).is_none());
+    }
+
+    /// A multi-GPU worker (`SCENEWORKS_GPU_ID=0,1`) is judged per card — the smallest card bounds
+    /// a rank — and a card nvidia-smi cannot read is named in the refusal.
+    #[tokio::test]
+    async fn a_multi_gpu_worker_is_judged_by_its_smallest_readable_card() {
+        let inventory = |cards: Vec<(&'static str, Option<f64>)>| {
+            move |id: String| {
+                let found = cards
+                    .iter()
+                    .find(|(card, _)| *card == id)
+                    .and_then(|(_, gb)| *gb);
+                async move { found }
+            }
+        };
+        let both = inventory(vec![("0", Some(96.0)), ("1", Some(48.0))]);
+        assert_eq!(worker_card_capacity_gb("0,1", &both).await, Ok(48.0));
+        assert_eq!(worker_card_capacity_gb(" 1 ", &both).await, Ok(48.0));
+        assert_eq!(worker_card_capacity_gb("0", &both).await, Ok(96.0));
+        let error = worker_card_capacity_gb("0,7", &both)
+            .await
+            .expect_err("card 7 is not in the inventory");
+        assert!(error.contains("GPU 7") && error.contains("0, 7"), "{error}");
+        assert!(worker_card_capacity_gb("cpu", &both).await.is_err());
+        assert_eq!(
+            worker_gpu_ids("0, 1,cpu"),
+            vec!["0".to_owned(), "1".to_owned()]
+        );
     }
 
     #[test]

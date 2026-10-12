@@ -67,6 +67,15 @@ describe("Iris curricula options (sc-25689)", () => {
     expect(fields).toContain("iris.dist.checkpoint_io");
   });
 
+  it("keeps a preset's tracking tags through the draft and back into the request", () => {
+    const seeded = irisDraftFromDefaults({ tracking: { project: "iris", tags: ["stage1", "repa"] } });
+    expect(seeded["tracking.tags"]).toEqual(["stage1", "repa"]);
+    const snapshot = irisOptionsSnapshot({ iris: seeded });
+    expect(snapshot.tracking).toEqual({ project: "iris", tags: ["stage1", "repa"] });
+    // Typed as a comma list: trimmed, empty entries dropped.
+    expect(irisOptionsSnapshot(draft({ "tracking.tags": [" a", "", "b "] })).tracking).toEqual({ tags: ["a", "b"] });
+  });
+
   it("seeds a preset's nested bag into dotted drafts", () => {
     const seeded = irisDraftFromDefaults({ repa: { weight: 0.5 }, dist: { strategy: "fsdp2", world: { world_size: 2 } } });
     expect(seeded["repa.weight"]).toBe("0.5");

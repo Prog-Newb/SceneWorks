@@ -9,7 +9,7 @@ import { IRIS_CURRICULA_SPECS, curriculaInPlay, irisGlobalBatch, validationRows 
 // Empty = trainer default, not sent.
 
 const GROUPS = [
-  ["Curriculum", ["stage", "parent_stage", "run_name", "tracking.project"]],
+  ["Curriculum", ["stage", "parent_stage", "run_name", "tracking.project", "tracking.tags"]],
   ["Data shapes", ["shape_policy", "aspect_ratio_bucket", "shape_align", "shape_max_ratio", "rope_aspect"]],
   ["Representation alignment (REPA)", ["repa.weight", "repa.variant", "repa.spatial_norm_gamma", "repa.layer", "repa.proj_hidden_dim", "repa.teacher_image_size", "repa.teacher_match_student"]],
   ["Memory", ["activation_checkpointing", "ac_selective_every"]],
@@ -57,7 +57,13 @@ export function IrisCurriculaOptions({ configDraft, updateConfigDraft, configVal
     return (
       <label key={key}>
         {spec.label}
-        {spec.kind === "choice" ? (
+        {spec.kind === "strings" ? (
+          <input
+            onChange={(event) => set(key, event.target.value.split(","))}
+            placeholder="comma-separated"
+            value={Array.isArray(value) ? value.join(",") : ""}
+          />
+        ) : spec.kind === "choice" ? (
           <select onChange={(event) => set(key, event.target.value)} value={value} {...invalidProps(configValidity, `iris.${key}`)}>
             <option value="">Default</option>
             {spec.values.map((option) => (

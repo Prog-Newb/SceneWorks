@@ -73,6 +73,29 @@ fn teacher_status(state: &AppState) -> Value {
     })
 }
 
+/// The topology refusal of a config against the GPU workers this API has registered (sc-25689): a
+/// job runs on ONE worker, so more ranks than the biggest worker's devices need `share_device`.
+/// Judged on every platform; the device count is what the workers registered (their `gpuId`s), 1
+/// when none has registered yet.
+async fn topology_refusal(
+    state: &AppState,
+    config: &TrainingConfig,
+) -> Result<Option<String>, ApiError> {
+    let workers = store_call(state.clone(), |store, _timeout| store.list_workers()).await?;
+    let devices = curricula::max_worker_devices(
+        workers
+            .iter()
+            .filter(|worker| !matches!(worker.status, WorkerStatus::Offline))
+            .map(|worker| worker.gpu_id.as_str()),
+    );
+    let noun = if cfg!(target_os = "macos") {
+        "Mac GPU"
+    } else {
+        "GPU"
+    };
+    Ok(curricula::iris_topology_refusal(config, devices, noun))
+}
+
 fn refusal(kind: &str, message: impl Into<String>) -> Value {
     json!({ "kind": kind, "message": message.into() })
 }
@@ -137,15 +160,16 @@ pub(crate) async fn iris_plan_check(
              the Model Manager.",
         ));
     }
-    // The co-located macOS API judges the Mac's one Metal device; elsewhere the worker that claims
-    // the job decides (it owns the GPU).
+    // The topology every platform can judge before launch (the registered workers' devices); the
+    // memory floor only where this API can read the device (the co-located Mac) — off-Mac the
+    // worker that claims the job reads its own VRAM.
+    if first_refusal.is_none() {
+        if let Some(message) = topology_refusal(&state, &config).await? {
+            first_refusal = Some(refusal("unsupported_topology", message));
+        }
+    }
     #[cfg(target_os = "macos")]
     {
-        if first_refusal.is_none() {
-            if let Some(message) = curricula::iris_topology_refusal(&config, 1, "Mac GPU") {
-                first_refusal = Some(refusal("unsupported_topology", message));
-            }
-        }
         if first_refusal.is_none() {
             if let Some(message) =
                 sceneworks_worker::iris_plan_memory_error(&target.base_model, &config)
@@ -333,10 +357,9 @@ pub(crate) async fn check_iris_submit(
         ));
     }
 
-    // ---- the topology the co-located macOS worker can host --------------------------------------
-    #[cfg(target_os = "macos")]
+    // ---- the topology the registered workers can host (every platform) ---------------------------
     if !dry_run {
-        if let Some(message) = curricula::iris_topology_refusal(&plan.config, 1, "Mac GPU") {
+        if let Some(message) = topology_refusal(state, &plan.config).await? {
             return Err(refused("unsupported_topology", message));
         }
     }

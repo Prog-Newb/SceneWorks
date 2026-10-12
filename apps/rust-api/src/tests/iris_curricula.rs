@@ -361,3 +361,69 @@ async fn holdout_and_teacher_refusals_are_typed_at_submit() {
     assert_eq!(status, StatusCode::CREATED, "{job}");
     assert_eq!(job["payload"]["irisReceipts"]["repa"]["weight"], 0.5);
 }
+
+async fn register_gpu_worker(app: &axum::Router, worker_id: &str, gpu_id: &str) {
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": worker_id,
+            "gpuId": gpu_id,
+            "gpuName": "Test GPU",
+            "capabilities": ["gpu", "lora_train", "lora_train_execute"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// The topology is judged before launch on EVERY platform, against the devices the registered
+/// workers own: a job runs on one worker, so more ranks than the biggest worker's devices need the
+/// share-device opt-in — at the plan check and at submit, never only after a worker claims it.
+#[tokio::test]
+async fn the_topology_is_refused_before_launch_against_the_registered_workers() {
+    let _env = iris_env("256");
+    let temp_dir = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).unwrap();
+    seed_iris_install(&settings);
+    let defaults = iris_target(&app).await["defaults"].clone();
+    let ranks = |world: u64, share: bool| {
+        let mut config = defaults.clone();
+        config["advanced"]["iris"]["dist"] =
+            json!({"world": {"world_size": world, "share_device": share}});
+        config
+    };
+
+    // No worker registered yet, then two single-GPU workers: one device per job.
+    let check = plan_check(&app, ranks(2, false)).await;
+    assert_eq!(check["refusal"]["kind"], "unsupported_topology", "{check}");
+    register_gpu_worker(&app, "gpu-0", "0").await;
+    register_gpu_worker(&app, "gpu-1", "1").await;
+    let check = plan_check(&app, ranks(2, false)).await;
+    assert_eq!(check["refusal"]["kind"], "unsupported_topology", "{check}");
+    assert!(
+        check["refusal"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("owns 1"),
+        "{check}"
+    );
+    let check = plan_check(&app, ranks(2, true)).await;
+    assert_ne!(check["refusal"]["kind"], "unsupported_topology", "{check}");
+
+    // A worker configured with two GPUs hosts two unshared ranks; three still need sharing.
+    register_gpu_worker(&app, "gpu-pair", "0,1").await;
+    let check = plan_check(&app, ranks(2, false)).await;
+    assert_ne!(check["refusal"]["kind"], "unsupported_topology", "{check}");
+
+    let project_id = project(&app).await;
+    let dataset_id = dataset(&app, &project_id, json!([{ "caption": { "text": "a" } }])).await;
+    let (status, error) = submit(&app, &project_id, &dataset_id, ranks(3, false), false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["context"]["kind"], "unsupported_topology", "{error}");
+    let (status, job) = submit(&app, &project_id, &dataset_id, ranks(2, false), false).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+}

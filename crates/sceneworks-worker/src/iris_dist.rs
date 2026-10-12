@@ -50,6 +50,9 @@ pub const CANCEL_LINE: &str = "cancel";
 /// How long the other ranks get to stop once the fleet has a terminal outcome (a failure, or rank 0
 /// finished) before they are killed.
 const PEER_STOP_GRACE: Duration = Duration::from_secs(120);
+/// How long a canceled fleet gets to stop (rank 0's durable checkpoint + export of a full model
+/// is the slow part) before the remaining ranks are killed.
+const CANCEL_GRACE: Duration = Duration::from_secs(600);
 /// How long an orphaned rank (its coordinator's stdin closed) keeps running after it cancels, before
 /// it exits on its own.
 const ORPHAN_EXIT_BOUND: Duration = Duration::from_secs(600);
@@ -73,13 +76,7 @@ pub(crate) fn visible_training_devices(settings: &crate::settings::Settings) -> 
     if cfg!(target_os = "macos") {
         return 1;
     }
-    let ids = settings
-        .gpu_id
-        .split(',')
-        .map(str::trim)
-        .filter(|id| !id.is_empty() && *id != "cpu" && *id != "auto")
-        .count() as u64;
-    ids.max(1)
+    (crate::iris_training::worker_gpu_ids(&settings.gpu_id).len() as u64).max(1)
 }
 
 /// The topology receipt recorded on the job result of a multi-rank run.
@@ -348,6 +345,8 @@ pub(crate) fn apply_rank_world(
 /// and returns the process exit code (0 trained, 3 canceled before the first step, 1 failed).
 pub fn iris_rank_entry() -> Option<i32> {
     let spec_path = PathBuf::from(std::env::var_os(RANK_SPEC_ENV)?);
+    // The rank's own diagnostics (stderr, inherited by the worker's log) use the worker's format.
+    sceneworks_core::observability::init_logging();
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -633,15 +632,20 @@ enum FleetEvent {
     Eof(usize),
 }
 
-/// Tunables of a fleet drive (tests shorten the grace).
+/// Tunables of a fleet drive (tests shorten the graces).
 pub(crate) struct FleetTimings {
+    /// How long the other ranks get once the fleet has failed or rank 0 finished.
     pub peer_stop_grace: Duration,
+    /// How long the fleet gets to wind down after a cancel (rank 0 may still publish its durable
+    /// checkpoint + export) before every remaining rank is killed.
+    pub cancel_grace: Duration,
 }
 
 impl Default for FleetTimings {
     fn default() -> Self {
         Self {
             peer_stop_grace: PEER_STOP_GRACE,
+            cancel_grace: CANCEL_GRACE,
         }
     }
 }
@@ -780,7 +784,7 @@ pub(crate) fn drive_rank_fleet_with(
                                 return;
                             }
                         }
-                        None => tracing::debug!(rank, "iris rank output: {line}"),
+                        None => tracing::info!(rank, "iris rank output: {line}"),
                     }
                 }
                 let _ = sender.send(FleetEvent::Eof(rank));
@@ -813,6 +817,11 @@ pub(crate) fn drive_rank_fleet_with(
         if cancel.is_cancelled() && !cancel_sent {
             fleet.send_cancel();
             cancel_sent = true;
+            // The trainers agree on a cancel only at a collective; a rank still in the rendezvous
+            // (`World::connect` retries until `timeout_secs`, 90 min by default) never checks it.
+            // Bound the wind-down: long enough for rank 0's durable checkpoint + export, never the
+            // transport timeout.
+            stop_deadline.get_or_insert(Instant::now() + timings.cancel_grace);
         }
         if fleet.ranks.iter().all(|rank| rank.status.is_some()) {
             break;
@@ -864,18 +873,28 @@ pub(crate) fn drive_rank_fleet_with(
                         canceled,
                         synthetic: false,
                     });
-                    if !(canceled && cancel_sent) {
-                        if !cancel_sent {
-                            fleet.send_cancel();
-                            cancel_sent = true;
-                        }
-                        stop_deadline.get_or_insert(Instant::now() + timings.peer_stop_grace);
+                    if !cancel_sent {
+                        fleet.send_cancel();
+                        cancel_sent = true;
                     }
+                    // A canceled rank winds down within the cancel grace; any other failure stops
+                    // the fleet within the peer grace.
+                    stop_deadline.get_or_insert(
+                        Instant::now()
+                            + if canceled {
+                                timings.cancel_grace
+                            } else {
+                                timings.peer_stop_grace
+                            },
+                    );
                 }
             },
             Ok(FleetEvent::Eof(rank)) => fleet.ranks[rank].eof = true,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+            // Every reader thread ended: only the reaping below remains — do not spin.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
         }
         // Reap exited ranks; one that ended without reporting is a lost rank.
         for index in 0..fleet.ranks.len() {
@@ -1335,7 +1354,9 @@ mod tests {
                     step += 1;
                     std::thread::sleep(Duration::from_millis(100));
                 }
-                std::fs::write(record_dir.join(format!("cancel-{rank}")), b"1").unwrap();
+                if canceled.load(Ordering::SeqCst) {
+                    std::fs::write(record_dir.join(format!("cancel-{rank}")), b"1").unwrap();
+                }
                 done(&mut out, step);
                 0
             }
@@ -1375,6 +1396,12 @@ mod tests {
                     },
                 );
                 1
+            }
+            ("ignore_cancel", _) => {
+                // Stuck before any collective (e.g. waiting in the rendezvous): never answers a
+                // cancel. Only the fleet's bounded wind-down ends it.
+                std::thread::sleep(Duration::from_secs(300));
+                0
             }
             ("refused_then_hang", _) => {
                 // Ignores the cancel: only a kill ends it.
@@ -1431,6 +1458,8 @@ mod tests {
         outcome: crate::error::WorkerResult<()>,
         events: Vec<crate::training_jobs::TrainEvent>,
         records: Vec<Value>,
+        /// The ranks that recorded receiving the cancel line.
+        canceled_ranks: Vec<usize>,
         elapsed: Duration,
     }
 
@@ -1466,6 +1495,7 @@ mod tests {
             &cancel,
             &FleetTimings {
                 peer_stop_grace: Duration::from_secs(2),
+                cancel_grace: Duration::from_secs(3),
             },
         );
         let elapsed = started.elapsed();
@@ -1474,6 +1504,9 @@ mod tests {
         while let Some(event) = rx.blocking_recv() {
             events.push(event);
         }
+        let canceled_ranks = (0..world as usize)
+            .filter(|rank| records.path().join(format!("cancel-{rank}")).is_file())
+            .collect();
         let records = super::test_support::records(records.path());
         for record in &records {
             assert!(
@@ -1493,6 +1526,7 @@ mod tests {
             outcome,
             events,
             records,
+            canceled_ranks,
             elapsed,
         }
     }
@@ -1558,8 +1592,23 @@ mod tests {
         let run = drive("wait_cancel", 2, Some(Duration::from_millis(800)));
         assert!(run.outcome.is_ok(), "{:?}", run.outcome);
         assert!(matches!(run.events.last(), Some(TrainEvent::Done(_))));
-        assert!(run.records.iter().all(|record| record["rank"].is_u64()));
+        assert_eq!(
+            run.canceled_ranks,
+            vec![0, 1],
+            "every rank received the cancel"
+        );
         assert!(run.elapsed < Duration::from_secs(50), "{:?}", run.elapsed);
+    }
+
+    /// A cancel bounds the wind-down: ranks that never answer it (stuck in the rendezvous, which
+    /// retries for the 90-minute transport timeout) are killed after the cancel grace and reaped.
+    #[test]
+    fn a_cancel_never_waits_out_the_transport_timeout() {
+        let run = drive("ignore_cancel", 2, Some(Duration::from_millis(500)));
+        assert!(run.outcome.is_err(), "{:?}", run.outcome);
+        assert_eq!(run.records.len(), 2);
+        // 0.5 s + the 3 s cancel grace + reaping; the ranks themselves would sleep 300 s.
+        assert!(run.elapsed < Duration::from_secs(30), "{:?}", run.elapsed);
     }
 
     #[test]
