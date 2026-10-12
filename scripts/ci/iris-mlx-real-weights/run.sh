@@ -104,19 +104,33 @@ done
 test -d "$qwen_dir/snapshots/ebb281ec70b05090aa6165b016eac8ec08e71b17"
 
 # The encoder-free hub for the depth / restoration jobs: the Iris repo (+ restoration's training
-# resources), and nothing else.
+# resources), and nothing else. A real directory tree whose files are HARD links to the resolved
+# hub files (same volume, no copy): the worker canonicalizes a training base path and requires it
+# inside the app-managed hub, which a symlink into the shared hub would leave.
 no_encoder="$RUNNER_TEMP/iris-hub-no-encoder"
 rm -rf "$no_encoder"
 mkdir -p "$no_encoder"
-for d in "$iris_repo_dir" "$critic_dir" "$vgg_dir" "$lpips_dir"; do
-  ln -s "$d" "$no_encoder/$(basename "$d")"
-done
+python3.12 - "$no_encoder" "$iris_repo_dir" "$critic_dir" "$vgg_dir" "$lpips_dir" <<'PY'
+import os, sys
+dest_root = sys.argv[1]
+for repo in sys.argv[2:]:
+    base = os.path.join(dest_root, os.path.basename(repo))
+    for here, dirs, files in os.walk(repo, followlinks=True):
+        rel = os.path.relpath(here, repo)
+        os.makedirs(os.path.join(base, rel), exist_ok=True)
+        for f in files:
+            src = os.path.realpath(os.path.join(here, f))
+            os.link(src, os.path.join(base, rel, f))
+PY
 if find -L "$no_encoder" -maxdepth 1 -iname '*qwen*' | grep -q .; then
   echo "::error::the encoder-free hub resolves a Qwen repository"; exit 1
 fi
 find "$no_encoder" -maxdepth 1 -exec ls -ld {} + | tee "$out/no-encoder-hub.txt"
 
 # ---- 3. build (run-scoped per source SHA; unstripped, rust-lang/rust#157750) ---------------------
+# Only this lane's own trees: keep the current SHA's, drop any earlier SHA's (~30 GB each).
+find "$HOME/sceneworks-iris-campaign-target" -mindepth 1 -maxdepth 1 -type d ! -name "$sha" \
+  -exec rm -rf {} + 2>/dev/null || true
 mkdir -p "$target"
 export CARGO_TARGET_DIR="$target"
 export CARGO_PROFILE_RELEASE_STRIP=none
