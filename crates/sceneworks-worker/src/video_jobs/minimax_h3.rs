@@ -1713,6 +1713,12 @@ pub(super) async fn generate_candle_minimax_h3(
         gen_core::veda::workspace::Backend::Cuda,
     )
     .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+    if let Some(bound) = sparse_bound.as_ref() {
+        crate::video_admission::admit_veda_host_workspace(
+            bound,
+            crate::yue2_admission::host_available_bytes().await,
+        )?;
+    }
     if let Some(error) = crate::vram_gate::minimax_h3_fit_error_with_sparse(
         &request.model_manifest_entry,
         load.tier,

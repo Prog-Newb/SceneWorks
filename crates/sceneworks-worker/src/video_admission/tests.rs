@@ -5552,3 +5552,26 @@ fn veda_cold_admission_adds_full_bound_and_preserves_off_baseline() {
     );
     assert!(bound.dense_fallback_bytes > 0);
 }
+
+#[test]
+fn veda_cuda_host_pool_is_checked_independently_and_fail_closed() {
+    let req = gen_core::GenerationRequest {
+        width: 576,
+        height: 320,
+        frames: Some(124),
+        veda: Some(gen_core::VedaRequest {
+            enabled: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let b = gen_core::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Cuda)
+        .unwrap()
+        .unwrap();
+    let host = veda_host_workspace_bytes(&b);
+    assert!(host >= b.predictor_host_bytes + b.predictor_load_bytes);
+    assert!(host <= b.total_bytes);
+    assert!(admit_veda_host_workspace(&b, Some(host)).is_ok());
+    assert!(admit_veda_host_workspace(&b, Some(host - 1)).is_err());
+    assert!(admit_veda_host_workspace(&b, None).is_err());
+}

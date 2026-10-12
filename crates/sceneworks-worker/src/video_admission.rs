@@ -3380,5 +3380,39 @@ pub(crate) fn veda_cold_peak_gb(
     })
 }
 
+/// CUDA host residency must fit independently of the device pool. Scorer/selector/gather
+/// categories contain both host and device temporaries; retaining their complete bounds here
+/// is conservative for the host, without charging device-only QKV/output/dense-score buffers.
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+pub(crate) fn veda_host_workspace_bytes(bound: &gen_core::veda::workspace::WorkspaceBound) -> u64 {
+    [
+        bound.predictor_host_bytes,
+        bound.predictor_load_bytes,
+        bound.layout_host_bytes,
+        bound.position_rows_bytes,
+        bound.scorer_bytes,
+        bound.selector_bytes,
+        bound.gather_bytes,
+        bound.predictor_device_bytes,
+        bound.self_test_bytes,
+    ]
+    .iter()
+    .sum()
+}
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+pub(crate) fn admit_veda_host_workspace(
+    bound: &gen_core::veda::workspace::WorkspaceBound,
+    available: Option<u64>,
+) -> crate::WorkerResult<()> {
+    let needed = veda_host_workspace_bytes(bound);
+    let available=available.ok_or_else(||crate::WorkerError::InvalidPayload(
+        "Veda admission could not read available host RAM; refusing predictor/scorer allocation".into()))?;
+    if needed > available {
+        return Err(crate::WorkerError::InvalidPayload(format!(
+        "Veda predictor/scorer host workspace needs {needed} bytes, but host RAM has {available} bytes available")));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

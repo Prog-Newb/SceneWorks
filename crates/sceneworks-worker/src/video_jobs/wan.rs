@@ -2883,6 +2883,8 @@ pub(super) async fn generate_video_using(
             input.frames,
             input.decode_chunk_size,
         );
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let host_probe_runtime = tokio::runtime::Handle::current();
         tokio::spawn(async move {
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let cold_load_cancel = cancel.clone();
@@ -2987,6 +2989,11 @@ pub(super) async fn generate_video_using(
                 admission_inputs.runtime = admission_runtime;
                 admission_inputs.headroom_bytes = admission_headroom_bytes;
                 if let Some(bound) = &sparse_bound {
+                    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                    crate::video_admission::admit_veda_host_workspace(
+                        bound,
+                        host_probe_runtime.block_on(crate::yue2_admission::host_available_bytes()),
+                    )?;
                     crate::video_admission::admit_veda_workspace(
                         generator.memory_strategy_contract(),
                         bound,
