@@ -2851,6 +2851,16 @@ pub(crate) async fn run_training_execution(
     if let Err(error) = tokio::fs::create_dir_all(&prepared_run.request.output_dir).await {
         return prepared_run.finish(Err(error.into()));
     }
+    // sc-25785: a step-0 run clears an earlier run's resume bundles; a resume run reports the
+    // checkpoint it continues from, so the job records it from its first progress update.
+    let resume_checkpoint_step = match prepare_training_resume_dir(
+        prepared_run.request.config.resume,
+        &prepared_run.request.output_dir,
+        &prepared_run.request.file_name,
+    ) {
+        Ok(step) => step,
+        Err(error) => return prepared_run.finish(Err(error)),
+    };
     // sc-14056: the interim `networkType == "full"` rejection that used to sit here is gone. It
     // existed because this worker pinned a sceneworks-gen-core without `TrainingConfig.full_finetune`
     // and `mage_flow_lora` was in no routed training set, so a full request would have been mapped
@@ -2949,6 +2959,7 @@ pub(crate) async fn run_training_execution(
         sample_config,
         backend,
         total_steps,
+        resume_checkpoint_step,
         rx,
         cancel,
         blocking,
@@ -3247,6 +3258,7 @@ async fn consume_training_events(
     sample_config: TrainingConfig,
     backend: &str,
     total_steps: u32,
+    mut resume_checkpoint_step: Option<u32>,
     mut rx: tokio::sync::mpsc::Receiver<TrainEvent>,
     cancel: CancelFlag,
     blocking: tokio::task::JoinHandle<WorkerResult<()>>,
@@ -3261,6 +3273,7 @@ async fn consume_training_events(
     let mut canceled = false;
     let mut last_cancel_check = Instant::now();
     let mut checkpoints: Vec<Value> = Vec::new();
+    let mut reported_resume_step: Option<u32> = None;
 
     // sc-5637 — preview-sample plumbing, now owned by `SamplePersister` (sc-8921): the resolved sample
     // config + destination paths + the accumulated cumulative/this-cadence record lists. The event
@@ -3319,6 +3332,7 @@ async fn consume_training_events(
                     }
                     if let TrainingProgress::Checkpoint { step } = progress {
                         checkpoints.push(json!({ "step": step }));
+                        resume_checkpoint_step = Some(step);
                     }
                     // sc-5637 — a preview sample: persist it + stream the updated cumulative/this-cadence
                     // lists so Training Studio shows it live. Handled here (not in `map_training_progress`)
@@ -3349,10 +3363,22 @@ async fn consume_training_events(
                     }
                     let (status, stage, fraction, message) =
                         map_training_progress(progress, total_steps);
+                    // sc-25785: record the latest resume checkpoint whenever it changes, so a run
+                    // that stops by ANY path — cancel, failure, or a crash the API later marks
+                    // interrupted — still offers Resume. The jobs store carries it forward.
+                    let result = (resume_checkpoint_step != reported_resume_step).then(|| {
+                        reported_resume_step = resume_checkpoint_step;
+                        let mut result = JsonObject::new();
+                        result.insert(
+                            "resumeCheckpointStep".to_owned(),
+                            json!(resume_checkpoint_step),
+                        );
+                        result
+                    });
                     update_job(
                         api,
                         &job.id,
-                        training_progress(status, stage, fraction, &message, None, backend),
+                        training_progress(status, stage, fraction, &message, result, backend),
                     )
                     .await?;
                     // No per-event heartbeat here: the `heartbeat_interval.tick()` arm above already
