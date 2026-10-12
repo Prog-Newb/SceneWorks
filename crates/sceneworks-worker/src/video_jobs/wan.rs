@@ -2259,6 +2259,10 @@ pub(super) fn run_loaded_video_generation(
                 channels: track.channels,
             }),
             adapter_apply_reports: generator.adapter_apply_reports(),
+            veda_execution: generator
+                .veda_execution_report()
+                .filter(|report| report.requested)
+                .map(|report| report.outcome_json()),
         }),
         // Either channel count is the same contract violation. `ImagesRgba` (sc-24111) is
         // unreachable on this path — no video request sets `output_channels` — but the match
@@ -2636,6 +2640,15 @@ pub(super) fn video_quant_label(quant: Option<Quant>) -> (Option<String>, Option
         Some(Quant::Nvfp4) => (Some("nvfp4".to_owned()), None),
         None => (Some("bf16".to_owned()), None),
     }
+}
+
+/// Copy only provider observations from this successful generation into the persisted metrics.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn record_video_veda_metrics(metrics: &mut GenerationMetrics, outcome: Option<&Value>) {
+    metrics.veda_execution = outcome.cloned();
 }
 
 /// Fold the effective video settings + model + observed step count into the
@@ -3284,7 +3297,10 @@ pub(super) async fn generate_video_using(
         .get("model")
         .and_then(|value| value.as_str())
         .map(str::to_owned);
-    let metrics = build_video_metrics(timing, &video_settings, model, video_effective_steps);
+    let mut metrics = build_video_metrics(timing, &video_settings, model, video_effective_steps);
+    if let Ok(decoded) = &result {
+        record_video_veda_metrics(&mut metrics, decoded.veda_execution.as_ref());
+    }
     crate::job_metrics::post_generation_metrics(api, &job.id, &metrics).await;
     result
 }

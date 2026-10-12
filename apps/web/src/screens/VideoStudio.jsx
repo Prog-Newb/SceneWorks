@@ -1,3 +1,4 @@
+import { VedaOutcome } from "../components/VedaOutcome.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { AssetPickerField, ImageEditSourcePickerField, VideoSourcePickerField } from "../components/AssetPicker.jsx";
@@ -3133,6 +3134,11 @@ export function VideoStudio() {
               row, from the same summary that gates the button (sc-10650). Project, prompt
               and inputs are silent requirements: their empty fields show it. */}
           <ValidationSummary issues={videoValidity.surfaced} label="Generate errors" />
+          <VedaOutcome
+            label="Recorded recipe attention"
+            outcome={launchRequest?.recipe?.rawAdapterSettings?.vedaExecution}
+            requested={launchRequest?.recipe?.rawAdapterSettings?.veda}
+          />
           {canStartNewGenerationFromReplay ? (
             <button
               className="secondary-action"

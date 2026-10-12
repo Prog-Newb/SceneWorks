@@ -1075,6 +1075,9 @@ pub struct JobSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationMetrics {
+    /// Provider-owned post-generation H3 attention observations; absent on historical/unadopted jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub veda_execution: Option<Value>,
     // --- resolved effective settings ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,

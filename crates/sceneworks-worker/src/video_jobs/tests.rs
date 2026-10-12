@@ -3657,6 +3657,7 @@ fn encoded_clip_measures_the_file_not_the_request() {
         fps: 25,
         audio: None,
         adapter_apply_reports: Vec::new(),
+        veda_execution: None,
     };
     let clip = EncodedClip::measure(&decoded);
     assert_eq!(clip.frames, 149, "counted off the frames, not predicted");
@@ -3678,6 +3679,7 @@ fn encoded_clip_measures_the_file_not_the_request() {
         fps: 0,
         audio: None,
         adapter_apply_reports: Vec::new(),
+        veda_execution: None,
     };
     let clip = EncodedClip::measure(&zero_fps);
     assert_eq!(clip.fps, 1, "mirrors encode_inner's `decoded.fps.max(1)`");
@@ -3702,6 +3704,7 @@ fn asset_fact_records_the_soundtrack_that_was_actually_muxed() {
         fps: 24,
         audio,
         adapter_apply_reports: Vec::new(),
+        veda_execution: None,
     };
     let track = AudioTrack {
         samples: vec![0.0; 64],
@@ -15136,6 +15139,7 @@ async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
                 channels: 2,
             }),
             adapter_apply_reports: Vec::new(),
+            veda_execution: None,
         };
         let media_path = dir_guard.path().join(format!("clip_{frames}.mp4"));
         encode_media(&media_path, decoded, None, None)
@@ -15180,6 +15184,7 @@ async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
             channels: 2,
         }),
         adapter_apply_reports: Vec::new(),
+        veda_execution: None,
     };
     let media_path = dir_guard.path().join("long_audio.mp4");
     encode_media(&media_path, decoded, None, None)
@@ -16065,6 +16070,7 @@ async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
         fps: 24,
         audio: None,
         adapter_apply_reports: Vec::new(),
+        veda_execution: None,
     };
 
     let error = encode_media(&media_path, decoded, None, None)
@@ -20279,6 +20285,7 @@ async fn stage_minimax_h3_clip_asset(
             channels: 2,
         }),
         adapter_apply_reports: Vec::new(),
+        veda_execution: None,
     };
     encode_media(&media_path, decoded, None, None)
         .await
@@ -21176,4 +21183,148 @@ fn minimax_h3_veda_enabled_and_off_reach_the_real_offline_load_and_request_seams
             "empty offline cache must not stage a predictor or fetch one, even when enabled"
         );
     }
+}
+
+// The report getter must run after generate, on the same generator, for each job.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn veda_outcome_survives_post_generation_conversion_and_never_replays_stale_facts() {
+    struct OutcomeGenerator {
+        inner: ProbeGenerator,
+        next: std::cell::RefCell<Option<gen_core::VedaExecutionReport>>,
+        observed: std::cell::RefCell<Option<gen_core::VedaExecutionReport>>,
+    }
+    impl Generator for OutcomeGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            self.inner.descriptor()
+        }
+        fn validate(&self, _: &GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn veda_execution_report(&self) -> Option<gen_core::VedaExecutionReport> {
+            self.observed.borrow().clone()
+        }
+        fn generate(
+            &self,
+            request: &GenerationRequest,
+            progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<GenerationOutput> {
+            *self.observed.borrow_mut() = self.next.borrow_mut().take();
+            self.inner.generate(request, progress)
+        }
+    }
+    let generator = OutcomeGenerator {
+        inner: ProbeGenerator {
+            descriptor: gen_core::ModelDescriptor {
+                id: "minimax_h3",
+                family: "minimax_h3",
+                backend: "test",
+                modality: gen_core::Modality::Video,
+                capabilities: Default::default(),
+                required_components: &[],
+                control_kinds: None,
+                encoder_contract: None,
+                denoiser_output_latent_space: None,
+            },
+            request: Default::default(),
+            adapter_reports: Default::default(),
+            audio: None,
+        },
+        next: Default::default(),
+        observed: Default::default(),
+    };
+    let sparse = gen_core::VedaExecutionReport {
+        requested: true,
+        kernel: Some("actual-native-kernel".into()),
+        plan: Some("trained_T".into()),
+        plan_grid: Some([2, 8, 9]),
+        execution_grid: Some([2, 7, 9]),
+        sparse_calls: 2,
+        dense_calls: 1,
+        selected_token_pairs: 4375,
+        dense_token_pairs: 10000,
+        ..Default::default()
+    };
+    let controls = json!({"enabled":true,"generated":"90%","reference":"12"});
+    let mut raw = json!({"veda":controls,"vedaExecution":{"effective":"forged-request-value"}});
+    for report in [
+        sparse,
+        gen_core::VedaExecutionReport {
+            requested: true,
+            dense_calls: 3,
+            selected_token_pairs: 10000,
+            dense_token_pairs: 10000,
+            fallback_reason: Some("missing managed predictor".into()),
+            ..Default::default()
+        },
+        gen_core::VedaExecutionReport {
+            requested: true,
+            dense_calls: 3,
+            selected_token_pairs: 10000,
+            dense_token_pairs: 10000,
+            fallback_reason: Some("actual-device self-test forced failure".into()),
+            ..Default::default()
+        },
+    ] {
+        *generator.next.borrow_mut() = Some(report.clone());
+        let decoded = run_loaded_video_generation(
+            &generator,
+            VideoGenInput {
+                veda: Some(gen_core::VedaRequest {
+                    enabled: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &CancelFlag::new(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.veda_execution.as_ref(),
+            Some(&report.outcome_json())
+        );
+        let mut metrics = sceneworks_core::contracts::GenerationMetrics::default();
+        wan::record_video_veda_metrics(&mut metrics, decoded.veda_execution.as_ref());
+        assert_eq!(
+            serde_json::to_value(&metrics).unwrap()["vedaExecution"],
+            report.outcome_json()
+        );
+        raw = record_veda_outcome(raw, decoded.veda_execution.as_ref());
+        let saved: Value = serde_json::from_str(&serde_json::to_string(&raw).unwrap()).unwrap();
+        assert_eq!(saved["vedaExecution"], report.outcome_json());
+        assert_eq!(saved["veda"], controls);
+        if report.sparse_calls == 0 {
+            assert_eq!(saved["vedaExecution"]["effective"], "dense");
+            assert_eq!(saved["vedaExecution"]["totalAttentionFraction"], 1.0);
+        }
+    }
+    let later = run_loaded_video_generation(
+        &generator,
+        VideoGenInput::default(),
+        &CancelFlag::new(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(later.veda_execution.is_none());
+    let mut metrics = sceneworks_core::contracts::GenerationMetrics {
+        veda_execution: Some(json!({"effective":"sparse"})),
+        ..Default::default()
+    };
+    wan::record_video_veda_metrics(&mut metrics, later.veda_execution.as_ref());
+    assert!(metrics.veda_execution.is_none());
+    assert!(record_veda_outcome(raw, later.veda_execution.as_ref())
+        .get("vedaExecution")
+        .is_none());
+}
+
+#[test]
+fn veda_result_persistence_discards_request_carried_observations_without_provider_report() {
+    let raw = json!({"veda":{"enabled":true},"vedaExecution":{"effective":"sparse"}});
+    let cleaned = record_veda_outcome(raw, None);
+    assert!(cleaned.get("vedaExecution").is_none());
+    assert_eq!(cleaned["veda"]["enabled"], true);
 }
