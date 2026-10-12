@@ -11,6 +11,26 @@ use super::wan::{advanced_opt_f32, advanced_opt_u32, generate_video_using, Video
 ))]
 use sceneworks_core::video_request::{classify_reference_set, ReferenceSetVerdict};
 
+/// Catalog-only optional component staging shared by both native H3 routes. Never fetches.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn resolve_veda_predictor_offline(settings: &Settings) -> Option<WeightsSource> {
+    let identity = sceneworks_core::managed_file::builtin_identities()
+        .ok()?
+        .iter()
+        .find(|identity| {
+            identity.repo == "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview"
+        })?;
+    let manifest = json!({ "downloads": [{
+        "repo": identity.repo, "revision": identity.revision, "files": [identity.file],
+        "expectedSha256": identity.sha256, "expectedSizeBytes": identity.bytes,
+        "coRequisite": true, "componentId": "veda_predictor"
+    }] });
+    crate::model_jobs::resolve_optional_component(&manifest, "veda_predictor", settings)
+}
+
 // ---------------------------------------------------------------------------
 // MiniMax-H3 / Hailuo 3.0 (epic 17137, sc-19508): a joint audio+video family that emits video AND
 // synchronized stereo audio in ONE denoise pass. At the permanent inference pin

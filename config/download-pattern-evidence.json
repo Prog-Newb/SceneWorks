@@ -5210,6 +5210,30 @@
       ]
     },
     {
+      "key": "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview@9a1fd3a41b4a754a7886e64e82edbddf599fd1bd",
+      "repo": "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview",
+      "revision": "9a1fd3a41b4a754a7886e64e82edbddf599fd1bd",
+      "resolvedSha": "9a1fd3a41b4a754a7886e64e82edbddf599fd1bd",
+      "servedRepo": "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "AGENTS.md",
+        "LICENSE",
+        "README.md",
+        "config.json",
+        "media/cmp_01_hf_test_21.mp4",
+        "media/cmp_03_hf_test_3.mp4",
+        "media/cmp_04_hf_test_176.mp4",
+        "media/cmp_06_hf_test_104.mp4",
+        "media/only_hf_test_148.mp4",
+        "media/only_hf_test_182.mp4",
+        "media/only_hf_test_190.mp4",
+        "minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors",
+        "miowtion-logo.svg"
+      ]
+    },
+    {
       "key": "Wan-AI/Wan2.1-VACE-1.3B-diffusers@ec4d2cb062b548996b179d493fdd05340de702a1",
       "repo": "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
       "revision": "ec4d2cb062b548996b179d493fdd05340de702a1",

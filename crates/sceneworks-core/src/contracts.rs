@@ -1816,6 +1816,11 @@ pub struct ModelDownload {
     /// through the contract type rather than the `extra` bag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_id: Option<String>,
+    /// Exact identity of a pinned single-file artifact, enforced beyond HF metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_size_bytes: Option<u64>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

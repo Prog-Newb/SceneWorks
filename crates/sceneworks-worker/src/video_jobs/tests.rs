@@ -21148,3 +21148,32 @@ fn the_ltx25_weights_inventory_describes_the_shipped_bundle_revision() {
          a revision the product does not load"
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_veda_enabled_and_off_reach_the_real_offline_load_and_request_seams() {
+    for enabled in [None, Some(false), Some(true)] {
+        let tiers =
+            minimax_h3_tier_root("mm_veda_arm_", &["q4"], &["transformer", "transformer_ref"]);
+        let base = minimax_h3_base_root("mm_veda_base_");
+        let probe = ArmProbe::default();
+        let advanced = enabled
+            .map(|enabled| json!({"veda":{"enabled":enabled}}))
+            .unwrap_or(json!({}));
+        let request = minimax_h3_request("minimax_h3", json!({"advanced":advanced}));
+        drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request).unwrap();
+        let req = probe.request.lock().unwrap().clone().unwrap();
+        assert_eq!(req.veda.as_ref().map(|v| v.enabled), enabled.filter(|v| *v));
+        assert!(
+            !probe
+                .spec
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .components
+                .contains_key("veda_predictor"),
+            "empty offline cache must not stage a predictor or fetch one, even when enabled"
+        );
+    }
+}

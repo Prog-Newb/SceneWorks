@@ -8086,3 +8086,52 @@ async fn model_import_accepts_a_linked_library_root_and_refuses_unconfined_ones(
         "the queued entry must carry rootId + relativePath, never an absolute path: {serialized}"
     );
 }
+
+#[tokio::test]
+async fn managed_predictor_raw_queue_stamps_digest_and_refuses_retry_overrides() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temp)).unwrap();
+    let pin = sceneworks_core::managed_file::builtin_identities()
+        .unwrap()
+        .first()
+        .unwrap();
+    let payload = json!({"repo":pin.repo,"revision":pin.revision,"files":[pin.file],"licenseAcknowledged":true});
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({"type":"model_download","requestedGpu":"auto","payload":payload}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(job["payload"]["expectedSha256"], pin.sha256);
+    assert_eq!(job["payload"]["expectedSizeBytes"], pin.bytes);
+    let mut bad = payload.clone();
+    bad["expectedSha256"] = json!("0".repeat(64));
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({"type":"model_download","requestedGpu":"auto","payload":bad}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let mut alias = payload;
+    alias["repo"] = json!(pin.repo.to_ascii_lowercase());
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({"type":"model_download","requestedGpu":"auto","payload":alias}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{}/duplicate", job["id"].as_str().unwrap()),
+        json!({"payloadChanges":{"expectedSha256":"0".repeat(64)}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+}

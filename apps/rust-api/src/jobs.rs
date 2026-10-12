@@ -97,7 +97,7 @@ pub(crate) async fn create_job(
             payload.job_type.as_str()
         )));
     }
-    validate_raw_job_payload(&state, &payload.job_type, &payload.payload).await?;
+    validate_raw_job_payload(&state, &payload.job_type, &mut payload.payload).await?;
     canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
     crate::model_sources::ensure_runtime_model_sources(
         &state,
@@ -683,7 +683,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
             .await?;
         }
     } else {
-        validate_raw_job_payload(state, &job_type, &merged).await?;
+        validate_raw_job_payload(state, &job_type, &mut merged).await?;
     }
     let canonical_model_entry =
         canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
@@ -1027,7 +1027,7 @@ fn dense_image_detail_error() -> ApiError {
 async fn validate_raw_job_payload(
     state: &AppState,
     job_type: &JobType,
-    payload: &JsonObject,
+    payload: &mut JsonObject,
 ) -> Result<(), ApiError> {
     if matches!(
         job_type,
@@ -1040,6 +1040,13 @@ async fn validate_raw_job_payload(
         JobType::ModelDownload | JobType::ModelImport | JobType::ModelConvert
     ) {
         validate_payload_model_id(payload)?;
+    }
+    if matches!(job_type, JobType::ModelDownload) {
+        if let Some(identity) = sceneworks_core::managed_file::authoritative_job_identity(payload)
+            .map_err(ApiError::bad_request)?
+        {
+            identity.stamp(payload);
+        }
     }
     // Licence-acknowledgment gate for the FETCHING job types (sc-17227), keyed on the payload's
     // `repo`/`sourceUrl` rather than on a model id.

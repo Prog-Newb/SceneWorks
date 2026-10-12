@@ -1354,6 +1354,9 @@ impl ComfyuiWanExperts {
 ))]
 pub(super) struct VideoGenInput {
     pub(super) engine_id: &'static str,
+    /// H3 optional predictor is resolved offline only for an explicitly enabled request.
+    pub(super) veda: Option<gen_core::VedaRequest>,
+    pub(super) veda_predictor: Option<WeightsSource>,
     pub(super) model_dir: PathBuf,
     pub(super) quant: Option<Quant>,
     /// Explicit fitted-memory pipeline axes. `None` is not inferred from execution knobs and
@@ -1485,6 +1488,8 @@ impl Default for VideoGenInput {
             memory: None,
             memory_context: None,
             engine_id: "",
+            veda: None,
+            veda_predictor: None,
             model_dir: PathBuf::new(),
             quant: None,
             memory_transformer_variant: None,
@@ -1603,6 +1608,12 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     .into_iter()
     .flatten()
     .collect::<BTreeMap<_, _>>();
+    if input.veda.as_ref().is_some_and(|request| request.enabled) {
+        if let Some(source) = &input.veda_predictor {
+            spec.components
+                .insert("veda_predictor".into(), source.clone());
+        }
+    }
     // LTX-2.5's split checkpoints can stage the Gemma encoder and DiT sequentially on every load.
     // Adapter-free loads also satisfy the providers' exact rung-4 prerequisite: their 48-block
     // transformer source can be reopened under the shared deferred-materialization contract.
@@ -2183,6 +2194,7 @@ pub(super) fn run_loaded_video_generation(
 ) -> WorkerResult<DecodedVideo> {
     let memory_context = input.memory_context;
     let mut req = GenerationRequest {
+        veda: input.veda,
         prompt: input.prompt,
         negative_prompt: input.negative_prompt,
         width: input.width,
@@ -2729,6 +2741,26 @@ pub(super) async fn generate_video_using(
         + Send
         + 'static,
 ) -> WorkerResult<DecodedVideo> {
+    if input.engine_id == "minimax_h3"
+        && advanced
+            .get("veda")
+            .and_then(|v| v.get("enabled"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        input.veda = Some(gen_core::VedaRequest {
+            enabled: true,
+            ..Default::default()
+        });
+        let component_settings = settings.clone();
+        // Hashing is blocking disk work. Absence/corruption is a soft omission; the provider
+        // records its repair/install dense-fallback reason when the enabled request runs.
+        input.veda_predictor = tokio::task::spawn_blocking(move || {
+            super::minimax_h3::resolve_veda_predictor_offline(&component_settings)
+        })
+        .await
+        .map_err(|error| WorkerError::Engine(error.to_string()))?;
+    }
     // Per-generation sampler / scheduler axis for video (epic 7114 P5, sc-7127). The handlers leave
     // `input.sampler`/`scheduler` `None`; read them from the caller's already-parsed `advanced` block
     // here — the single funnel every Wan / LTX / SVD path passes through — and N3-guard each against
