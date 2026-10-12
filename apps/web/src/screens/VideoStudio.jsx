@@ -124,6 +124,8 @@ import {
   referenceLimitError,
 } from "../videoModelLimits.js";
 import { ModelAttribution } from "../components/ModelAttribution.jsx";
+import { VedaControls } from "../components/VedaControls.jsx";
+import { restoreVedaSettings, vedaAdvancedSettings, vedaControlError } from "../vedaControls.js";
 
 // "8" / "4 or 8" / "4, 8, or 12" — the same phrasing `humanized_number_menu` gives the enqueue
 // gate's own rejection (crates/sceneworks-core/src/video_request.rs, sc-19502), so the Steps
@@ -348,6 +350,7 @@ export function VideoStudio() {
   // picker state so an unavailable/disallowed replay can block instead of being clamped to whatever
   // installed tier the current model would normally seed.
   const [recipeTierRequest, setRecipeTierRequest] = useState(null);
+  const [veda, setVeda] = useState(() => restoreVedaSettings(saved));
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   // LTX-2.3 remains the default video route. LTX-2.5 is deliberately opt-in even though its
   // catalog entry can arrive first (the manifest groups the shared LTX family together).
@@ -1283,6 +1286,7 @@ export function VideoStudio() {
     // `advanced` passthrough: every real *_raw_settings builder clones it, so these are the knobs
     // exactly as the client sent them. Steps/guidance record the OVERRIDE — blank means "no
     // override", which correctly replays as blank and lets the engine re-derive its own default.
+    setVeda(restoreVedaSettings(rawSettings));
     setStepsOverride(rawSettings.steps ?? "");
     setGuidanceOverride(rawSettings.guidanceScale ?? "");
     setSampler(rawSettings.sampler ?? "default");
@@ -1422,6 +1426,7 @@ export function VideoStudio() {
       ["quality", setQuality],
       ["guidanceScale", setGuidanceOverride],
       ["steps", setStepsOverride],
+      ["veda", (value) => setVeda(restoreVedaSettings({ veda: value }))],
       ["sampler", setSampler],
       ["scheduler", setScheduler],
       ["schedulerShift", setSchedulerShift],
@@ -1458,6 +1463,7 @@ export function VideoStudio() {
       quality,
       mode,
       guidanceScale: finiteNumberOrUndefined(guidanceOverride),
+      ...vedaAdvancedSettings(veda),
       steps: finiteNumberOrUndefined(stepsOverride),
       sampler,
       scheduler,
@@ -1490,6 +1496,7 @@ export function VideoStudio() {
   });
 
   useStudioSettingsWriter("video", activeProject?.id ?? null, {
+    veda,
     motion,
     mode,
     prompt,
@@ -1793,6 +1800,9 @@ export function VideoStudio() {
   // One summary gates Generate and carries every reason it might be dead, so the button
   // and the messages can't drift — the bug this screen used to embody, where `canSubmit`
   // and `blockedMessage` re-derived the same rules side by side (epic 10644).
+  const vedaSteps = stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
+    ? Number(stepsOverride) : activeTurboVariant?.sampling?.steps ?? selectedModel?.defaults?.steps ?? 50;
+  const vedaBlockMessage = vedaControlError(model, veda, vedaSteps);
   const videoDraft = useMemo(
     () => ({
       activeProject,
@@ -1813,6 +1823,7 @@ export function VideoStudio() {
       referenceLimitMessage,
       audioOnlyReferenceSet,
       executionTierBlockMessage,
+      vedaBlockMessage,
       modelName: selectedModel?.name,
       presetMissing: presetValidationResult.missing,
       presetIncompatible: presetValidationResult.incompatible,
@@ -1834,6 +1845,7 @@ export function VideoStudio() {
       referenceLimitMessage,
       audioOnlyReferenceSet,
       executionTierBlockMessage,
+      vedaBlockMessage,
       selectedModel,
       presetValidationResult,
       selectedLoraValidationResult,
@@ -1945,6 +1957,7 @@ export function VideoStudio() {
           mode === "replace_person" && replacementModeApplies(model) ? replacementMode : "face_only",
         loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
         advanced: {
+          ...vedaAdvancedSettings(veda),
           resolution,
           durationHint,
           motion,
@@ -2580,6 +2593,7 @@ export function VideoStudio() {
             open={advancedOpen}
           >
             <div className="advanced-panel">
+              {showTurbo || veda.enabled ? <VedaControls value={veda} onChange={setVeda} steps={vedaSteps} compatible={showTurbo} /> : null}
               <label>
                 Frames
                 <select onChange={(event) => setFps(Number(event.target.value))} value={fps}>

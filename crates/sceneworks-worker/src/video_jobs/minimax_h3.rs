@@ -579,6 +579,35 @@ pub(super) fn resolve_minimax_h3_adapters(
     super::resolve_dense_adapters(settings, request, MAX_JOB_LORAS)
 }
 
+/// Convert the shared validated wire controls without changing either native route's request.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn requested_h3_veda(
+    request: &VideoRequest,
+    steps: Option<u32>,
+) -> WorkerResult<Option<gen_core::VedaRequest>> {
+    use sceneworks_core::video_request::H3VedaBudget;
+    let parsed = sceneworks_core::video_request::requested_h3_veda(
+        &request.model,
+        &request.advanced,
+        steps.unwrap_or(50),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
+    let budget = |value| match value {
+        H3VedaBudget::Percent(p) => gen_core::VedaBudget::SparsityPercent(p),
+        H3VedaBudget::KeyTiles(n) => gen_core::VedaBudget::KeyTiles(n),
+    };
+    Ok(parsed.filter(|v| v.enabled).map(|v| gen_core::VedaRequest {
+        enabled: v.enabled,
+        generated: budget(v.generated),
+        reference: budget(v.reference),
+        full_attention_layers: v.full_attention_layers,
+        full_attention_steps: v.full_attention_steps,
+    }))
+}
+
 /// The MiniMax-H3 sampling recipe `(steps, video scheduler shift)` for this request, plus the turbo
 /// variant that produced it (`None` ⇒ the base regime).
 ///
@@ -1443,6 +1472,8 @@ pub(super) async fn generate_minimax_h3_using(
     // Shape before media: a request aimed at the wrong DiT partition must be refused before it
     // costs an asset decode, and long before it costs a 53 GB text-encoder load.
     minimax_h3_validate_partition(request)?;
+    let (steps, scheduler_shift, turbo) = minimax_h3_sampling(request)?;
+    let veda = requested_h3_veda(request, steps)?;
     // Resolved ONCE and passed to both the conditioning resolve and the engine input: a reference
     // clip is truncated to the generated frame count, so the two must be the same number. Deriving
     // it twice from `request` would be one edit away from conditioning a 145-frame render on a
@@ -1454,7 +1485,6 @@ pub(super) async fn generate_minimax_h3_using(
     let task = minimax_h3_task(&conditioning);
     // The turbo recipe (sc-18726) is resolved BEFORE the adapters so a contradictory pair of
     // accelerators is refused by name rather than after a LoRA file has been opened and classified.
-    let (steps, scheduler_shift, turbo) = minimax_h3_sampling(request)?;
     // sc-23402. Parsed (and RANGE-REFUSED) here rather than left to the engine's own `validate` so a
     // typo costs a payload parse instead of a 53 GB text-encoder load. The engine still refuses it
     // independently — this is the earlier of two gates, not a replacement for it.
@@ -1472,6 +1502,7 @@ pub(super) async fn generate_minimax_h3_using(
         turbo,
     );
     let input = VideoGenInput {
+        veda,
         sampler: None,
         scheduler: None,
         engine_id,
@@ -1634,10 +1665,11 @@ pub(super) async fn generate_candle_minimax_h3(
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, Value)> {
     minimax_h3_validate_partition(request)?;
+    let (steps, scheduler_shift, turbo) = minimax_h3_sampling(request)?;
+    let veda = requested_h3_veda(request, steps)?;
     let frames = video_frame_count(&request.model, request.raw_frame_count());
     let conditioning =
         resolve_minimax_h3_conditioning(api, settings, job, request, project_path, frames).await?;
-    let (steps, scheduler_shift, turbo) = minimax_h3_sampling(request)?;
     // sc-23402. Parsed (and RANGE-REFUSED) here rather than left to the engine's own `validate` so a
     // typo costs a payload parse instead of a 53 GB text-encoder load. The engine still refuses it
     // independently — this is the earlier of two gates, not a replacement for it.
@@ -1680,6 +1712,7 @@ pub(super) async fn generate_candle_minimax_h3(
         );
     }
     let input = VideoGenInput {
+        veda,
         sampler: None,
         scheduler: None,
         engine_id,

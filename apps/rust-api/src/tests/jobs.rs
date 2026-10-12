@@ -15835,3 +15835,89 @@ async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job
         );
     }
 }
+
+#[tokio::test]
+async fn h3_veda_api_preserves_complete_controls_and_refuses_malformed_or_incompatible_requests() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, project_id) = shipped_manifest_app(&temp).await;
+    std::fs::write(temp.path().join("config/manifests/user.loras.jsonc"),
+        json!({"schemaVersion":1,"loras":[{"id":"user_style","name":"H3 style","family":"minimax-h3","triggerWords":[],"compatibility":{"families":["minimax-h3"]},"source":{"provider":"local","path":"loras/h3_style.safetensors"}}]}).to_string()).unwrap();
+    std::fs::create_dir_all(temp.path().join("data/loras")).unwrap();
+    write_test_safetensors_with_keys(
+        &temp.path().join("data/loras/h3_style.safetensors"),
+        &[
+            "transformer_blocks.0.attn.to_q.lora_A.default.weight".into(),
+            "transformer_blocks.0.attn.to_q.lora_B.default.weight".into(),
+        ],
+    );
+    let controls = json!({"enabled":true,"generated":"32","reference":"0%","fullAttentionLayers":"49,2–0","fullAttentionSteps":"0;7"});
+    let payload = json!({"projectId":project_id,"model":"minimax_h3","mode":"text_to_video","prompt":"a lighthouse","loras":[{"id":"minimax_h3_turbo_8step","weight":0.8},{"id":"user_style","weight":0.4}],"advanced":{"veda":controls}});
+    let (status, created) =
+        request(app.clone(), "POST", "/api/v1/video/jobs", payload.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["payload"]["advanced"]["veda"], controls);
+    for (index, id) in ["minimax_h3_turbo_8step", "user_style"].iter().enumerate() {
+        assert_eq!(created["payload"]["loras"][index]["id"], *id);
+        assert_eq!(
+            created["payload"]["loras"][index]["weight"],
+            payload["loras"][index]["weight"]
+        );
+    }
+    let id = created["id"].as_str().unwrap();
+    for changes in [
+        json!({"model":"mochi_1"}),
+        json!({"advanced":{"veda":{"enabled":true,"generated":"0"}}}),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/duplicate"),
+            json!({"payloadChanges":changes}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["detail"].as_str().unwrap().contains("advanced.veda"),
+            "{body}"
+        );
+    }
+    for wire in [
+        json!(null),
+        json!({"enabled":"true"}),
+        json!({"enabled":false,"generated":"100%"}),
+        json!({"enabled":true,"fullAttentionLayers":"50"}),
+        json!({"enabled":true,"fullAttentionSteps":"8"}),
+        json!({"enabled":true,"reference":"1.5"}),
+    ] {
+        let mut bad = payload.clone();
+        bad["advanced"]["veda"] = wire;
+        let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["detail"].as_str().unwrap().contains("advanced.veda"),
+            "{body}"
+        );
+    }
+    let mut incompatible = payload.clone();
+    incompatible["model"] = json!("mochi_1");
+    incompatible["loras"] = json!([]);
+    let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", incompatible).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"].as_str().unwrap().contains("only supported"),
+        "{body}"
+    );
+    let mut overridden = payload.clone();
+    overridden["advanced"]["steps"] = json!(4);
+    let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", overridden).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"].as_str().unwrap().contains("outside 0..4"),
+        "{body}"
+    );
+    let mut off = payload.clone();
+    off["advanced"] = json!({});
+    let (status, body) = request(app, "POST", "/api/v1/video/jobs", off).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(body["payload"]["advanced"].get("veda").is_none());
+}

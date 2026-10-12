@@ -2754,17 +2754,7 @@ pub(super) async fn generate_video_using(
         + Send
         + 'static,
 ) -> WorkerResult<DecodedVideo> {
-    if input.engine_id == "minimax_h3"
-        && advanced
-            .get("veda")
-            .and_then(|v| v.get("enabled"))
-            .and_then(Value::as_bool)
-            == Some(true)
-    {
-        input.veda = Some(gen_core::VedaRequest {
-            enabled: true,
-            ..Default::default()
-        });
+    if input.veda.as_ref().is_some_and(|veda| veda.enabled) {
         let component_settings = settings.clone();
         // Hashing is blocking disk work. Absence/corruption is a soft omission; the provider
         // records its repair/install dense-fallback reason when the enabled request runs.

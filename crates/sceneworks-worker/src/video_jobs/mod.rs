@@ -549,6 +549,9 @@ fn resolve_candle_video_route(
 /// but only covers what IT enqueues, not a job replayed from a pre-sc-12297 row or produced by any
 /// future non-HTTP path.
 fn video_preflight(request: &VideoRequest) -> WorkerResult<()> {
+    request
+        .h3_veda_settings()
+        .map_err(WorkerError::InvalidPayload)?;
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Missing payload.projectId".to_owned(),
