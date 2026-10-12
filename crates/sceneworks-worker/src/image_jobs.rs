@@ -2497,13 +2497,19 @@ pub(crate) fn standalone_upscale_workflow_share(
 pub(crate) fn standalone_restore_workflow_share(
     job_payload: &JsonObject,
     plan: &gen_core::iris::restoration::RestorationPlan,
+    trained_model: Option<&str>,
 ) -> Option<sceneworks_core::workflow_share::WorkflowShare> {
     let mut overlay = job_payload.clone();
-    overlay.insert("upscale".to_owned(), iris_upscale_overlay(plan));
+    overlay.insert(
+        "upscale".to_owned(),
+        iris_upscale_overlay(plan, trained_model),
+    );
     embeddable_workflow_share(
         &WorkflowAssetFacts {
             mode: "image_upscale".to_owned(),
-            model: crate::iris_restore::IRIS_RESTORE_MODEL_ID.to_owned(),
+            model: trained_model
+                .unwrap_or(crate::iris_restore::IRIS_RESTORE_MODEL_ID)
+                .to_owned(),
             prompt: String::new(),
             negative_prompt: String::new(),
             seed: 0,
@@ -2514,13 +2520,17 @@ pub(crate) fn standalone_restore_workflow_share(
     )
 }
 
-/// The envelope's `upscale` record for an applied Iris restoration: exactly the reopenable controls.
+/// The envelope's `upscale` record for an applied Iris restoration: exactly the reopenable controls
+/// (incl. `irisModel` when a trained restoration model ran).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(crate) fn iris_upscale_overlay(plan: &gen_core::iris::restoration::RestorationPlan) -> Value {
-    json!({
+pub(crate) fn iris_upscale_overlay(
+    plan: &gen_core::iris::restoration::RestorationPlan,
+    trained_model: Option<&str>,
+) -> Value {
+    let mut overlay = json!({
         "enabled": true,
         "engine": sceneworks_core::image_restoration::IRIS_RESTORE_ENGINE,
         "scale": plan.scale,
@@ -2529,7 +2539,11 @@ pub(crate) fn iris_upscale_overlay(plan: &gen_core::iris::restoration::Restorati
             gen_core::InputSizing::Original => "original",
         },
         "colorFix": plan.color_fix,
-    })
+    });
+    if let Some(model) = trained_model {
+        overlay[sceneworks_core::image_restoration::IRIS_MODEL_KEY] = json!(model);
+    }
+    overlay
 }
 
 impl ImagePlan {
@@ -3222,6 +3236,7 @@ pub(crate) async fn apply_inline_iris_restore(
         let plan_for_task = plan.clone();
         let base_fact_for_task = base_fact.clone();
         let project_path_for_task = project_path.to_owned();
+        let trained_model_for_task = trained_model.clone();
         let fact = tokio::task::spawn_blocking(move || {
             write_upscaled_asset(
                 &plan_for_task,
@@ -3231,7 +3246,7 @@ pub(crate) async fn apply_inline_iris_restore(
                 sceneworks_core::image_restoration::IRIS_RESTORE_ENGINE,
                 0,
                 0.0,
-                Some(&outcome.plan),
+                Some((&outcome.plan, trained_model_for_task.as_deref())),
                 &project_path_for_task,
             )
         })
@@ -3262,13 +3277,18 @@ fn write_upscaled_asset(
     factor: u8,
     softness: f32,
     // The applied Iris restoration plan (sc-25683) when the pass was the `iris` engine — it sizes by
-    // `scale`, so `factor`/`softness` are unused and the record/name/lineage carry the plan instead.
-    iris: Option<&gen_core::iris::restoration::RestorationPlan>,
+    // `scale`, so `factor`/`softness` are unused and the record/name/lineage carry the plan instead —
+    // with the trained restoration model it ran, if any (sc-25688).
+    iris: Option<(&gen_core::iris::restoration::RestorationPlan, Option<&str>)>,
     project_path: &Path,
 ) -> WorkerResult<JsonObject> {
     let request = &plan.request;
     let index = base_fact.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
     let (width, height) = (upscaled.width(), upscaled.height());
+    let (iris, iris_model) = match iris {
+        Some((iris, model)) => (Some(iris), model),
+        None => (None, None),
+    };
     let size_tag = match iris {
         Some(iris) => format!("iris{}x", crate::iris_restore::format_scale(iris.scale)),
         None => format!("up{factor}x"),
@@ -3293,7 +3313,7 @@ fn write_upscaled_asset(
     // it: the embedded workflow (sc-15948) and the `rawAdapterSettings.upscale` record below, and a
     // shared image must not describe a different pass from the one the sidecar records.
     let upscale_record = if let Some(iris) = iris {
-        crate::iris_restore::applied_settings_record(iris)
+        crate::iris_restore::applied_settings_record(iris, iris_model)
     } else if engine_id == "seedvr2" {
         json!({ "enabled": true, "engine": engine_id, "factor": factor, "softness": softness })
     } else {
@@ -3302,7 +3322,7 @@ fn write_upscaled_asset(
     // The envelope carries the reopenable controls only (the record's plan/dimension facts are
     // sidecar observability, not a recipe).
     let envelope_record = match iris {
-        Some(iris) => iris_upscale_overlay(iris),
+        Some(iris) => iris_upscale_overlay(iris, iris_model),
         None => upscale_record.clone(),
     };
 

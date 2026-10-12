@@ -1,4 +1,5 @@
 import React, { act } from "react";
+import workerReport from "../../training/irisDatasetReport.fixture.json";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -705,19 +706,33 @@ describe("Iris depth / restoration (sc-25687 / sc-25688)", () => {
     expect(container.textContent).toContain("Base checkpoint name");
   });
 
+  it("states the full fine-tune's floor up front and offers LoRA as an explicit switch", () => {
+    const calls = [];
+    mountTask(irisRestoreTarget(), {
+      networkTypeOptions: ["full", "lora", "lokr"],
+      updateConfigDraft: (key, value) => calls.push([key, value]),
+      irisContext: { trainingLane: "mlx" },
+    });
+    expect(container.querySelector('[aria-label="Declared memory floor"]').textContent).toContain("128 GB");
+    const offer = container.querySelector('[aria-label="Lighter restoration option"]');
+    expect(offer.textContent).toContain("56 GB");
+    expect(calls).toEqual([]);
+    act(() => [...offer.querySelectorAll("button")].find((button) => button.textContent === "Use LoRA instead").click());
+    expect(calls).toEqual([["networkType", "lora"]]);
+  });
+
   it("keeps rank for a restoration adapter and reports the dataset check", async () => {
-    const report = {
-      policy: "synthetic", trainable: 3, invalid: 0, errors: 1, ok: false,
-      items: [{ itemId: "i1", displayName: "bad.png", status: "error", reason: "unreadable" }],
-    };
+    // The worker's real report shape (a worker test compares this fixture with a real report).
+    const report = workerReport;
     mountTask(irisRestoreTarget(), { irisContext: { checkDataset: async () => report } });
     expect(labels()).not.toContain("Rank");
     expect(labels()).toContain("Resolution");
     const check = [...container.querySelectorAll("button")].find((button) => button.textContent === "Check dataset");
     await act(async () => check.click());
     const status = container.querySelector('[aria-label="Dataset check"]');
-    expect(status.textContent).toContain("3 trainable · 0 invalid · 1 unreadable");
-    expect(status.textContent).toContain("bad.png: unreadable");
+    expect(status.textContent).toContain("Blocked");
+    expect(status.textContent).toContain("1 trainable · 0 invalid · 1 unreadable");
+    expect(status.textContent).toContain(`b: ${workerReport.items[1].reason}`);
 
     const lora = { ...configDraftFromTarget(irisRestoreTarget(), DATASET, ["auto"]), outputName: "out", networkType: "lora" };
     mount(<ConfigureJobPanel {...baseProps({ selectedTarget: irisRestoreTarget(), configDraft: lora, showAdvancedConfig: true })} />);

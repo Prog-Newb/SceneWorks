@@ -143,7 +143,7 @@ export function IrisTaskOptions({
       {summary ? (
         <div aria-label="Dataset check" className="training-field-hint" role="status">
           <p>
-            {summary.counts}. {summary.policy}
+            <strong>{summary.state}.</strong> {summary.counts}. {summary.policy}
           </p>
           {summary.configError ? <p className="inline-warning">{summary.configError}</p> : null}
           {summary.problems.map((item) => (

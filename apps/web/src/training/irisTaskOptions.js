@@ -180,11 +180,16 @@ export const POLICY_TEXT = {
   synthetic: "Clean images: degraded inputs are synthesized.",
 };
 
+// The worker's report (`iris_task_dataset_report`; shape pinned by irisDatasetReport.fixture.json,
+// which a worker test compares with a real report): `ok` / `invalid` / `errors` are counts and
+// `trainable` is whether the run would start under its policy.
 export function irisCheckSummary(report) {
   if (!report) return null;
   const items = Array.isArray(report.items) ? report.items : [];
   return {
-    counts: `${report.trainable ?? 0} trainable · ${report.invalid ?? 0} invalid · ${report.errors ?? 0} unreadable`,
+    counts: `${report.ok ?? 0} trainable · ${report.invalid ?? 0} invalid · ${report.errors ?? 0} unreadable`,
+    ready: report.trainable === true,
+    state: report.trainable === true ? "Ready to train" : "Blocked — this run would not start",
     policy: POLICY_TEXT[report.policy] ?? asText(report.policy),
     problems: items.filter((item) => item?.status !== "ok").slice(0, 5),
     configError: report.configError || null,

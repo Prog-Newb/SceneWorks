@@ -138,6 +138,12 @@ export function ConfigureJobPanel({
     ? irisMemoryFloors(selectedTarget, configDraft.networkType, floorSize, irisContext.trainingLane ?? null)
     : [];
   const laneNames = { mlx: "MLX (Apple Silicon unified memory)", candle: "Candle/CUDA (GPU memory)" };
+  // Restoration's paper default is a FULL fine-tune with the highest floors; the lighter LoRA arm is
+  // offered up front (an explicit switch, never a silent one) with its own floor.
+  const restoreLoraFloors =
+    objective === "restoration" && isFullFinetune && (networkTypeOptions ?? []).includes("lora")
+      ? irisMemoryFloors(selectedTarget, "lora", floorSize, irisContext.trainingLane ?? null)
+      : [];
   const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
     ? (selectedTarget?.limits?.ltxWorkflows ?? [])
     : [];
@@ -342,6 +348,15 @@ export function ConfigureJobPanel({
               {pixelFloors ? `${floorSize}-pixel micro-batch` : `${floorSize}px`} {isFullFinetune ? "full fine-tune" : "adapter"} run. On a Mac the floor must fit
               after the macOS/app memory reserve. A machine under its floor is refused before the model loads.
               {irisTask && selectedTarget.memoryFloors?.basis ? ` ${selectedTarget.memoryFloors.basis}` : null}
+            </p>
+          ) : null}
+          {restoreLoraFloors.length ? (
+            <p className="training-field-hint" aria-label="Lighter restoration option">
+              The paper&apos;s full fine-tune is the default. A LoRA run (merged into the export) needs{" "}
+              {restoreLoraFloors.map((floor) => `${laneNames[floor.lane] ?? floor.lane} ${floor.gb} GB`).join(" · ")}.{" "}
+              <button className="secondary-action" onClick={() => updateConfigDraft("networkType", "lora")} type="button">
+                Use LoRA instead
+              </button>
             </p>
           ) : null}
 
