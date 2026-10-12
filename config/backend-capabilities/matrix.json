@@ -2,34 +2,34 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 115,
+    "modelCount": 136,
     "importedFamilyCount": 4,
-    "cellCount": 1030,
+    "cellCount": 1056,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "25d02803ed5e9078611b301c3e0c12ed6ef09ea7b198cb4ed02233dc03bea7d9",
-    "apiDto": "197b762bafece03c09a66404fc0021be240a78471d30d07128e0da6e5d398a9e",
+    "apiContractEntry": "8fb5886d7fad764b97cf40488355185702242be93c568548b6294cb5eeabe7aa",
+    "apiDto": "e4938dead6f3c9679f2449f312a522f6307c1fabd9358a3e1e69adf7cbd72e27",
     "apiGeneration": "2b2784c851c5d43cfc59db8d43b008a0a3bb1176b9a66b34239c4a02ae9b364d",
-    "apiValidation": "10a36112a93d602fbef8fa7952b44c23c26e23af032856bccd2df7669ebb6d3b",
+    "apiValidation": "86a7dfe6d28b75737bd287d1061d082b171e47d006eef512eb7a36a4cebf416b",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "31063026b6c46d8cb830bcb04da8dfafcff4e9e8e052e65bfa9eb1f913132b17",
-    "descriptorCandleFacts": "7389335208e39f10e68fdd4b0aad423f47a978cb40a9b6954c18c6b7beaa1ec7",
-    "descriptorCandleRuntime": "2c1b46ecddcb7ad91ef4cf69ed1b146de215324f940b560562a7e243eeae0956",
-    "descriptorMlxFacts": "a99cea2a142a7a1889cbefb0786edd1e929b671fce2d818600729096a11addbc",
-    "descriptorMlxRuntime": "6955a533579055d2a406b50066b56161decf0c4a91c52188e699acd48165626c",
+    "descriptorAudioFacts": "8a0d319cbc369be9dd04b5b1eae4b509f677b905a7d877fe3bc7308fa83ff7e7",
+    "descriptorCandleFacts": "5551fb5878c703a0db70fce02daed2fbfdfd2deea8f8263b1c471275310ace15",
+    "descriptorCandleRuntime": "18e3a72af64299fd1e338affa967de45b1d1444ee18cff777994be062ae280f6",
+    "descriptorMlxFacts": "3d6d5445ffd6d3f579630c8499bd20dd6bb1c4f7d3776cf5e384b258c9330b6d",
+    "descriptorMlxRuntime": "332cd6e8517108f94338056caa8ec50cd21831acfe1d8eca2e8bf0997885ed77",
     "descriptorPreviewFacts": "806253bb20033a562cef09f3bc7ac206817ad1a2ea3d6cbd5dbdab4aeccc8c54",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "d8f08c81e91999674282f54781ef8c1c5b9ac5b98893ec91d886a142c11debf1",
-    "modelImportDefaults": "1316249a2897f775ba4d4645cc5c76bea3ecfa4bbb703ce93160053ef9701e34",
-    "routerCandle": "fd5969513913b48b126cf34be5aecbcd581f049f2b14c90f61e989c99dca95c4",
-    "routerCatalog": "c930f1e37299214805edb4dcd425b1bde8541393f601fd9ec6b45407c9af7987",
-    "routerGaps": "ad24733ac45b8b7abd401440be65017b71a79a006d8084e124824f95e89089cd",
-    "routerMlx": "eae61dab16c18d4c0bbb25029672efc12c5b0888ff687e9a853641a2ed00fc2b",
-    "scheduler": "6af81b64a988d199625a8d738e4f018370605b076afeee64216254796d41a7a6",
-    "trainingCatalog": "52ad6fed262c809733ea28ce08c7139388101db5bfbba1f74bcac9776a4677fb",
+    "manifest": "9e4decb29499c41ca0913247e5a3ad1e4e94acc80bb18e987429a66e2586166f",
+    "modelImportDefaults": "b72858fe7ef1ac1ff3dc40f1426e129c7e054a6a8bf923dd5226050986b1a937",
+    "routerCandle": "9f4adef06bcae0a06250e38e2e14acd92280ab7e2d0b2f85e6c6908e0a9ee947",
+    "routerCatalog": "27f75cee22fe10cb44128643d32f22764434d418de9ab28c5d90cc891ba86c24",
+    "routerGaps": "dcb08b7a75dce6e5a5633f2c2eae13e25c8fdd5e5b88008d58d60728cd6acdfe",
+    "routerMlx": "63dee36fb3190fd49b93ae9fe2854202959ee3938793557446f68046804cbbde",
+    "scheduler": "cdc28ab9a6e9fba882f94f0437a6dfade114c03e58066181ed6833eba57e2215",
+    "trainingCatalog": "f615fb294f2b60ed84ba9280a801ca52a8efc32ddeeccc1eef09d021c66942ad",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
     "webImageAdvanced": "16c4dc222a2ebe6072bfddf445b8d19d9b6bc82ef8f04bdc9313a013f2d17579",
@@ -40,22 +40,22 @@
     "webSimpleAudioStudio": "7ffbd94e291de76958b928b467591f153116362400be9c7deaa730b925538ae5",
     "webSimpleJobs": "e72e036e0e6f28470fbd33bb02e76b30a5261ffd84d64424a782a159de3ec644",
     "webSimpleVideo": "6404756ee8ed4d3d9139969f977933e72c82e11b02297d664eb97703acab6885",
-    "webUpscaleEngines": "d0267afb9893930d7ef888bd93de4af6434b68bc53458322ffc1af90b51c5365",
+    "webUpscaleEngines": "0d80f32e7e14a97773e5c8cc05a31c2dd9ea2657aa41904a5cc0123382dfee38",
     "webVideoStudio": "9d6e6d3f542df81fba3a976b8cf0ca4e1a316f5afbe6649494ce532d48d7223c",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
-    "workerDispatch": "3a1981657facf43dd5d139b2abb392f10537ef77b5552212eea0c5721871ac33",
+    "workerDispatch": "fe2c44e746f9ac0afb1ecbac30a081f8fb4693e5c5a21f28891dc87af33c5d48",
     "workerEngineTable": "85d32676e6f2ea02fb6ff94a5bf21aa80275c032574219a9c7c7fa6f4a32ebb4",
     "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
-    "workerImageDispatch": "56775cc992434dd1e4724fe54e195fcf87d6582a6c97a527665a0db68a67bb2c",
+    "workerImageDispatch": "f1151e2bd87a21499d87364dedac9bbc894fef58de41314a7e37771fb40d811a",
     "workerImageKreaImported": "6fbc8d9a80bc03a295bcbf39c6c11298e7fba33f4d702dc5a06f328ac9eb4c1b",
     "workerImageMageFinetuned": "da5a75e976782f92c6561ad3b7f9e364bb03c74d12e7f77a8658727d8ae85d80",
     "workerImagePulid": "f2ffa16632abb63110c1250412e8517b1e3c3b38f5dde0efb6847e09a2954cdc",
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "aab937b5de1f4d6aa221f05426a79fa5f7639a043633cd668ba07c12a90b9e02",
+    "workerTrainingDispatch": "edb4816ba2646e4792aff7eaeeedc7bd71aba9dc8268d9689fcb8b537ce6b5f8",
     "workerUtilityDispatch": "888e127be2e7590424f045a93db36d5602e8b10ec630a0e40c36a63a7ae92467",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -1032,6 +1032,57 @@
       }
     },
     {
+      "id": "depth_anything_v2_base",
+      "family": "depth_anything_v2",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "depth_anything_v2_large",
+      "family": "depth_anything_v2",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "depth_anything_v2_small",
+      "family": "depth_anything_v2",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
       "id": "dwpose_pose_detector",
       "family": "dwpose",
       "modelType": "utility",
@@ -1044,6 +1095,57 @@
           "candle": true
         }
       ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "elatentlpips_flux",
+      "family": "elatentlpips",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "elatentlpips_sd3",
+      "family": "elatentlpips",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "elatentlpips_sdxl",
+      "family": "elatentlpips",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
       "conditioningShape": [],
       "userAdapters": [],
       "precisionTier": [],
@@ -1436,6 +1538,23 @@
       }
     },
     {
+      "id": "flux2_vae",
+      "family": "flux2_vae",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
       "id": "flux_dev",
       "family": "flux",
       "modelType": "image",
@@ -1565,6 +1684,23 @@
         "capability": "live_preview",
         "mlx": true,
         "candle": true
+      }
+    },
+    {
+      "id": "hybrik_resnet34",
+      "family": "hybrik",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
       }
     },
     {
@@ -4085,6 +4221,23 @@
       }
     },
     {
+      "id": "mp_facemesh_v2",
+      "family": "mp_facemesh",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
       "id": "openvoice_v2",
       "family": "openvoice",
       "modelType": "audio",
@@ -5031,6 +5184,23 @@
         "capability": "live_preview",
         "mlx": true,
         "candle": true
+      }
+    },
+    {
+      "id": "sapiens_normal_0_3b",
+      "family": "sapiens",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
       }
     },
     {
@@ -6198,6 +6368,142 @@
       }
     },
     {
+      "id": "taef1",
+      "family": "taef1",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "taef2",
+      "family": "taef2",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "taeltx2_3",
+      "family": "taeltx2_3",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "taeqi2_1",
+      "family": "taeqi2_1",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "taesd3",
+      "family": "taesd3",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "taesdxl",
+      "family": "taesdxl",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "taew2_1",
+      "family": "taew2_1",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "taew2_2",
+      "family": "taew2_2",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
       "id": "vision_caption_qwen3vl_8b",
       "family": "vision-caption",
       "modelType": "utility",
@@ -6210,6 +6516,23 @@
           "candle": true
         }
       ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "vitpose_plus_base",
+      "family": "vitpose",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
       "conditioningShape": [],
       "userAdapters": [],
       "precisionTier": [],
@@ -7329,6 +7652,40 @@
         "mlx": true,
         "candle": true
       }
+    },
+    {
+      "id": "zimage_turbo_training_adapter_v1",
+      "family": "zimage_training_adapter",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "zimage_turbo_training_adapter_v2",
+      "family": "zimage_training_adapter",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
     }
   ],
   "importedFamilies": [
@@ -7560,6 +7917,17 @@
     },
     {
       "jobType": "dataset_face_analysis",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "dataset_subject_mask",
       "category": "utility",
       "requests": [
         {
@@ -8141,6 +8509,50 @@
       "target": "mage_flow_base_lora",
       "baseModel": "mage_flow_base",
       "kernel": "mage_flow_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "qwen_image_2_1_edit_lora",
+      "baseModel": "qwen_image_2_1",
+      "kernel": "qwen_image_2_1_edit_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "qwen_image_2_1_edit_lora",
+      "baseModel": "qwen_image_2_1",
+      "kernel": "qwen_image_2_1_edit_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "qwen_image_2_1_lora",
+      "baseModel": "qwen_image_2_1",
+      "kernel": "qwen_image_2_1_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "qwen_image_2_1_lora",
+      "baseModel": "qwen_image_2_1",
+      "kernel": "qwen_image_2_1_lora",
       "networkType": "lora",
       "support": {
         "capability": "train",
