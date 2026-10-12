@@ -504,7 +504,8 @@ async fn apply_training_retry_resume(
     // resume bundles this fold scans for, and resumes only through the Training Studio's Resume / New
     // phase (`advanced.resumeFromJobId`); the Iris rerun guard has already vetted this retry.
     if plan
-        .pointer("/target/kernel")
+        .get("target")
+        .and_then(|target| target.get("kernel"))
         .and_then(Value::as_str)
         .is_some_and(sceneworks_core::training::iris::is_iris_training_kernel)
     {

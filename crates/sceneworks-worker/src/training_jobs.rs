@@ -2551,8 +2551,6 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
                 advanced_u32(advanced, "sampleCount", DEFAULT_SAMPLE_COUNT),
             )
         },
-        // epic 2123 technique knobs (inference pin advance) stay at their off defaults.
-        ..Default::default()
     }
 }
 
