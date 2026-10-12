@@ -29131,6 +29131,36 @@
       }
     },
     {
+      // TAEQI2.1 (madebyollin/taeqi2_1) — the tiny differentiable decoder for the Qwen-Image 2.1 64-channel latent family that the native Qwen Image 2.1 trainer's decoded-x0 perceptual losses run through (epic 2123). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAEQI2_1_MODEL (parity test).
+      "id": "taeqi2_1",
+      "autoDownload": false,
+      "name": "TAEQI2.1 Tiny Decoder",
+      "family": "taeqi2_1",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/taeqi2_1",
+          "revision": "379cc3f29b1fdbf3bc02781792d88f81036780da",
+          "files": ["taeqi2_1.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 30591264,
+          "footprint": { "diskSizeBytes": 30591264 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/madebyollin/taeqi2_1"
+      },
+      "licenseUrl": "https://huggingface.co/madebyollin/taeqi2_1/tree/379cc3f29b1fdbf3bc02781792d88f81036780da",
+      "ui": {
+        "label": "TAEQI2.1 Tiny Decoder",
+        "description": "Tiny differentiable decoder for the Qwen-Image 2.1 latent family. Used by LoRA training's decoded-prediction losses (depth anchoring, body, face, VAE anchor) to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
       // TAEW2.1 (madebyollin/taehv (Kijai re-upload)) — the tiny differentiable decoder for the Wan 2.1 latent family (Wan 2.2 A14B, and the Qwen-Image VAE of Krea 2 and Anima), run per frame that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAEW2_1_MODEL (parity test).
       "id": "taew2_1",
       "autoDownload": false,

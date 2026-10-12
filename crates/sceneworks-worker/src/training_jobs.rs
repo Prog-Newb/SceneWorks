@@ -1139,7 +1139,6 @@ fn training_request_from_plan(
         .enumerate()
         .map(|(index, item)| {
             Ok(TrainingItem {
-                reference_image_paths: Vec::new(),
                 subject_mask_path: mask_paths.as_ref().map(|paths| paths[index].clone()),
                 image_path: resolve_dataset_item_path(
                     settings,
@@ -1160,7 +1159,6 @@ fn training_request_from_plan(
                         )
                     })
                     .transpose()?,
-                subject_mask_path: None,
                 model_options: prepared_inputs.resolve_model_options(
                     settings,
                     &plan.dataset.root_path,
@@ -2422,9 +2420,6 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // `false`, and the shared dry/real preflight rejects a forged `true` plan before load.
         gradient_checkpointing: advanced_bool(advanced, "gradientCheckpointing", false),
         full_finetune,
-        // Current inference accepts an optional adapter path for resumed/continued training.
-        // SceneWorks creates a fresh adapter for this route, so preserve that contract explicitly.
-        training_adapter: None,
         trigger_word: config.trigger_word.clone(),
         // sc-5637 — preview-sample cadence. The SceneWorks config + UI always supply these (presets
         // set `sampleEvery`/`sampleSteps`/`sampleGuidanceScale`; the submit derives `samplePrompts`
@@ -2507,9 +2502,6 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
                 advanced_u32(advanced, "sampleCount", DEFAULT_SAMPLE_COUNT),
             )
         },
-        // New optional inference techniques remain disabled until SceneWorks exposes and validates
-        // their product inputs. Every established field above stays explicitly mapped.
-        ..Default::default()
     }
 }
 
@@ -4249,7 +4241,7 @@ mod tests {
         let plan = parse(value);
         validate_training_plan(&settings, &plan).expect("edit plan validates");
         let mut prepared_inputs = PreparedTrainingInputs::default();
-        let request = training_request_from_plan(&settings, &plan, &mut prepared_inputs)
+        let request = training_request_from_plan(&settings, &plan, &mut prepared_inputs, false)
             .expect("edit plan maps to a request");
         let item = &request.items[0];
         assert!(item.is_edit_pair());
@@ -4273,7 +4265,7 @@ mod tests {
             "lora",
             &[&target.display().to_string()],
         ));
-        let request = training_request_from_plan(&settings, &plain, &mut prepared_inputs)
+        let request = training_request_from_plan(&settings, &plain, &mut prepared_inputs, false)
             .expect("plain plan maps to a request");
         assert!(request.items.iter().all(|item| !item.is_edit_pair()));
         assert!(request.items[0].reference_image_paths.is_empty());
@@ -4292,7 +4284,9 @@ mod tests {
         let outside = data_dir.join("outside.png");
         std::fs::write(&outside, b"outside").expect("write outside");
         escaping.dataset.items[0].reference_image_paths = vec![outside.display().to_string()];
-        assert!(training_request_from_plan(&settings, &escaping, &mut prepared_inputs).is_err());
+        assert!(
+            training_request_from_plan(&settings, &escaping, &mut prepared_inputs, false).is_err()
+        );
         prepared_inputs.close().expect("close prepared inputs");
     }
 
@@ -5825,8 +5819,8 @@ mod tests {
     #[test]
     fn depth_anchoring_resolves_each_familys_x0_decoder() {
         use sceneworks_core::training::depth_anchoring::{
-            DEPTH_ANYTHING_V2_MODELS, TAELTX2_3_MODEL, TAESD3_MODEL, TAESDXL_MODEL, TAEW2_1_MODEL,
-            TAEW2_2_MODEL,
+            DEPTH_ANYTHING_V2_MODELS, TAELTX2_3_MODEL, TAEQI2_1_MODEL, TAESD3_MODEL, TAESDXL_MODEL,
+            TAEW2_1_MODEL, TAEW2_2_MODEL,
         };
         let dir = tempfile::tempdir().expect("tempdir");
         let hub = dir.path().join("cache").join("huggingface").join("hub");
@@ -5848,6 +5842,7 @@ mod tests {
             ("wan_moe_lora", "wan_2_2_t2v_14b", &TAEW2_1_MODEL),
             ("wan_lora", "wan_2_2", &TAEW2_2_MODEL),
             ("ltx_mlx_lora", "ltx_2_3", &TAELTX2_3_MODEL),
+            ("qwen_image_2_1_lora", "qwen_image_2_1", &TAEQI2_1_MODEL),
         ] {
             let plan = plan(kernel, base);
             let mut config = map_training_config(&plan.config);
@@ -7552,9 +7547,10 @@ mod tests {
                 config["advanced"]["networkType"] = json!(network_type);
                 serialized["config"] = config;
                 let plan = parse(serialized);
-                let prepared = preflight_training_run(&settings, &plan).unwrap_or_else(|error| {
-                    panic!("{label}/{network_type}: SceneWorks preflight refused: {error}")
-                });
+                let prepared =
+                    preflight_training_run(&settings, &plan, false).unwrap_or_else(|error| {
+                        panic!("{label}/{network_type}: SceneWorks preflight refused: {error}")
+                    });
                 assert_eq!(prepared.engine_id, "qwen_image_2_1");
                 trainer.validate(&prepared.request).unwrap_or_else(|error| {
                     panic!("{label}/{network_type}: pinned Candle 2.1 trainer refused: {error}")
@@ -7648,9 +7644,10 @@ mod tests {
         for (label, config) in &configs {
             for network_type in ["lora", "lokr"] {
                 let plan = plan_for(config, network_type, refs(3));
-                let prepared = preflight_training_run(&settings, &plan).unwrap_or_else(|error| {
-                    panic!("{label}/{network_type}: SceneWorks preflight refused: {error}")
-                });
+                let prepared =
+                    preflight_training_run(&settings, &plan, false).unwrap_or_else(|error| {
+                        panic!("{label}/{network_type}: SceneWorks preflight refused: {error}")
+                    });
                 assert_eq!(prepared.engine_id, "qwen_image_2_1");
                 let item = &prepared.request.items[0];
                 assert_eq!(
@@ -7697,10 +7694,13 @@ mod tests {
         assert_eq!(checked, configs.len() * 2);
 
         // The kernel floor: the edit kernel refuses the reference-less plan the engine would accept.
-        let error =
-            preflight_training_run(&settings, &plan_for(&target.defaults, "lora", Vec::new()))
-                .unwrap_err()
-                .to_string();
+        let error = preflight_training_run(
+            &settings,
+            &plan_for(&target.defaults, "lora", Vec::new()),
+            false,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("qwen_image_2_1_edit_lora"), "{error}");
     }
 
@@ -8846,7 +8846,6 @@ mod tests {
                 control_image_path: None,
                 subject_mask_path: None,
                 model_options: Default::default(),
-                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -8976,7 +8975,6 @@ mod tests {
                 control_image_path: None,
                 subject_mask_path: None,
                 model_options: Default::default(),
-                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -9109,7 +9107,6 @@ mod tests {
                 control_image_path: None,
                 subject_mask_path: None,
                 model_options: Default::default(),
-                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -9280,7 +9277,6 @@ mod tests {
                 control_image_path: None,
                 subject_mask_path: None,
                 model_options: Default::default(),
-                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -9467,7 +9463,6 @@ mod tests {
                 control_image_path: None,
                 subject_mask_path: None,
                 model_options: Default::default(),
-                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -9710,7 +9705,6 @@ mod tests {
                 control_image_path: None,
                 subject_mask_path: None,
                 model_options: Default::default(),
-                subject_mask_path: None,
             }],
             config,
             output_dir,

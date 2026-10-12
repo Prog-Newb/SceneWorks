@@ -178,6 +178,15 @@ pub const TAEF2_MODEL: AuxTrainingModel = AuxTrainingModel {
     file: "taef2.safetensors",
 };
 
+/// TAEQI2.1 — the tiny decoder for the Qwen-Image 2.1 64-channel latent family (Qwen Image 2.1).
+pub const TAEQI2_1_MODEL: AuxTrainingModel = AuxTrainingModel {
+    id: "taeqi2_1",
+    label: "TAEQI2.1 tiny decoder",
+    repo: "madebyollin/taeqi2_1",
+    revision: "379cc3f29b1fdbf3bc02781792d88f81036780da",
+    file: "taeqi2_1.safetensors",
+};
+
 /// TAEW2.1 (TAEHV) — the tiny decoder for the Wan 2.1 16-channel latent family, which Wan 2.2
 /// A14B and the Qwen-Image VAE (Krea 2, Anima) share; run per frame. madebyollin publishes it on
 /// GitHub only, so the catalog installs Kijai's Hugging Face re-upload.
@@ -208,11 +217,12 @@ pub const TAELTX2_3_MODEL: AuxTrainingModel = AuxTrainingModel {
 };
 
 /// Every cataloged tiny x0 decoder (a parity test pins each to its `builtin.models.jsonc` entry).
-pub const X0_DECODER_MODELS: [AuxTrainingModel; 7] = [
+pub const X0_DECODER_MODELS: [AuxTrainingModel; 8] = [
     TAEF1_MODEL,
     TAESDXL_MODEL,
     TAESD3_MODEL,
     TAEF2_MODEL,
+    TAEQI2_1_MODEL,
     TAEW2_1_MODEL,
     TAEW2_2_MODEL,
     TAELTX2_3_MODEL,
@@ -271,6 +281,7 @@ pub fn x0_decoder_for_trainer(trainer_id: &str) -> Option<X0DecoderSource> {
         "sdxl" | "kolors" => Catalog(&TAESDXL_MODEL),
         "sd3_5_large" | "sd3_5_medium" => Catalog(&TAESD3_MODEL),
         "lens" => Catalog(&TAEF2_MODEL),
+        "qwen_image_2_1" => Catalog(&TAEQI2_1_MODEL),
         "krea_2_raw" | "anima_base" | "wan2_2_t2v_14b" | "wan2_2_i2v_14b" => {
             Catalog(&TAEW2_1_MODEL)
         }

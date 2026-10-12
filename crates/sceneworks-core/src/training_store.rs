@@ -2549,6 +2549,7 @@ mod tests {
                 width: None,
                 height: None,
                 control_image_path: None,
+                references: Vec::new(),
                 extra: Default::default(),
             },
             source_path: temp.path().join("missing.png"),

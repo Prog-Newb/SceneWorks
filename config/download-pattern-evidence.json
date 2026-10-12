@@ -6224,6 +6224,19 @@
       ]
     },
     {
+      "key": "madebyollin/taeqi2_1@379cc3f29b1fdbf3bc02781792d88f81036780da",
+      "repo": "madebyollin/taeqi2_1",
+      "revision": "379cc3f29b1fdbf3bc02781792d88f81036780da",
+      "resolvedSha": "379cc3f29b1fdbf3bc02781792d88f81036780da",
+      "servedRepo": "madebyollin/taeqi2_1",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "taeqi2_1.safetensors"
+      ]
+    },
+    {
       "key": "madebyollin/taesd3@d58dcaccd2b36fcb7a6b9e93c1cc507acab5a778",
       "repo": "madebyollin/taesd3",
       "revision": "d58dcaccd2b36fcb7a6b9e93c1cc507acab5a778",

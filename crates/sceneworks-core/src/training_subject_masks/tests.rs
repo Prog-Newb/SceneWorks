@@ -42,6 +42,7 @@ impl Fixture {
                     asset_id: None,
                     path,
                     control_image_path: None,
+                    references: Vec::new(),
                     display_name: id,
                     caption: Caption {
                         text: String::new(),

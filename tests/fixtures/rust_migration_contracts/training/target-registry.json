@@ -92,13 +92,13 @@
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsTrainingAdapter": true,
         "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true,
         "x0Decoder": {
           "install": true,
           "label": "TAEF1 tiny decoder"
-        },
-        "supportsTrainingAdapter": true
+        }
       },
       "ui": {
         "description": "Train an image LoRA for the Z-Image-Turbo base model.",
@@ -1288,7 +1288,22 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsNormalLoss": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAEQI2.1 tiny decoder"
+        }
       },
       "ui": {
         "datasetModality": "image",
@@ -1385,7 +1400,22 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsNormalLoss": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAEQI2.1 tiny decoder"
+        }
       },
       "ui": {
         "datasetKind": "editPairs",

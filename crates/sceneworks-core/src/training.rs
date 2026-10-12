@@ -4772,7 +4772,20 @@ fn qwen_image_2_1_lora_target() -> TrainingTarget {
             // Both round-trip the 2.1 adapter host at inference (sc-24156).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123: the Qwen Image 2.1 trainer declares adapter noise, depth anchoring, the
+            // three body losses and subject-masked loss on MLX and Candle alike (pinned per platform
+            // by the worker drift tests); its decoded-x0 losses decode through TAEQI2.1. The face
+            // losses follow depth anchoring, and resolution buckets / the VAE anchor are stamped in
+            // `builtin_training_targets`. No E-LatentLPIPS (no published weights for this latent
+            // family) and no training adapter.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            "supportsDepthAnchoring": true,
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Qwen Image 2.1 LoRA",
