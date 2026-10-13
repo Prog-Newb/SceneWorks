@@ -34,8 +34,9 @@ use mlx_gen::gen_core::iris::TEXT_ENCODER_COMPONENT;
 use mlx_gen::gen_core::{InputSizing, TargetSize, Transform, TransformRequest};
 use runtime_macos::providers::iris as engine;
 
-/// The seed the generation and restoration captures run from, and the solver steps generation
-/// renders (the turnkey still family's two-step calibration request).
+/// The label the depth and restoration fixtures carry in their name. Neither request takes a
+/// seed: both routes are deterministic, and the restorer refuses one by name. Generation renders
+/// the turnkey still family's two-step calibration request.
 const SEED: u64 = 25_690;
 const GENERATION_SEED: u64 = TURNKEY_SEED;
 const GENERATION_STEPS: u32 = TURNKEY_STEPS;
@@ -252,13 +253,7 @@ fn plan_request(
                      {RESTORE_SCALE}x capture scale"
                 ));
             }
-            let request = TransformRequest {
-                image: source_image(width / RESTORE_SCALE, height / RESTORE_SCALE),
-                target: TargetSize::Scale(RESTORE_SCALE as f32),
-                seed: Some(SEED),
-                input_sizing: InputSizing::Original,
-                ..Default::default()
-            };
+            let request = restoration_request(width, height);
             let plan = model
                 .plan(&request)
                 .map_err(|error| format!("plan the restoration request: {error}"))?;
@@ -274,6 +269,18 @@ fn plan_request(
                 engine::memory_strategy::restoration_memory_geometry(&plan),
             ))
         }
+    }
+}
+
+/// The restoration capture's request: the plan geometry is the OUTPUT, so the source is it over
+/// the capture scale, taken at its own size. No seed, strength or step count — the restorer is one
+/// deterministic forward and refuses each of them by name.
+fn restoration_request(width: u32, height: u32) -> TransformRequest {
+    TransformRequest {
+        image: source_image(width / RESTORE_SCALE, height / RESTORE_SCALE),
+        target: TargetSize::Scale(RESTORE_SCALE as f32),
+        input_sizing: InputSizing::Original,
+        ..Default::default()
     }
 }
 
@@ -721,6 +728,23 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The restoration capture's request is one the restorer's own request resolution accepts,
+    /// at the scale the capture names — so the anchor cannot die in planning on a control the
+    /// route does not have (sc-25690: a `seed` did exactly that on the first real capture).
+    ///
+    /// *Mutation that reds this:* `seed: Some(SEED)` back on `restoration_request`.
+    #[test]
+    fn the_restoration_capture_request_is_one_the_restorer_accepts() {
+        let request = restoration_request(2048, 2048);
+        let options = mlx_gen::gen_core::iris::restoration::RestorationOptions::from_request(
+            &request,
+            "iris_3b_restore",
+        )
+        .expect("the restorer resolves the capture request");
+        assert_eq!(options.scale, f64::from(RESTORE_SCALE));
+        assert_eq!((request.image.width, request.image.height), (512, 512));
+    }
 
     fn planned(provider: &str, mode: &str, tier: &str, width: u32, height: u32) -> Value {
         json!({

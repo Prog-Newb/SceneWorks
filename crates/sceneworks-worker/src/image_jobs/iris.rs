@@ -82,11 +82,7 @@ mod tests {
     }
 
     fn stage_bytes(root: &Path, repo: &str, revision: &str, file: &str, bytes: &[u8]) {
-        let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(root, repo)
-            .expect("repo cache path resolves")
-            .join("snapshots")
-            .join(revision);
-        let path = snapshot.join(file);
+        let path = snapshot_file(root, repo, revision, file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
     }
@@ -98,6 +94,42 @@ mod tests {
         for (file, bytes) in crate::iris_test_weights::priceable_text_encoder_files() {
             stage_bytes(root, TE_REPO, TE_REVISION, file, &bytes);
         }
+        #[cfg(target_os = "macos")]
+        if let Some(gib) = PRICED_COMPONENT_GIB.with(std::cell::Cell::get) {
+            // bf16 as stored: 64 bytes a row.
+            crate::iris_test_weights::write_sparse_zero_tensors(
+                &snapshot_file(
+                    root,
+                    TE_REPO,
+                    TE_REVISION,
+                    crate::iris_test_weights::TEXT_ENCODER_LANGUAGE_SHARD,
+                ),
+                &[(
+                    crate::iris_test_weights::TEXT_ENCODER_LANGUAGE_TENSOR,
+                    "BF16",
+                    &[gib * (1 << 30) / 64, 32],
+                )],
+            );
+        }
+    }
+
+    fn snapshot_file(root: &Path, repo: &str, revision: &str, file: &str) -> std::path::PathBuf {
+        sceneworks_core::hf_home::huggingface_repo_cache_path(root, repo)
+            .expect("repo cache path resolves")
+            .join("snapshots")
+            .join(revision)
+            .join(file)
+    }
+
+    #[cfg(target_os = "macos")]
+    thread_local! {
+        /// GiB each of the staged text encoder's language tower and the backbone PRICE at (bf16
+        /// resident) for the arm runs on THIS thread. `None` keeps the miniature install, whose
+        /// weights are too small for staging to save anything: a staged run holds
+        /// `max(tower, backbone)` where a resident one holds the sum. The files are sparse — the
+        /// pricing reads headers, and the stub engine reads nothing.
+        static PRICED_COMPONENT_GIB: std::cell::Cell<Option<usize>> =
+            const { std::cell::Cell::new(None) };
     }
 
     /// The generation backbone as a root both engines can PRICE: the release `config.yaml` and a
@@ -117,6 +149,14 @@ mod tests {
             "model.safetensors",
             &crate::iris_test_weights::priceable_backbone_weights(),
         );
+        #[cfg(target_os = "macos")]
+        if let Some(gib) = PRICED_COMPONENT_GIB.with(std::cell::Cell::get) {
+            // f32 as stored, cast to bf16 on load: 16 stored bytes price as 8.
+            crate::iris_test_weights::write_sparse_zero_tensors(
+                &snapshot_file(root, BACKBONE_REPO, BACKBONE_REVISION, "model.safetensors"),
+                &[("blocks.0.attn.qkv.weight", "F32", &[gib * (1 << 30) / 8, 4])],
+            );
+        }
     }
 
     #[test]
@@ -472,6 +512,12 @@ mod tests {
         adapters: Vec<gen_core::AdapterSpec>,
         /// Every memory-strategy context the arm opened a request scope under, in order.
         contexts: Arc<Mutex<Vec<gen_core::MemoryRunContext>>>,
+        /// The contract the REAL engine publishes for the spec this probe was loaded with. The
+        /// MLX arm grades the loaded request against the generator's own contract, so a probe
+        /// without one would be graded on the resident baseline alone and never offered the
+        /// optimized rungs the pre-load gate priced.
+        #[cfg(target_os = "macos")]
+        contract: Option<gen_core::MemoryProviderContract>,
     }
 
     impl Generator for IrisArmProbe {
@@ -490,6 +536,11 @@ mod tests {
                     skipped: vec!["pixel.blocks.0.attn".to_owned()],
                 })
                 .collect()
+        }
+
+        #[cfg(target_os = "macos")]
+        fn memory_strategy_contract(&self) -> Option<&gen_core::MemoryProviderContract> {
+            self.contract.as_ref()
         }
 
         fn memory_strategy_safety_check(
@@ -895,6 +946,9 @@ mod tests {
                 let loader_offload = Arc::clone(&loaded_offload);
                 let loader_shape = Arc::clone(&loaded_shape);
                 let loader = move |_engine: &str, spec: &LoadSpec| {
+                    #[cfg(target_os = "macos")]
+                    let contract = crate::inference_runtime::media()
+                        .memory_strategy_contract(_engine, spec)?;
                     *loader_loads.lock().unwrap() += 1;
                     *loader_offload.lock().unwrap() = Some(spec.offload_policy);
                     *loader_shape.lock().unwrap() = Some(spec.load_shape);
@@ -907,6 +961,8 @@ mod tests {
                         stopped_on_cancel: loader_stopped,
                         contexts: Arc::clone(&loader_contexts),
                         adapters: spec.adapters.clone(),
+                        #[cfg(target_os = "macos")]
+                        contract,
                     }) as Box<dyn Generator>)
                 };
                 let mut asset_writes = Vec::new();
@@ -2004,5 +2060,107 @@ mod tests {
             single_context.predicted_peak_bytes + overlay_bytes,
             "the batch is priced by the declared overlay alone"
         );
+    }
+
+    /// Restores the miniature install for whatever test this thread runs next.
+    #[cfg(target_os = "macos")]
+    struct PricedComponents;
+
+    #[cfg(target_os = "macos")]
+    impl PricedComponents {
+        fn gib(gib: usize) -> Self {
+            PRICED_COMPONENT_GIB.with(|cell| cell.set(Some(gib)));
+            Self
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for PricedComponents {
+        fn drop(&mut self) {
+            PRICED_COMPONENT_GIB.with(|cell| cell.set(None));
+        }
+    }
+
+    /// On MLX the request is graded twice against the engine's contract: before the load (which
+    /// also picks the load policy) and again on the loaded generator. With a text encoder and a
+    /// backbone that each price at 8 GiB, sweeping the emulated Mac from large to small crosses
+    /// three bands, and in every one the second grading agrees with the first — a Mac the first
+    /// one let load always RUNS, under the rung and at the price the first one admitted:
+    ///
+    /// * roomy — both components resident;
+    /// * between — `StagedResidency` (the tower is dropped before the backbone's phases), whether
+    ///   the weights were loaded warm or `Sequential`, at one price below the resident one;
+    /// * too small even staged — refused BEFORE the loader runs, naming the model.
+    ///
+    /// *Mutations that red this:* `synthesize_estimate_ladder_with_conditioning` skipping
+    /// `MemoryStrategy::StagedResidency` (the between band is refused instead of run) /
+    /// the probe engine publishing no contract (the between band loads and is then refused at the
+    /// resident price) / the install left miniature (staging saves nothing: no between band) /
+    /// `engine_supports_sequential` answering `false` (every between Mac loads warm).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn every_mlx_memory_band_either_refuses_before_load_or_runs_the_rung_it_priced() {
+        use gen_core::MemoryStrategy;
+        let _priced = PricedComponents::gib(8);
+        let run = |cap: &str| {
+            let run = run_iris_arm_with_memory_cap(ArmBehavior::Completes, false, json!({}), cap);
+            if run.load_calls > 0 {
+                assert!(
+                    run.outcome.is_ok() && run.generate_calls == 1,
+                    "{cap} GiB: a request that was let load must run: {:?}",
+                    run.outcome
+                );
+            }
+            run
+        };
+        let selected = |run: &ArmRun, cap: &str| {
+            let [context] = run.memory_contexts.as_slice() else {
+                panic!("{cap} GiB: one request scope: {:?}", run.memory_contexts)
+            };
+            (context.selection.strategy, context.predicted_peak_bytes)
+        };
+
+        let roomy = run("64");
+        let (strategy, resident_peak) = selected(&roomy, "64");
+        assert_eq!(strategy, MemoryStrategy::Resident);
+        assert_eq!(
+            roomy.loaded_offload,
+            Some(gen_core::OffloadPolicy::Resident)
+        );
+
+        let mut staged_peaks = Vec::new();
+        let mut staged_loads = Vec::new();
+        for cap in ["44", "36", "27"] {
+            let between = run(cap);
+            let (strategy, peak) = selected(&between, cap);
+            assert_eq!(strategy, MemoryStrategy::StagedResidency, "{cap} GiB");
+            staged_peaks.push(peak);
+            staged_loads.push(between.loaded_offload);
+        }
+        assert!(
+            staged_peaks.iter().all(|peak| *peak == staged_peaks[0]),
+            "one staged price whatever the Mac: {staged_peaks:?}"
+        );
+        assert!(
+            staged_peaks[0] < resident_peak,
+            "staging holds max(tower, backbone), not the sum: {staged_peaks:?} vs {resident_peak}"
+        );
+        assert!(
+            staged_loads.contains(&Some(gen_core::OffloadPolicy::Sequential)),
+            "the smaller Macs load the weights staged too: {staged_loads:?}"
+        );
+
+        for cap in ["26", "16"] {
+            let small = run(cap);
+            assert_eq!(small.load_calls, 0, "{cap} GiB: refused before the loader");
+            match &small.outcome {
+                Err(crate::error::WorkerError::InvalidPayload(message)) => assert!(
+                    message.contains("iris_3b") && message.contains("GiB"),
+                    "{cap} GiB: the refusal names the model and its need: {message}"
+                ),
+                other => panic!("{cap} GiB must be refused before load, got {other:?}"),
+            }
+            assert!(small.asset_writes.is_empty(), "{:?}", small.asset_writes);
+        }
     }
 }
