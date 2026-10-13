@@ -890,7 +890,8 @@ mod tests {
             restore_memory_floor("mlx", &config),
             Some(MLX_RESTORE_FULL_AC_1024)
         );
-        assert!(MLX_RESTORE_FULL_AC_1024.gib + 4 <= 128);
+        let checkpointed_mlx = restore_memory_floor("mlx", &config).unwrap();
+        assert!(checkpointed_mlx.gib + 4 <= 128, "{checkpointed_mlx:?}");
         assert_eq!(restore_memory_floor("cpu", &config), None);
         config.advanced.insert("networkType".into(), json!("lora"));
         assert_eq!(
