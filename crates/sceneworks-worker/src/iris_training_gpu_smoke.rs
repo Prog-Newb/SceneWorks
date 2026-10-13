@@ -1171,13 +1171,15 @@ async fn checkpointing_capability(
     let started = std::time::Instant::now();
     let outcome = crate::training_jobs::run_training_execution(&api, settings, &job, &plan).await;
     if listed {
-        let gate = admitted_floor(settings, &target.base_model, &on).await;
+        let gate = admitted_floor(settings, &target.base_model, &on)
+            .await
+            .replace("gate_", "checkpointed_gate_");
         outcome.unwrap_or_else(|error| panic!("the checkpointed {task} job completes: {error}"));
         let result = completed_result(posts, &job_id);
         assert_eq!(result["stepsCompleted"], STEPS, "{result:#}");
         format!(
             "checkpointing_lane={lane} engine_accepts=true checkpointed_run=pass \
-             checkpointed_steps={STEPS} checkpointed_s={:.1} checkpointed_{gate}",
+             checkpointed_steps={STEPS} checkpointed_s={:.1} {gate}",
             started.elapsed().as_secs_f64()
         )
     } else {
