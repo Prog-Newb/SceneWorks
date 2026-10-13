@@ -206,6 +206,73 @@ pub fn iris_objective_memory_floor(
     }
 }
 
+/// The lanes whose trainer implements activation checkpointing for `objective` through the shared
+/// `advanced.gradientCheckpointing` toggle (the engine's `TrainingConfig::gradient_checkpointing`,
+/// which the depth and restoration trainers map to the `full` policy).
+///
+/// The engine publishes NO declaration of this — its trainer descriptor has no such flag, and a
+/// lane that has not wired the regions refuses in `Trainer::validate`, which needs the weights
+/// loaded. So this is an explicit table of what each lane's trainer accepts at the pinned inference
+/// revision (Candle since inference #1242; MLX refuses typed). The real-weight depth / restoration
+/// training smokes ask the lane's own trainer and FAIL when its answer differs from this table, so
+/// a lane that starts accepting it cannot go unnoticed.
+///
+/// Generation has none: its control is the richer `advanced.iris.activation_checkpointing` policy,
+/// and its trainer refuses the shared toggle on both lanes.
+pub fn iris_gradient_checkpointing_lanes(objective: IrisObjective) -> &'static [&'static str] {
+    match objective {
+        IrisObjective::Generation => &[],
+        IrisObjective::Depth | IrisObjective::Restoration => &["candle"],
+    }
+}
+
+/// Whether a run asks for the shared gradient (activation) checkpointing toggle.
+pub fn iris_gradient_checkpointing(config: &TrainingConfig) -> bool {
+    config.advanced.get("gradientCheckpointing") == Some(&Value::Bool(true))
+}
+
+/// `Some(message)` when a depth / restoration run asks for gradient checkpointing on a lane whose
+/// trainer does not implement it for that task — a typed refusal before load, never a knob the
+/// trainer would refuse after the weights are in (or silently ignore).
+pub fn iris_gradient_checkpointing_refusal(
+    objective: IrisObjective,
+    lane: &str,
+    config: &TrainingConfig,
+) -> Option<String> {
+    if objective == IrisObjective::Generation || !iris_gradient_checkpointing(config) {
+        return None;
+    }
+    let lanes = iris_gradient_checkpointing_lanes(objective);
+    (!lanes.contains(&lane)).then(|| {
+        let backend = |lane: &str| {
+            match lane {
+                "mlx" => "Apple Silicon (MLX)",
+                "candle" => "NVIDIA (Candle/CUDA)",
+                other => other,
+            }
+            .to_owned()
+        };
+        let supported = if lanes.is_empty() {
+            "no backend implements it for this objective yet".to_owned()
+        } else {
+            format!(
+                "it is implemented on {}",
+                lanes
+                    .iter()
+                    .map(|lane| backend(lane))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            )
+        };
+        format!(
+            "Gradient (activation) checkpointing is not implemented for Iris 3B {} training on \
+             {}; {supported}. Turn gradient checkpointing off to run here.",
+            objective.task(),
+            backend(lane)
+        )
+    })
+}
+
 /// A short description of the run shape a floor was declared for (refusal messages).
 pub fn iris_objective_shape(objective: IrisObjective, config: &TrainingConfig) -> String {
     let network = advanced_string(config, "networkType").unwrap_or(match objective {
@@ -249,13 +316,18 @@ pub fn iris_objective_shape(objective: IrisObjective, config: &TrainingConfig) -
 // allocator's GC ceiling (0.95 × the recommended working set, 109.68 GB on that Mac) without that
 // being need — which is what the campaign's first MLX numbers were.
 //
-// Candle (RTX PRO 6000, run 38291037726): device VRAM over the idle baseline, polled. Under
-// diagnosis (a Candle training-memory excess); these constants are the first campaign's.
+// Candle (RTX PRO 6000 card 1, 97,887 MiB = 95.59 GiB; inference run 38393679427 @1449045c8,
+// after the training-tape memory fix of inference #1242): the LIVE pool peak over six optimizer
+// steps, steady from step 2. 1024² without activation checkpointing needs 128.75 GB: it completed
+// only by spilling 29.2 GB to system memory (115–157 s/step) — a measured need that does NOT fit
+// that card.
 const MLX_FULL_512_PEAK: Peak = Peak::DecimalGb(65.57);
 const MLX_FULL_1024_PEAK: Peak = Peak::DecimalGb(104.49);
 const MLX_FULL_AC_1024_PEAK: Peak = Peak::DecimalGb(74.88);
-const CANDLE_FULL_512_PEAK: Peak = Peak::DecimalGb(97.6);
-const CANDLE_FULL_AC_1024_PEAK: Peak = Peak::DecimalGb(92.2);
+const CANDLE_FULL_512_PEAK: Peak = Peak::DecimalGb(82.41);
+const CANDLE_FULL_1024_SPILL_PEAK: Peak = Peak::DecimalGb(128.75);
+const CANDLE_FULL_AC_512_PEAK: Peak = Peak::DecimalGb(69.19);
+const CANDLE_FULL_AC_1024_PEAK: Peak = Peak::DecimalGb(82.58);
 
 const MLX_FULL_512: IrisMemoryFloor = IrisMemoryFloor::measured(MLX_FULL_512_PEAK, MLX_RESERVE_GIB);
 const MLX_FULL_1024: IrisMemoryFloor =
@@ -265,16 +337,17 @@ const MLX_FULL_AC_1024: IrisMemoryFloor =
 const CANDLE_FULL_512: IrisMemoryFloor =
     IrisMemoryFloor::measured(CANDLE_FULL_512_PEAK, CANDLE_RESERVE_GIB)
         .held_on(CAMPAIGN_CUDA_CARD.gib());
+const CANDLE_FULL_1024: IrisMemoryFloor = IrisMemoryFloor::measured_with_spill(
+    CANDLE_FULL_1024_SPILL_PEAK,
+    CANDLE_RESERVE_GIB,
+    CAMPAIGN_CUDA_CARD.gib(),
+);
+const CANDLE_FULL_AC_512: IrisMemoryFloor =
+    IrisMemoryFloor::measured(CANDLE_FULL_AC_512_PEAK, CANDLE_RESERVE_GIB)
+        .held_on(CAMPAIGN_CUDA_CARD.gib());
 const CANDLE_FULL_AC_1024: IrisMemoryFloor =
     IrisMemoryFloor::measured(CANDLE_FULL_AC_1024_PEAK, CANDLE_RESERVE_GIB)
         .held_on(CAMPAIGN_CUDA_CARD.gib());
-/// No card here holds Candle 1024² without activation checkpointing (it ran out of memory on the
-/// campaign card), so the row is the MLX 1024² peak plus the measured Candle−MLX gap at 512², plus
-/// the reserve.
-const CANDLE_FULL_1024: IrisMemoryFloor = IrisMemoryFloor::extrapolated(
-    MLX_FULL_1024_PEAK.gib() + (CANDLE_FULL_512_PEAK.gib() - MLX_FULL_512_PEAK.gib()),
-    CANDLE_RESERVE_GIB,
-);
 /// The 256² full rows are declared (80) from the 256² evidence below, and never above the measured
 /// 512² row (a smaller run never needs more than a larger one).
 const MLX_FULL_256: IrisMemoryFloor = IrisMemoryFloor::declared(80).bounded_by(MLX_FULL_512);
@@ -285,14 +358,16 @@ const CANDLE_FULL_256: IrisMemoryFloor = IrisMemoryFloor::declared(80).bounded_b
 /// (`advanced.iris.activation_checkpointing` = `full` / `selective_op`,
 /// [`iris_generation_memory_floor`]); every other full run reads `full`.
 ///
-/// * MEASURED — `full` 512 / 1024 and `full_ac` 1024 on MLX, `full` 512 and `full_ac` 1024 on
-///   Candle: the `*_PEAK` constants above, converted to GiB, plus the lane's 2 GiB reserve
-///   ([`floors::MLX_RESERVE_GIB`] / [`CANDLE_RESERVE_GIB`]), rounded up; a Candle row never
-///   exceeds the card that held its run.
-/// * EXTRAPOLATED — Candle `full` 1024 ([`CANDLE_FULL_1024`]); the `full` 256 rows where the
-///   measured 512 row bounds them; the `full_ac` 256 / 512 rows, each the lower of the no-AC row at
-///   that size and the measured AC 1024² row (checkpointing only lowers a peak, and a smaller run
-///   never needs more than a larger one).
+/// * MEASURED — `full` 512 / 1024 and `full_ac` 1024 on MLX; `full` 512 and `full_ac` 512 / 1024
+///   on Candle: the `*_PEAK` constants above, converted to GiB, plus the lane's 2 GiB reserve
+///   ([`floors::MLX_RESERVE_GIB`] / [`CANDLE_RESERVE_GIB`]), rounded up; a Candle row that ran
+///   without spilling never exceeds the card that held its run.
+/// * MEASURED WITH SPILL — Candle `full` 1024 ([`CANDLE_FULL_1024`]): the measured need, which the
+///   card met only by spilling to system memory; the row refuses that card.
+/// * EXTRAPOLATED — the `full` 256 rows where the measured 512 row bounds them; the `full_ac` rows
+///   with no run of their own, each the lower of the no-AC row at that size and the next measured
+///   AC row up (checkpointing only lowers a peak, and a smaller run never needs more than a larger
+///   one).
 /// * DECLARED — the adapter rows: inference real-weight runs on the 3B backbone, 256², batch 1,
 ///   bf16 — MLX LoRA peak 15.3 GB, Candle LoRA peak 21.8 GB (decimal) — padded up (Candle adds the
 ///   2 GiB reserve); larger adapter rows scale the activation term conservatively.
@@ -328,14 +403,9 @@ const IRIS_MEMORY_FLOORS_GIB: [(&str, &str, u32, IrisMemoryFloor); 18] = [
         "candle",
         "full_ac",
         256,
-        IrisMemoryFloor::bound_from(CANDLE_FULL_256).bounded_by(CANDLE_FULL_AC_1024),
+        IrisMemoryFloor::bound_from(CANDLE_FULL_256).bounded_by(CANDLE_FULL_AC_512),
     ),
-    (
-        "candle",
-        "full_ac",
-        512,
-        IrisMemoryFloor::bound_from(CANDLE_FULL_512).bounded_by(CANDLE_FULL_AC_1024),
-    ),
+    ("candle", "full_ac", 512, CANDLE_FULL_AC_512),
     ("candle", "full_ac", 1024, CANDLE_FULL_AC_1024),
 ];
 
@@ -400,7 +470,9 @@ fn memory_floors_json() -> Value {
          activation checkpointing. Measured rows are the whole-process peak of a real full \
          fine-tune at batch 1, converted to GiB, plus a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the \
          cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the \
-         recommended working set) without that being need.",
+         recommended working set) without that being need. Candle peaks are the live pool peak over six optimizer steps (steady from step 2) on a 95.59 \
+         GiB card; a row marked measured_spill is a need the run met only by spilling to system \
+         memory, so it does not fit that card.",
         IRIS_MEMORY_FLOORS_GIB
             .iter()
             .map(|(lane, artifact, resolution, floor)| {
@@ -1084,12 +1156,57 @@ mod tests {
         );
     }
 
+    /// sc-25690: the shared gradient-checkpointing toggle is a depth / restoration control on the
+    /// lanes whose trainer implements it; elsewhere it is refused typed, naming where it works.
+    #[test]
+    fn task_gradient_checkpointing_is_refused_on_a_lane_that_lacks_it() {
+        let mut config = depth::iris_depth_target().defaults;
+        for objective in [IrisObjective::Depth, IrisObjective::Restoration] {
+            assert_eq!(iris_gradient_checkpointing_lanes(objective), ["candle"]);
+            // Off: nothing to refuse on any lane.
+            for lane in ["mlx", "candle"] {
+                assert_eq!(
+                    iris_gradient_checkpointing_refusal(objective, lane, &config),
+                    None
+                );
+            }
+        }
+        config
+            .advanced
+            .insert("gradientCheckpointing".into(), json!(true));
+        assert!(iris_gradient_checkpointing(&config));
+        for objective in [IrisObjective::Depth, IrisObjective::Restoration] {
+            for lane in ["mlx", "candle"] {
+                let refusal = iris_gradient_checkpointing_refusal(objective, lane, &config);
+                assert_eq!(
+                    refusal.is_none(),
+                    iris_gradient_checkpointing_lanes(objective).contains(&lane),
+                    "{objective:?} on {lane}: {refusal:?}"
+                );
+            }
+            let refusal =
+                iris_gradient_checkpointing_refusal(objective, "mlx", &config).expect("refused");
+            assert!(
+                refusal.contains(objective.task())
+                    && refusal.contains("Apple Silicon (MLX)")
+                    && refusal.contains("implemented on NVIDIA (Candle/CUDA)"),
+                "{refusal}"
+            );
+        }
+        // Generation's control is `iris.activation_checkpointing`; this gate is not its.
+        assert!(iris_gradient_checkpointing_lanes(IrisObjective::Generation).is_empty());
+        assert_eq!(
+            iris_gradient_checkpointing_refusal(IrisObjective::Generation, "mlx", &config),
+            None
+        );
+    }
+
     /// sc-25690: provenance is PER ROW and everything published derives from it — the measured
     /// full rows say measured, the Candle 1024² row no card here holds says extrapolated, the
     /// adapter rows say declared; there is no table-wide `measured` flag to disagree with them.
     #[test]
     fn every_floor_row_publishes_its_own_provenance() {
-        use floors::FloorProvenance::{Declared, Extrapolated, Measured};
+        use floors::FloorProvenance::{Declared, Measured, MeasuredSpill};
         let floor = |lane, artifact, resolution| {
             IRIS_MEMORY_FLOORS_GIB
                 .iter()
@@ -1104,17 +1221,14 @@ mod tests {
             assert_eq!(floor(lane, "full", 512).provenance, Measured, "{lane}");
             assert_eq!(floor(lane, "full_ac", 1024).provenance, Measured, "{lane}");
             // Bounds borrowed from another shape's measurement are never called measured.
-            for resolution in [256, 512] {
-                assert_ne!(
-                    floor(lane, "full_ac", resolution).provenance,
-                    Measured,
-                    "{lane} full_ac {resolution}"
-                );
-            }
+            assert_ne!(floor(lane, "full_ac", 256).provenance, Measured, "{lane}");
             assert_ne!(floor(lane, "full", 256).provenance, Measured, "{lane}");
         }
+        assert_ne!(floor("mlx", "full_ac", 512).provenance, Measured);
+        assert_eq!(floor("candle", "full_ac", 512).provenance, Measured);
         assert_eq!(floor("mlx", "full", 1024).provenance, Measured);
-        assert_eq!(floor("candle", "full", 1024).provenance, Extrapolated);
+        // Candle 1024² without checkpointing was measured, but only by spilling off the card.
+        assert_eq!(floor("candle", "full", 1024).provenance, MeasuredSpill);
 
         let published = &iris_generation_target().extra["memoryFloors"];
         assert_eq!(published["unit"], json!("GiB"));
@@ -1133,8 +1247,7 @@ mod tests {
         let basis = published["basis"].as_str().unwrap();
         assert!(basis.contains("Floors are GiB"), "{basis}");
         assert!(
-            basis.contains("Extrapolated from measured rows: ")
-                && basis.contains("candle full 1024"),
+            basis.contains("completed only by spilling to system memory): candle full 1024."),
             "{basis}"
         );
     }
@@ -1162,7 +1275,16 @@ mod tests {
             CANDLE_FULL_AC_1024.gib,
             ceil_gib(gib(CANDLE_FULL_AC_1024_PEAK) + f64::from(CANDLE_RESERVE_GIB)).min(card)
         );
-        // Candle 1024² without checkpointing did not fit the campaign card: its row is above it.
+        assert_eq!(
+            CANDLE_FULL_AC_512.gib,
+            ceil_gib(gib(CANDLE_FULL_AC_512_PEAK) + f64::from(CANDLE_RESERVE_GIB)).min(card)
+        );
+        // Candle 1024² without checkpointing did not fit the campaign card: its row is the measured
+        // need, above the card, never capped to it.
+        assert_eq!(
+            CANDLE_FULL_1024.gib,
+            ceil_gib(gib(CANDLE_FULL_1024_SPILL_PEAK) + f64::from(CANDLE_RESERVE_GIB))
+        );
         assert!(CANDLE_FULL_1024.gib > card, "{CANDLE_FULL_1024:?}");
         for lane in ["mlx", "candle"] {
             for artifact in ["adapter", "full", "full_ac"] {

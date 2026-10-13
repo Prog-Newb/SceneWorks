@@ -80,6 +80,10 @@ pub const fn ceil_gib(gib: f64) -> u32 {
 pub enum FloorProvenance {
     /// The peak of a real run at this row's own shape (+ the lane's reserve).
     Measured,
+    /// The need of a real run at this row's own shape that did NOT fit the device it was measured
+    /// on: the run completed only by spilling to system memory (far slower). The row is the true
+    /// need (+ reserve) — which refuses that device — and never claims the device held it.
+    MeasuredSpill,
     /// Derived from measured rows at other shapes (a slope, a cross-lane gap, or the bound a
     /// measured larger run places on a smaller one); no run at this shape backs it.
     Extrapolated,
@@ -95,6 +99,7 @@ impl FloorProvenance {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Measured => "measured",
+            Self::MeasuredSpill => "measured_spill",
             Self::Extrapolated => "extrapolated",
             Self::LowerBound => "lower_bound",
             Self::Declared => "declared",
@@ -105,6 +110,10 @@ impl FloorProvenance {
     pub const fn describe(self) -> &'static str {
         match self {
             Self::Measured => "a measured floor",
+            Self::MeasuredSpill => {
+                "a measured need: on a 96 GB card the run completed only by spilling to system \
+                 memory"
+            }
             Self::Extrapolated => "a floor extrapolated from measured runs, not measured itself",
             Self::LowerBound => {
                 "a declared floor above a measured lower bound; the true peak is not measured"
@@ -131,9 +140,28 @@ impl IrisMemoryFloor {
         }
     }
 
-    /// The measured run completed on a host of `host_gib` capacity, so that host is enough: the
-    /// floor (peak + reserve) never exceeds the capacity that demonstrably held the run.
+    /// A row measured at its own shape on a device of `device_gib` that could NOT hold it: the run
+    /// completed only by spilling to system memory. The floor is the need (+ reserve), and a need
+    /// that would fit the device is not a spill — that does not compile.
+    pub const fn measured_with_spill(peak: Peak, reserve_gib: u32, device_gib: f64) -> Self {
+        assert!(
+            peak.gib() > device_gib,
+            "a spilled measurement is a need above the device it was measured on"
+        );
+        Self {
+            gib: ceil_gib(peak.gib() + reserve_gib as f64),
+            provenance: FloorProvenance::MeasuredSpill,
+        }
+    }
+
+    /// The measured run completed on a host of `host_gib` capacity WITHOUT spilling, so that host
+    /// is enough: the floor (peak + reserve) never exceeds the capacity that demonstrably held the
+    /// run. A spilled measurement is never held to its device — that does not compile.
     pub const fn held_on(self, host_gib: f64) -> Self {
+        assert!(
+            matches!(self.provenance, FloorProvenance::Measured),
+            "only a run that fit its host is held to that host"
+        );
         let host = host_gib as u32;
         Self {
             gib: if self.gib > host { host } else { self.gib },
@@ -178,7 +206,9 @@ impl IrisMemoryFloor {
         Self {
             gib: other.gib,
             provenance: match other.provenance {
-                FloorProvenance::Measured => FloorProvenance::Extrapolated,
+                FloorProvenance::Measured | FloorProvenance::MeasuredSpill => {
+                    FloorProvenance::Extrapolated
+                }
                 other => other,
             },
         }
@@ -199,7 +229,9 @@ impl IrisMemoryFloor {
     pub fn for_run(self, ranks: u32, extra_gib: u32) -> Option<Self> {
         let gib = self.gib.checked_add(extra_gib)?.checked_mul(ranks)?;
         let provenance = match self.provenance {
-            FloorProvenance::Measured if ranks != 1 || extra_gib != 0 => {
+            FloorProvenance::Measured | FloorProvenance::MeasuredSpill
+                if ranks != 1 || extra_gib != 0 =>
+            {
                 FloorProvenance::Extrapolated
             }
             other => other,
@@ -219,7 +251,7 @@ pub fn memory_floors_json<'a>(
 ) -> Value {
     let mut lanes = Map::new();
     let mut provenance = Map::new();
-    let mut listed: [Vec<String>; 4] = Default::default();
+    let mut listed: [Vec<String>; 5] = Default::default();
     for (lane, path, floor) in rows {
         insert_row(&mut lanes, lane, &path, json!(floor.gib));
         insert_row(
@@ -233,6 +265,7 @@ pub fn memory_floors_json<'a>(
             FloorProvenance::Extrapolated => 1,
             FloorProvenance::LowerBound => 2,
             FloorProvenance::Declared => 3,
+            FloorProvenance::MeasuredSpill => 4,
         };
         listed[slot].push(format!("{lane} {}", path.join(" ")));
     }
@@ -243,6 +276,11 @@ pub fn memory_floors_json<'a>(
     );
     for (label, rows) in [
         ("Measured at the row's own shape", &listed[0]),
+        (
+            "Measured need that did not fit the measuring device (completed only by spilling to \
+             system memory)",
+            &listed[4],
+        ),
         ("Extrapolated from measured rows", &listed[1]),
         ("Declared above a measured lower bound", &listed[2]),
         ("Declared, not measured", &listed[3]),
@@ -369,6 +407,53 @@ mod tests {
             FloorProvenance::Declared
         );
         assert_eq!(measured.for_run(u32::MAX, 0), None);
+    }
+
+    /// A need measured by spilling is the need itself — above the device it ran on, so that device
+    /// is refused — and is never reported as a run the device held.
+    #[test]
+    fn a_spilled_measurement_is_a_need_above_its_device() {
+        let card = CAMPAIGN_CUDA_CARD.gib();
+        let spilled = IrisMemoryFloor::measured_with_spill(Peak::DecimalGb(128.75), 2, card);
+        assert_eq!(
+            spilled,
+            IrisMemoryFloor {
+                gib: 122,
+                provenance: FloorProvenance::MeasuredSpill
+            }
+        );
+        assert!(f64::from(spilled.gib) > card);
+        assert_eq!(FloorProvenance::MeasuredSpill.as_str(), "measured_spill");
+        assert!(FloorProvenance::MeasuredSpill
+            .describe()
+            .contains("spilling to system memory"));
+        // Reused at another shape, or scaled, it is an extrapolation like any measurement.
+        assert_eq!(
+            IrisMemoryFloor::bound_from(spilled).provenance,
+            FloorProvenance::Extrapolated
+        );
+        assert_eq!(
+            spilled.for_run(2, 0).unwrap().provenance,
+            FloorProvenance::Extrapolated
+        );
+        assert_eq!(spilled.for_run(1, 0), Some(spilled));
+        let published = memory_floors_json(
+            None,
+            "Method.",
+            [(
+                "candle",
+                vec!["full".to_owned(), "1024".to_owned()],
+                spilled,
+            )],
+        );
+        assert_eq!(
+            published["provenance"]["candle"]["full"]["1024"],
+            json!("measured_spill")
+        );
+        assert!(published["basis"]
+            .as_str()
+            .unwrap()
+            .contains("did not fit the measuring device (completed only by spilling to system memory): candle full 1024."));
     }
 
     /// The published object lists every row under its own provenance, in the same nesting as the

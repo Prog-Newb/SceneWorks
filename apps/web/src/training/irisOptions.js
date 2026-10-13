@@ -365,6 +365,7 @@ export function irisMemoryFloors(target, networkType, size, lane, activationChec
 // How the Studio names a floor row's evidence (floors.rs `FloorProvenance`).
 export const IRIS_FLOOR_PROVENANCE_LABELS = {
   measured: "measured",
+  measured_spill: "measured need that did not fit a 96 GB card: the run completed only by spilling to system memory",
   extrapolated: "extrapolated from measured runs",
   lower_bound: "declared above a measured lower bound",
   declared: "declared, not yet measured",

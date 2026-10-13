@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import workerReport from "./irisDatasetReport.fixture.json";
 
 import { irisDepthTarget, irisJob, irisRestoreTarget, irisTarget } from "./iris.testSupport.js";
-import { irisMemoryFloors, irisObjective, irisPreviousRuns } from "./irisOptions.js";
+import { irisFloorSummary, irisMemoryFloors, irisObjective, irisPreviousRuns } from "./irisOptions.js";
 import {
   irisCheckSummary,
   irisFloorSize,
@@ -11,7 +11,13 @@ import {
   matchSidecarFiles,
   sidecarStem,
 } from "./irisTaskOptions.js";
-import { configDraftFromTarget, configValidation, trainingConfigSnapshot } from "./trainingConfig.js";
+import {
+  configDraftFromTarget,
+  configValidation,
+  gradientCheckpointingLanes,
+  gradientCheckpointingUnsupported,
+  trainingConfigSnapshot,
+} from "./trainingConfig.js";
 import { datasetPayload } from "./datasetHelpers.js";
 
 const DATASET = { id: "ds1", name: "Set", version: 3, items: [] };
@@ -174,7 +180,54 @@ describe("task memory floors and previous runs", () => {
     // Batch 2 doubles the pixels: the next row up on Candle; beyond the table → no floor (refused).
     const small = { ...draft, irisTask: { ...draft.irisTask, depth_size: ["384", "384"] }, batchSize: "2" };
     expect(irisMemoryFloors(target, "full", irisFloorSize(target, small), "candle")).toEqual([{ lane: "candle", gib: 84, provenance: "extrapolated" }]);
-    expect(irisMemoryFloors(target, "full", irisFloorSize(target, { ...draft, batchSize: "2" }), "candle")).toEqual([]);
+    expect(irisMemoryFloors(target, "full", irisFloorSize(target, { ...draft, batchSize: "2" }), "mlx")).toEqual([]);
+  });
+
+  it("reads a checkpointed task run's full_ac rows only where the lane publishes them", () => {
+    const target = irisDepthTarget();
+    const size = irisFloorSize(target, draftFor(target));
+    // Candle publishes full_ac rows beside its plain ones; the nested key is never read as a row.
+    expect(irisMemoryFloors(target, "full", size, "candle", "full")).toEqual([{ lane: "candle", gib: 68, provenance: "extrapolated" }]);
+    expect(irisMemoryFloors(target, "full", size, "candle")).toEqual([{ lane: "candle", gib: 84, provenance: "extrapolated" }]);
+    // 1024²: a measured need that spilled off the card without checkpointing; measured with it.
+    expect(irisMemoryFloors(target, "full", 1024 * 1024, "candle")).toEqual([{ lane: "candle", gib: 111, provenance: "measured_spill" }]);
+    expect(irisMemoryFloors(target, "full", 1024 * 1024, "candle", "full")).toEqual([{ lane: "candle", gib: 68, provenance: "measured" }]);
+    // MLX publishes none: the plain row, whatever the toggle says.
+    expect(irisMemoryFloors(target, "full", size, "mlx", "full")).toEqual([{ lane: "mlx", gib: 80, provenance: "declared" }]);
+    expect(irisFloorSummary([{ lane: "candle", gib: 111, provenance: "measured_spill" }])).toContain("spilling to system memory");
+  });
+
+  it("limits gradient checkpointing to the lanes the task target publishes", () => {
+    for (const target of [irisDepthTarget(), irisRestoreTarget()]) {
+      expect(gradientCheckpointingLanes(target)).toEqual(["candle"]);
+      expect(gradientCheckpointingUnsupported(target, "mlx")).toBe(true);
+      expect(gradientCheckpointingUnsupported(target, "candle")).toBe(false);
+      // An unknown lane keeps the control: the worker refuses it typed where it is missing.
+      expect(gradientCheckpointingUnsupported(target, null)).toBe(false);
+      expect(gradientCheckpointingUnsupported(target)).toBe(false);
+    }
+    // A lane joining the published list is supported with no code change here.
+    const both = { limits: { gradientCheckpointingLanes: ["candle", "mlx"] } };
+    expect(gradientCheckpointingUnsupported(both, "mlx")).toBe(false);
+    expect(gradientCheckpointingUnsupported({ limits: { gradientCheckpointingLanes: [] } }, "candle")).toBe(true);
+    // Pinned off (Iris generation) on every lane; a target that says nothing is unrestricted.
+    expect(gradientCheckpointingLanes(irisTarget())).toBeNull();
+    for (const lane of ["mlx", "candle", null]) {
+      expect(gradientCheckpointingUnsupported(irisTarget(), lane)).toBe(true);
+      expect(gradientCheckpointingUnsupported({ limits: {} }, lane)).toBe(false);
+    }
+  });
+
+  it("submits the toggle only on a lane that implements it", () => {
+    const target = irisDepthTarget();
+    const configDraft = { ...draftFor(target), outputName: "out", gradientCheckpointing: true };
+    const submitted = (trainingLane) =>
+      trainingConfigSnapshot({ activeDataset: DATASET, configDraft, selectedPreset: null, selectedTarget: target, trainingLane }).config
+        .advanced.gradientCheckpointing;
+    expect(submitted("candle")).toBe(true);
+    expect(submitted("mlx")).toBe(false);
+    expect(submitted(null)).toBe(true);
+    expect(trainingConfigSnapshot({ activeDataset: DATASET, configDraft: { ...configDraft, gradientCheckpointing: false }, selectedPreset: null, selectedTarget: target, trainingLane: "candle" }).config.advanced.gradientCheckpointing).toBe(false);
   });
 
   it("keys restoration floors by batch × crop² per artifact", () => {

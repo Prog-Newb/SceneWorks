@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "0b1a5a57f8c4cafaec02dfef372654f7c743ef66",
+  "inferenceRevision": "c1f59420361c27b2a799745c3af81e9c67fbeb98",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -6796,8 +6796,8 @@
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-iris/src/model.rs"
       ],
-      "digest": "8bc6642b9419118b297fe4428adbacf0b3b2225239823275514b73d47a991ac2",
-      "closureFileCount": 272,
+      "digest": "fc3867ae1fae57e37a1a7cf5bce9071f8c5c98f898f7470cd42824af5e2d8ae1",
+      "closureFileCount": 273,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -6977,6 +6977,7 @@
         "crates/media/candle-gen/candle-gen-iris/src/pipeline.rs",
         "crates/media/candle-gen/candle-gen-iris/src/restoration.rs",
         "crates/media/candle-gen/candle-gen-iris/src/solver.rs",
+        "crates/media/candle-gen/candle-gen-iris/src/tape.rs",
         "crates/media/candle-gen/candle-gen-iris/src/text_encoder.rs",
         "crates/media/candle-gen/candle-gen/src/architecture_facts.rs",
         "crates/media/candle-gen/candle-gen/src/attention.rs",
@@ -7079,7 +7080,7 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/model.rs"
       ],
-      "digest": "24f3169e0a3b8398838f3cca3503385a19bdbf717b74d03b2047087559914bb8",
+      "digest": "928774c1c4d4763f7d53f2d888e94c13296c72df8abdf810ef5629536d104c63",
       "closureFileCount": 192,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -7282,8 +7283,8 @@
         "crates/media/candle-gen/candle-gen-iris/src/depth.rs",
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs"
       ],
-      "digest": "4f16b4f511b970f9097588f8b506e99ddd0a55646d889ee200ba5cc416dff41b",
-      "closureFileCount": 272,
+      "digest": "c74fa868772e943f7482a3f4bb4f81d554090ae93ae09c0abebb36850b0ed84e",
+      "closureFileCount": 273,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -7463,6 +7464,7 @@
         "crates/media/candle-gen/candle-gen-iris/src/pipeline.rs",
         "crates/media/candle-gen/candle-gen-iris/src/restoration.rs",
         "crates/media/candle-gen/candle-gen-iris/src/solver.rs",
+        "crates/media/candle-gen/candle-gen-iris/src/tape.rs",
         "crates/media/candle-gen/candle-gen-iris/src/text_encoder.rs",
         "crates/media/candle-gen/candle-gen/src/architecture_facts.rs",
         "crates/media/candle-gen/candle-gen/src/attention.rs",
@@ -7565,7 +7567,7 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/depth.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs"
       ],
-      "digest": "ba14e01d6f4d24d1843e4663de3f4003e31bddc82636ac186d553d76f5714856",
+      "digest": "4824f3844f47c8f5cf7492c2d374d6d4caad77332b33d980d8d9ac5ba00b7b6f",
       "closureFileCount": 192,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -7768,8 +7770,8 @@
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-iris/src/restoration.rs"
       ],
-      "digest": "cfce6a057fa999debed3d30f9e66318b01e19195c80dc09554b60a5a1228c0df",
-      "closureFileCount": 272,
+      "digest": "0b87744da07edfd38a909633673804e1c93309fd26934af00a4dc38d49e935bd",
+      "closureFileCount": 273,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -7949,6 +7951,7 @@
         "crates/media/candle-gen/candle-gen-iris/src/pipeline.rs",
         "crates/media/candle-gen/candle-gen-iris/src/restoration.rs",
         "crates/media/candle-gen/candle-gen-iris/src/solver.rs",
+        "crates/media/candle-gen/candle-gen-iris/src/tape.rs",
         "crates/media/candle-gen/candle-gen-iris/src/text_encoder.rs",
         "crates/media/candle-gen/candle-gen/src/architecture_facts.rs",
         "crates/media/candle-gen/candle-gen/src/attention.rs",
@@ -8051,7 +8054,7 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/restoration.rs"
       ],
-      "digest": "e4fa07edcfa56a0825cdc2634f8fedce97b1912264d8739a1ff0a6347ec856bc",
+      "digest": "c3407e0be77b075b73e89c330170b8b54d5007d0ed333af1f34a455eb4421269",
       "closureFileCount": 192,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",

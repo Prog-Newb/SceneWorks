@@ -107,42 +107,63 @@ const UNREAD_ADVANCED_KEYS: [&str; 6] = [
 
 // ---- Measured inputs of the restoration full fine-tune rows ----------------------------------------
 // The ONLY numbers to edit when a campaign re-measures: whole-process peaks of the paper's full
-// recipe (batch 1, bf16, EMA, two steps + export), in the unit the probe printed.
+// recipe (batch 1, bf16, EMA), DECIMAL GB as the probe printed them.
 //
-// 256² crop: Candle device VRAM ~93.7 GiB on an RTX PRO 6000 (inference run 38149768393).
-// 512² crop (sc-25690 terminal campaign, `train_memory_probe`, DECIMAL GB): MLX ACTIVE peak with
-// the buffer cache DISABLED, 71.57, on nax-macos-2 (inference PR 1238 @b1c04bd0d, runs 38312190794
-// and 38318086154; steady by step 2) — production runs keep the cache, so their footprint can rise
-// to the allocator's GC ceiling (0.95 × the recommended working set) without that being need;
-// Candle device VRAM 101.8 over the idle baseline (run 38291037726; polled, under diagnosis).
-// 1024² crop: MLX was stopped by its guard at a 116.47 GB footprint with the cache off (live need
-// above 115 GB) — a LOWER bound, not a peak — and Candle ran out of memory on the campaign card, so
-// the card's whole capacity is its lower bound.
-const CANDLE_RESTORE_FULL_256_PEAK: Peak = Peak::Gib(93.7);
+// MLX (nax-macos-2; inference PR 1238 @b1c04bd0d, runs 38312190794 and 38318086154): the ACTIVE
+// peak with the buffer cache DISABLED, steady by step 2 — production runs keep the cache, so their
+// footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without
+// that being need. At a 1024² crop the run was stopped by its guard at a 116.47 GB footprint with
+// the cache off (live need above 115 GB): a LOWER bound, not a peak.
+//
+// Candle (RTX PRO 6000 card 1, 95.59 GiB; inference run 38393679427 @1449045c8, after the
+// training-tape memory fix of inference #1242): the LIVE pool peak over six optimizer steps, steady
+// from step 2. A 1024² crop without activation checkpointing needs 142.96 GB and completed only by
+// spilling 42.5 GB to system memory — a measured need that does not fit that card; under full
+// activation checkpointing (`gradientCheckpointing`, new at that pin) it peaks at 86.47 GB.
 const MLX_RESTORE_FULL_512_PEAK: Peak = Peak::DecimalGb(71.57);
-const CANDLE_RESTORE_FULL_512_PEAK: Peak = Peak::DecimalGb(101.8);
 const MLX_RESTORE_FULL_1024_LOWER_BOUND: Peak = Peak::DecimalGb(116.47);
+const CANDLE_RESTORE_FULL_256_PEAK: Peak = Peak::DecimalGb(76.15);
+const CANDLE_RESTORE_FULL_512_PEAK: Peak = Peak::DecimalGb(87.36);
+const CANDLE_RESTORE_FULL_1024_SPILL_PEAK: Peak = Peak::DecimalGb(142.96);
+const CANDLE_RESTORE_FULL_AC_1024_PEAK: Peak = Peak::DecimalGb(86.47);
+
 const MLX_RESTORE_FULL_512: IrisMemoryFloor =
     IrisMemoryFloor::measured(MLX_RESTORE_FULL_512_PEAK, MLX_RESERVE_GIB);
-const CANDLE_RESTORE_FULL_1024_LOWER_BOUND: Peak = CAMPAIGN_CUDA_CARD;
+const CANDLE_RESTORE_FULL_256: IrisMemoryFloor =
+    IrisMemoryFloor::measured(CANDLE_RESTORE_FULL_256_PEAK, CANDLE_RESERVE_GIB)
+        .held_on(CAMPAIGN_CUDA_CARD.gib());
+const CANDLE_RESTORE_FULL_512: IrisMemoryFloor =
+    IrisMemoryFloor::measured(CANDLE_RESTORE_FULL_512_PEAK, CANDLE_RESERVE_GIB)
+        .held_on(CAMPAIGN_CUDA_CARD.gib());
+const CANDLE_RESTORE_FULL_AC_1024: IrisMemoryFloor =
+    IrisMemoryFloor::measured(CANDLE_RESTORE_FULL_AC_1024_PEAK, CANDLE_RESERVE_GIB)
+        .held_on(CAMPAIGN_CUDA_CARD.gib());
 
 /// Memory floors, **GiB** ([`super::floors`]), per `(lane, artifact, micro-batch pixels ≤, floor)`
 /// with a micro-batch's pixels = `batchSize × resolution²`; each row carries its own provenance.
+/// `full_ac` is the FULL fine-tune under full activation checkpointing
+/// (`advanced.gradientCheckpointing`), on the lanes whose trainer implements it
+/// ([`super::iris_gradient_checkpointing_lanes`]).
 ///
-/// * MEASURED — the full fine-tune at 262 144 px on both lanes and at 65 536 px on Candle: the
-///   `*_PEAK` constants above converted to GiB, plus the lane's 2 GiB reserve, rounded up; a Candle
-///   row never exceeds the card that held its run.
-/// * LOWER BOUND — the full fine-tune at 1 048 576 px: declared above the measured lower bounds.
-/// * EXTRAPOLATED — the MLX full row at 65 536 px: bounded by the measured 262 144 px row (a smaller
-///   crop never needs more; its earlier 92 was declared from an 87.5 GB process footprint, cache
-///   included).
-/// * DECLARED — every adapter row: LoRA rank 8 at a 256² crop peaked at 25.2 GB on
-///   MLX (run 38140601912) and 29.3 GB of VRAM on CUDA (run 38137202298), padded (Candle adding the
+/// * MEASURED — the full fine-tune at 262 144 px on both lanes, at 65 536 px on Candle, and
+///   Candle's `full_ac` at 1 048 576 px: the `*_PEAK` constants above converted to GiB, plus the
+///   lane's 2 GiB reserve, rounded up; a Candle row that ran without spilling never exceeds the
+///   card that held its run.
+/// * MEASURED WITH SPILL — Candle's full fine-tune at 1 048 576 px without checkpointing: the
+///   measured need, which the card met only by spilling to system memory; the row refuses that
+///   card.
+/// * LOWER BOUND — MLX's full fine-tune at 1 048 576 px: declared above the measured lower bound.
+/// * EXTRAPOLATED — the MLX full row at 65 536 px, bounded by the measured 262 144 px row (a
+///   smaller crop never needs more; its earlier 92 was declared from an 87.5 GB process footprint,
+///   cache included); and Candle's `full_ac` rows under 1 048 576 px, each the lower of the plain
+///   row at that size and the measured AC 1024² row.
+/// * DECLARED — every adapter row: LoRA rank 8 at a 256² crop peaked at 25.2 GB on MLX (run
+///   38140601912) and 29.3 GB of VRAM on CUDA (run 38137202298), padded (Candle adding the
 ///   reserve); adapter rows above 65 536 px scale the activation, LPIPS and critic terms
 ///   conservatively.
 ///
 /// A micro-batch above the last row is refused rather than admitted unbounded.
-const RESTORE_FLOORS_GIB: [(&str, &str, u64, IrisMemoryFloor); 12] = [
+const RESTORE_FLOORS_GIB: [(&str, &str, u64, IrisMemoryFloor); 15] = [
     (
         "mlx",
         "full",
@@ -159,26 +180,33 @@ const RESTORE_FLOORS_GIB: [(&str, &str, u64, IrisMemoryFloor); 12] = [
     ("mlx", "adapter", 65_536, IrisMemoryFloor::declared(28)),
     ("mlx", "adapter", 262_144, IrisMemoryFloor::declared(36)),
     ("mlx", "adapter", 1_048_576, IrisMemoryFloor::declared(56)),
-    (
-        "candle",
-        "full",
-        65_536,
-        IrisMemoryFloor::measured(CANDLE_RESTORE_FULL_256_PEAK, CANDLE_RESERVE_GIB)
-            .held_on(CAMPAIGN_CUDA_CARD.gib()),
-    ),
-    (
-        "candle",
-        "full",
-        262_144,
-        IrisMemoryFloor::measured(CANDLE_RESTORE_FULL_512_PEAK, CANDLE_RESERVE_GIB)
-            .held_on(CAMPAIGN_CUDA_CARD.gib()),
-    ),
+    ("candle", "full", 65_536, CANDLE_RESTORE_FULL_256),
+    ("candle", "full", 262_144, CANDLE_RESTORE_FULL_512),
     (
         "candle",
         "full",
         1_048_576,
-        IrisMemoryFloor::above_lower_bound(CANDLE_RESTORE_FULL_1024_LOWER_BOUND, 140),
+        IrisMemoryFloor::measured_with_spill(
+            CANDLE_RESTORE_FULL_1024_SPILL_PEAK,
+            CANDLE_RESERVE_GIB,
+            CAMPAIGN_CUDA_CARD.gib(),
+        ),
     ),
+    (
+        "candle",
+        "full_ac",
+        65_536,
+        IrisMemoryFloor::bound_from(CANDLE_RESTORE_FULL_256)
+            .bounded_by(CANDLE_RESTORE_FULL_AC_1024),
+    ),
+    (
+        "candle",
+        "full_ac",
+        262_144,
+        IrisMemoryFloor::bound_from(CANDLE_RESTORE_FULL_512)
+            .bounded_by(CANDLE_RESTORE_FULL_AC_1024),
+    ),
+    ("candle", "full_ac", 1_048_576, CANDLE_RESTORE_FULL_AC_1024),
     ("candle", "adapter", 65_536, IrisMemoryFloor::declared(32)),
     ("candle", "adapter", 262_144, IrisMemoryFloor::declared(40)),
     (
@@ -201,22 +229,28 @@ fn network_type(config: &TrainingConfig) -> String {
 }
 
 /// The floor row (GiB + provenance) of a restoration run on `lane`, or `None` above the table / for
-/// an unknown lane (callers refuse).
+/// an unknown lane (callers refuse). A FULL run under activation checkpointing reads the lane's
+/// `full_ac` rows where it has them.
 pub fn restore_memory_floor(lane: &str, config: &TrainingConfig) -> Option<IrisMemoryFloor> {
-    let artifact = if network_type(config) == "full" {
-        "full"
-    } else {
-        "adapter"
-    };
+    let full = network_type(config) == "full";
     let side = u64::from(config.resolution);
     let pixels = u64::from(config.batch_size.max(1)) * side * side;
-    RESTORE_FLOORS_GIB
-        .iter()
-        .filter(|(row_lane, row_artifact, row_pixels, _)| {
-            *row_lane == lane && *row_artifact == artifact && *row_pixels >= pixels
-        })
-        .min_by_key(|(_, _, row_pixels, _)| *row_pixels)
-        .map(|(_, _, _, floor)| *floor)
+    let lookup = |artifact: &str| {
+        RESTORE_FLOORS_GIB
+            .iter()
+            .filter(|(row_lane, row_artifact, row_pixels, _)| {
+                *row_lane == lane && *row_artifact == artifact && *row_pixels >= pixels
+            })
+            .min_by_key(|(_, _, row_pixels, _)| *row_pixels)
+            .map(|(_, _, _, floor)| *floor)
+    };
+    if !full {
+        return lookup("adapter");
+    }
+    super::iris_gradient_checkpointing(config)
+        .then(|| lookup("full_ac"))
+        .flatten()
+        .or_else(|| lookup("full"))
 }
 
 fn memory_floors_json() -> Value {
@@ -224,9 +258,13 @@ fn memory_floors_json() -> Value {
         Some("microBatchPixels"),
         "Keyed by artifact and the pixels of one micro-batch (batch size × crop²). Measured rows \
          are the whole-process peak of the paper's full recipe at batch 1, converted to GiB, plus \
-         a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the \
-         cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the \
-         recommended working set) without that being need.",
+         a 2 GiB reserve; `full_ac` is the full fine-tune under gradient (activation) \
+         checkpointing on the lanes that implement it. MLX peaks are the ACTIVE peak with MLX's \
+         buffer cache disabled; production runs keep the cache, so a process footprint can rise \
+         to the allocator's GC ceiling (0.95 × the recommended working set) without that being \
+         need. Candle peaks are the live pool peak over six optimizer steps (steady from step 2) on a 95.59 \
+         GiB card; a row marked measured_spill is a need the run met only by spilling to system \
+         memory, so it does not fit that card.",
         RESTORE_FLOORS_GIB
             .iter()
             .map(|(lane, artifact, pixels, floor)| {
@@ -325,7 +363,10 @@ pub fn iris_restore_target() -> TrainingTarget {
             "lrSchedulers": ["constant", "cosine"],
             "lossTypes": ["mse"],
             "mixedPrecisions": ["bf16", "f32"],
-            "gradientCheckpointing": false,
+            // Activation checkpointing through the shared toggle, on the lanes whose restoration
+            // trainer implements it (never pinned off: a lane that lacks it refuses typed before load).
+            "gradientCheckpointingLanes":
+                super::iris_gradient_checkpointing_lanes(super::IrisObjective::Restoration),
             "microStepFields": ["steps", "saveEvery", "sampleEvery", "lrWarmupSteps"],
             "microStepMultiple": "2xGradientAccumulation",
             "outputScopes": ["project", "global"]
@@ -759,7 +800,9 @@ mod tests {
             let expected = match (lane, artifact, pixels) {
                 (_, "adapter", _) => FloorProvenance::Declared,
                 ("mlx", "full", 65_536) => FloorProvenance::Extrapolated,
-                (_, "full", 1_048_576) => FloorProvenance::LowerBound,
+                ("mlx", "full", 1_048_576) => FloorProvenance::LowerBound,
+                ("candle", "full", 1_048_576) => FloorProvenance::MeasuredSpill,
+                ("candle", "full_ac", 65_536 | 262_144) => FloorProvenance::Extrapolated,
                 _ => FloorProvenance::Measured,
             };
             assert_eq!(floor.provenance, expected, "{lane} {artifact} {pixels}");
@@ -774,7 +817,8 @@ mod tests {
         }
         for (lane, bound) in [
             ("mlx", MLX_RESTORE_FULL_1024_LOWER_BOUND),
-            ("candle", CANDLE_RESTORE_FULL_1024_LOWER_BOUND),
+            // Candle's is a measured need, not a bound: the row sits above the card it spilled off.
+            ("candle", CAMPAIGN_CUDA_CARD),
         ] {
             let floor = RESTORE_FLOORS_GIB
                 .iter()
@@ -784,7 +828,7 @@ mod tests {
             assert!(floor.gib > ceil_gib(bound.gib()), "{lane}: {floor:?}");
         }
         for lane in ["mlx", "candle"] {
-            for artifact in ["full", "adapter"] {
+            for artifact in ["full", "full_ac", "adapter"] {
                 let rows: Vec<_> = RESTORE_FLOORS_GIB
                     .iter()
                     .filter(|row| row.0 == lane && row.1 == artifact)
@@ -802,6 +846,46 @@ mod tests {
             basis.contains("Declared above a measured lower bound: mlx full 1048576"),
             "{basis}"
         );
+    }
+
+    /// sc-25690: a FULL run under gradient (activation) checkpointing reads the lane's `full_ac`
+    /// rows — Candle's 1024² crop, which does not fit a 96 GB card without it, fits with it — an
+    /// adapter run never does, and a lane with no such rows keeps reading the plain ones.
+    #[test]
+    fn a_checkpointed_full_run_reads_the_full_ac_rows_where_the_lane_has_them() {
+        use super::super::floors::FloorProvenance;
+        let mut config = config();
+        let card = CAMPAIGN_CUDA_CARD.gib();
+        let plain = restore_memory_floor("candle", &config).unwrap();
+        let mlx_plain = restore_memory_floor("mlx", &config).unwrap();
+        assert_eq!(plain.provenance, FloorProvenance::MeasuredSpill);
+        assert!(f64::from(plain.gib) > card, "{plain:?}");
+        config
+            .advanced
+            .insert("gradientCheckpointing".into(), json!(true));
+        let checkpointed = restore_memory_floor("candle", &config).unwrap();
+        assert_eq!(checkpointed, CANDLE_RESTORE_FULL_AC_1024);
+        assert!(f64::from(checkpointed.gib) <= card, "{checkpointed:?}");
+        assert_eq!(restore_memory_floor("mlx", &config), Some(mlx_plain));
+        config.advanced.insert("networkType".into(), json!("lora"));
+        assert_eq!(
+            restore_memory_floor("candle", &config).map(|floor| floor.provenance),
+            Some(FloorProvenance::Declared),
+            "an adapter run reads the adapter rows whatever the toggle says"
+        );
+        for (lane, artifact, pixels, floor) in RESTORE_FLOORS_GIB {
+            if artifact == "full_ac" {
+                let plain = RESTORE_FLOORS_GIB
+                    .iter()
+                    .find(|row| row.0 == lane && row.1 == "full" && row.2 == pixels)
+                    .unwrap()
+                    .3;
+                assert!(floor.gib <= plain.gib, "{lane} {pixels}");
+            }
+        }
+        let limits = &iris_restore_target().limits;
+        assert_eq!(limits["gradientCheckpointingLanes"], json!(["candle"]));
+        assert!(limits.get("gradientCheckpointing").is_none());
     }
 
     #[test]

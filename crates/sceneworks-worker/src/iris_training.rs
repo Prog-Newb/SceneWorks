@@ -300,14 +300,62 @@ pub(crate) fn iris_plan_memory_refusal(
         // the busiest of `devices`.
         return iris_run_memory_refusal(lane, config, devices, capacity_gib);
     }
+    // sc-25690: the shared gradient-checkpointing toggle is honoured only on the lanes whose task
+    // trainer implements it; elsewhere it is refused here, before load, never after the weights
+    // are in.
+    if let Some(refusal) = sceneworks_core::training::iris::iris_gradient_checkpointing_refusal(
+        objective, lane, config,
+    ) {
+        return Some(refusal);
+    }
+    let advice = match task_checkpointing_hint(objective, lane, config, capacity_gib) {
+        Some(hint) => format!("{hint} Otherwise: {TASK_ADVICE}"),
+        None => TASK_ADVICE.to_owned(),
+    };
     memory_refusal_for_floor(
         lane,
         iris_objective_memory_floor(objective, lane, config),
         &iris_objective_shape(objective, config),
         capacity_gib,
         TASK_NO_ROW,
-        TASK_ADVICE,
+        &advice,
     )
+}
+
+/// sc-25690: a depth / restoration run refused at its plain row is told when the SAME run under
+/// gradient (activation) checkpointing fits this machine — on a lane whose task trainer implements
+/// it ([`sceneworks_core::training::iris::iris_gradient_checkpointing_lanes`]), and only when the
+/// lane's `full_ac` row would actually admit it. `None` when the toggle is already on, the lane
+/// lacks it, or the run would still not fit (an adapter run reads the same row either way).
+fn task_checkpointing_hint(
+    objective: sceneworks_core::training::iris::IrisObjective,
+    lane: &str,
+    config: &sceneworks_core::training::TrainingConfig,
+    capacity_gib: Option<f64>,
+) -> Option<String> {
+    use sceneworks_core::training::iris::{
+        iris_gradient_checkpointing, iris_gradient_checkpointing_lanes, iris_objective_memory_floor,
+    };
+    if iris_gradient_checkpointing(config)
+        || !iris_gradient_checkpointing_lanes(objective).contains(&lane)
+    {
+        return None;
+    }
+    let mut checkpointed = config.clone();
+    checkpointed
+        .advanced
+        .insert("gradientCheckpointing".to_owned(), true.into());
+    let floor = iris_objective_memory_floor(objective, lane, &checkpointed)?;
+    under_floor(lane, floor.gib, capacity_gib?)
+        .is_none()
+        .then(|| {
+            format!(
+                "With gradient checkpointing on (Training Studio → Gradient checkpointing) the \
+                 same run needs {} GiB ({}) and fits this machine, at the cost of slower steps.",
+                floor.gib,
+                floor.provenance.describe()
+            )
+        })
 }
 
 /// The submit-time twin of [`iris_plan_memory_refusal`] for the co-located macOS API. `None` off
@@ -555,11 +603,15 @@ mod tests {
             None
         );
         let full_1024 = generation_config("full", 1024, json);
+        let spilled = iris_plan_memory_refusal("candle", "iris_3b", &full_1024, 1, Some(card))
+            .expect("1024² without checkpointing met its need only by spilling off this card");
         assert!(
-            iris_plan_memory_refusal("candle", "iris_3b", &full_1024, 1, Some(card)).is_some(),
-            "1024² without checkpointing ran out of memory on this card"
+            spilled.contains("a measured need") && spilled.contains("spilling to system memory"),
+            "{spilled}"
         );
 
+        // Restoration and depth: the shapes that ran on the card are admitted; 1024² without
+        // checkpointing (a measured need above the card) is refused, and admitted WITH it.
         let mut restore = restore::iris_restore_target().defaults;
         for (side, admitted) in [(256, true), (512, true), (1024, false)] {
             restore.resolution = side;
@@ -570,6 +622,114 @@ mod tests {
                 "restoration full fine-tune at {side}²"
             );
         }
+        let mut depth = sceneworks_core::training::iris::depth::iris_depth_target().defaults;
+        for (side, admitted) in [(512, true), (1024, false)] {
+            depth.resolution = side;
+            depth.advanced["iris"]["depth_size"] = serde_json::json!([side, side]);
+            assert_eq!(
+                iris_plan_memory_refusal("candle", "iris_3b_depth", &depth, 1, Some(card))
+                    .is_none(),
+                admitted,
+                "depth full fine-tune at {side}²"
+            );
+        }
+        for (base, config) in [
+            ("iris_3b_restore", &mut restore),
+            ("iris_3b_depth", &mut depth),
+        ] {
+            config
+                .advanced
+                .insert("gradientCheckpointing".into(), serde_json::json!(true));
+            assert_eq!(
+                iris_plan_memory_refusal("candle", base, config, 1, Some(card)),
+                None,
+                "{base} at 1024² under gradient checkpointing ran on this card"
+            );
+        }
+    }
+
+    /// sc-25690: gradient (activation) checkpointing for depth / restoration is a per-lane
+    /// capability. On a lane whose trainer implements it, a run refused at its plain row is told
+    /// the toggle admits it — exactly when the `full_ac` row fits — and a run with the toggle on
+    /// reads that row. On a lane without it, the toggle is refused typed before load and no hint
+    /// is offered.
+    #[test]
+    fn task_gradient_checkpointing_is_offered_and_gated_per_lane() {
+        use sceneworks_core::training::iris::{
+            depth, iris_gradient_checkpointing_lanes, iris_objective_memory_floor, restore,
+            IrisObjective,
+        };
+        let mut depth = depth::iris_depth_target().defaults;
+        depth.resolution = 1024;
+        depth.advanced["iris"]["depth_size"] = serde_json::json!([1024, 1024]);
+        let restore = restore::iris_restore_target().defaults; // the paper's 1024² crop, full
+        for (objective, base, config) in [
+            (IrisObjective::Depth, "iris_3b_depth", &depth),
+            (IrisObjective::Restoration, "iris_3b_restore", &restore),
+        ] {
+            let mut on = config.clone();
+            on.advanced
+                .insert("gradientCheckpointing".into(), serde_json::json!(true));
+            for lane in ["mlx", "candle"] {
+                let supported = iris_gradient_checkpointing_lanes(objective).contains(&lane);
+                let plain = iris_objective_memory_floor(objective, lane, config).unwrap();
+                let checkpointed = iris_objective_memory_floor(objective, lane, &on).unwrap();
+                // A capacity that holds the checkpointed row but not the plain one.
+                let reserve = if lane == "mlx" {
+                    crate::mlx_fit_gate::OS_APP_RESERVE_GB
+                } else {
+                    0.0
+                };
+                if supported {
+                    assert!(checkpointed.gib < plain.gib, "{base} {lane}");
+                    let between = f64::from(checkpointed.gib) + reserve;
+                    let refusal = iris_plan_memory_refusal(lane, base, config, 1, Some(between))
+                        .expect("under the plain row");
+                    assert!(
+                        refusal.contains("With gradient checkpointing on")
+                            && refusal.contains(&format!("needs {} GiB", checkpointed.gib))
+                            && refusal.contains("fits this machine"),
+                        "{base} {lane}: {refusal}"
+                    );
+                    // Not when even the checkpointed row would not fit.
+                    let short =
+                        iris_plan_memory_refusal(lane, base, config, 1, Some(between - 1.0))
+                            .expect("under both rows");
+                    assert!(!short.contains("gradient checkpointing"), "{short}");
+                    // With the toggle on the run is admitted at that capacity, and a refusal of it
+                    // (one GiB short) offers nothing more.
+                    assert_eq!(
+                        iris_plan_memory_refusal(lane, base, &on, 1, Some(between)),
+                        None,
+                        "{base} {lane}"
+                    );
+                    let still = iris_plan_memory_refusal(lane, base, &on, 1, Some(between - 1.0))
+                        .expect("one GiB short of the checkpointed row");
+                    assert!(!still.contains("With gradient checkpointing on"), "{still}");
+                } else {
+                    // The lane's trainer refuses it: no row to offer, no hint, and the toggle
+                    // itself is refused before load however much memory there is.
+                    assert_eq!(checkpointed, plain, "{base} {lane}");
+                    let refusal = iris_plan_memory_refusal(lane, base, config, 1, Some(8.0))
+                        .expect("8 GiB is under");
+                    assert!(!refusal.contains("gradient checkpointing"), "{refusal}");
+                    let toggled = iris_plan_memory_refusal(lane, base, &on, 1, Some(4096.0))
+                        .expect("the toggle is refused on this lane");
+                    assert!(
+                        toggled.contains("checkpointing is not implemented")
+                            && toggled.contains("Turn gradient checkpointing off"),
+                        "{toggled}"
+                    );
+                }
+            }
+        }
+        // A restoration ADAPTER run reads the adapter row either way: nothing to offer.
+        let mut lora = restore.clone();
+        lora.advanced
+            .insert("networkType".into(), serde_json::json!("lora"));
+        let refusal = iris_plan_memory_refusal("candle", "iris_3b_restore", &lora, 1, Some(8.0))
+            .expect("8 GiB is under");
+        assert!(!refusal.contains("gradient checkpointing"), "{refusal}");
     }
 
     /// sc-25690: a refusal names the provenance of the row it read — measured, extrapolated, lower
@@ -584,10 +744,18 @@ mod tests {
         let measured = refusal("iris_3b", &generation_config("full", 512, no_iris.clone()));
         assert!(measured.contains("(a measured floor)"), "{measured}");
         assert!(!measured.contains("not yet measured"), "{measured}");
-        let extrapolated = refusal("iris_3b", &generation_config("full", 1024, no_iris.clone()));
+        // 256² is bounded by the measured 512² row: an extrapolation, never called measured.
+        let extrapolated = refusal("iris_3b", &generation_config("full", 256, no_iris.clone()));
         assert!(
             extrapolated.contains("extrapolated from measured runs"),
             "{extrapolated}"
+        );
+        // 1024² without checkpointing was measured only by spilling off the card.
+        let spilled = refusal("iris_3b", &generation_config("full", 1024, no_iris.clone()));
+        assert!(
+            spilled
+                .contains("(a measured need: on a 96 GB card the run completed only by spilling"),
+            "{spilled}"
         );
         let declared = refusal("iris_3b", &generation_config("lora", 256, no_iris.clone()));
         assert!(
@@ -609,7 +777,9 @@ mod tests {
         assert!(depth.contains("extrapolated from measured runs"), "{depth}");
         let mut restore = restore::iris_restore_target().defaults;
         restore.resolution = 1024;
-        let bound = refusal("iris_3b_restore", &restore);
+        assert!(refusal("iris_3b_restore", &restore).contains("(a measured need"));
+        let bound = iris_plan_memory_refusal("mlx", "iris_3b_restore", &restore, 1, Some(8.0))
+            .expect("8 GiB is under");
         assert!(bound.contains("above a measured lower bound"), "{bound}");
         restore.resolution = 512;
         let restore_measured = refusal("iris_3b_restore", &restore);
@@ -2031,6 +2201,46 @@ mod job_tests {
             other => panic!("refused before load, got {other:?}"),
         }
         assert_eq!(run.seen.loads, 0);
+    }
+
+    /// sc-25690: the shared gradient-checkpointing toggle on a depth run, through the real job
+    /// path. On a lane whose depth trainer implements it the flag reaches the trainer as the
+    /// engine's `gradient_checkpointing`; on a lane that lacks it the job is refused before the
+    /// loader runs, naming where it is implemented.
+    #[test]
+    fn the_depth_checkpointing_toggle_reaches_the_trainer_only_on_a_lane_that_implements_it() {
+        use sceneworks_core::training::iris::{iris_gradient_checkpointing_lanes, IrisObjective};
+        let _env = isolated_env("128");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        stage_task_export(&data, "depth");
+        let plan = task_plan(
+            &data,
+            "iris_3b_depth",
+            task_dataset(&data, "depth", 1, false),
+            |config| {
+                config
+                    .advanced
+                    .insert("gradientCheckpointing".into(), json!(true));
+            },
+        );
+        let run = run_as("iris_3b_depth", Behavior::Completes, plan, &data);
+        let lane = crate::iris_training::training_lane();
+        if iris_gradient_checkpointing_lanes(IrisObjective::Depth).contains(&lane) {
+            assert!(run.outcome.is_ok(), "{:?}\n{:#?}", run.outcome, run.posts);
+            let request = run.seen.request.expect("the trainer ran");
+            assert!(request.config.gradient_checkpointing);
+        } else {
+            match &run.outcome {
+                Err(WorkerError::InvalidPayload(message)) => assert!(
+                    message.contains("checkpointing is not implemented for Iris 3B depth training")
+                        && message.contains("implemented on NVIDIA (Candle/CUDA)"),
+                    "{message}"
+                ),
+                other => panic!("the toggle must be refused before load on {lane}: {other:?}"),
+            }
+            assert_eq!(run.seen.loads, 0, "refused before the loader ran");
+        }
     }
 
     /// The declared depth floor refuses an undersized host before load (MLX: unified memory minus

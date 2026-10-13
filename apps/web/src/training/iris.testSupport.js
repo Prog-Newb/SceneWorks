@@ -156,7 +156,7 @@ export function irisJob({
 const TASK_LIMITS = {
   lrSchedulers: ["constant", "cosine"],
   mixedPrecisions: ["bf16", "f32"],
-  gradientCheckpointing: false,
+  gradientCheckpointingLanes: ["candle"],
   microStepFields: ["steps", "saveEvery", "sampleEvery", "lrWarmupSteps"],
   outputScopes: ["project", "global"],
 };
@@ -192,10 +192,16 @@ export function irisDepthTarget() {
     ui: { label: "Iris 3B Depth", objective: "depth" },
     memoryFloors: {
       unit: "GiB", key: "microBatchPixels", basis: "Depth floors.",
-      lanes: { mlx: { 16384: 64, 307200: 80, 589824: 96 }, candle: { 16384: 68, 307200: 84, 589824: 100 } },
+      lanes: {
+        mlx: { 16384: 64, 307200: 80, 589824: 96 },
+        candle: { 16384: 68, 307200: 84, 589824: 100, 1048576: 111, full_ac: { 307200: 68, 1048576: 68 } },
+      },
       provenance: {
         mlx: { 16384: "declared", 307200: "declared", 589824: "declared" },
-        candle: { 16384: "declared", 307200: "extrapolated", 589824: "extrapolated" },
+        candle: {
+          16384: "declared", 307200: "extrapolated", 589824: "extrapolated", 1048576: "measured_spill",
+          full_ac: { 307200: "extrapolated", 1048576: "measured" },
+        },
       },
     },
   };

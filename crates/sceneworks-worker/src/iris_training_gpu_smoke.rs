@@ -663,6 +663,7 @@ async fn iris_training_gpu_smoke_depth() {
     config.advanced["iris"]["depth_size"] = json!([SIZE, SIZE]);
     config.advanced["iris"]["preview_items"] = json!(1);
     config.advanced["iris"]["keep_last_checkpoints"] = json!(1);
+    let base_config = config.clone();
     let model_id = "finetune_depth_smoke";
     let output_dir = data_dir.join("models/finetunes").join(model_id);
     let plan = sceneworks_core::training::build_training_plan(
@@ -693,6 +694,17 @@ async fn iris_training_gpu_smoke_depth() {
         .await
         .expect("the Iris depth training job completes");
     let train_seconds = started.elapsed().as_secs_f64();
+    let checkpointing = checkpointing_capability(
+        &settings,
+        &posts,
+        &project.id,
+        &target,
+        &dataset,
+        &root,
+        base_config,
+        "depth",
+    )
+    .await;
     let result = completed_result(&posts, JOB);
     assert_eq!(result["stepsCompleted"], STEPS, "{result:#}");
     assert!(
@@ -750,7 +762,8 @@ async fn iris_training_gpu_smoke_depth() {
     assert!(map.values.iter().all(|v| v.is_finite()));
     eprintln!(
         "RESULT status=pass trainer=iris_3b_depth backend={} steps={STEPS} size={SIZE} \
-         final_loss={} train_s={train_seconds:.1} export={} depth_job_model={model_id}",
+         {checkpointing} final_loss={} train_s={train_seconds:.1} export={} \
+         depth_job_model={model_id}",
         if cfg!(target_os = "macos") {
             "mlx"
         } else {
@@ -848,6 +861,7 @@ async fn run_restore_training_smoke(full: bool) {
     let target = task_target("iris_3b_restore");
     let config = restore_smoke_config(full);
     let gate = admitted_floor(&settings, "iris_3b_restore", &config).await;
+    let base_config = config.clone();
     let model_name = format!("finetune_restore_{arm}_smoke");
     let model_id = model_name.as_str();
     let output_dir = data_dir.join("models/finetunes").join(model_id);
@@ -879,6 +893,23 @@ async fn run_restore_training_smoke(full: bool) {
         .await
         .expect("the Iris restoration training job completes (training resources verified)");
     let train_seconds = started.elapsed().as_secs_f64();
+    // The paper's FULL arm carries the checkpointing question (its `full_ac` rows); the LoRA arm
+    // reads the adapter rows either way.
+    let checkpointing = if full {
+        checkpointing_capability(
+            &settings,
+            &posts,
+            &project.id,
+            &target,
+            &dataset,
+            &root,
+            base_config,
+            "restore",
+        )
+        .await
+    } else {
+        String::new()
+    };
     let result = completed_result(&posts, job_id);
     assert_eq!(result["stepsCompleted"], STEPS, "{result:#}");
     assert!(
@@ -936,7 +967,8 @@ async fn run_restore_training_smoke(full: bool) {
     assert_eq!(restored.dimensions(), (128, 96));
     eprintln!(
         "RESULT status=pass trainer=iris_3b_restore arm={arm} backend={} steps={STEPS} crop={SIZE} \
-         {gate} final_loss={} train_s={train_seconds:.1} export={} restore_job_model={model_id}",
+         {gate} {checkpointing} final_loss={} train_s={train_seconds:.1} export={} \
+         restore_job_model={model_id}",
         if cfg!(target_os = "macos") {
             "mlx"
         } else {
@@ -997,6 +1029,161 @@ async fn spawn_cancellable_api_stub(cancel: CancelSwitch) -> (String, ProgressPo
         axum::serve(listener, app).await.unwrap();
     });
     (format!("http://{address}"), posts)
+}
+
+/// What THIS lane's own trainer says to gradient (activation) checkpointing for `plan`'s task: the
+/// production load (`preflight_training_run` → `TrainerLoadInputs` → `load_trainer`) and the
+/// trainer's own `validate`, with the engine flag forced on. `Err` carries the trainer's refusal.
+async fn engine_checkpointing_answer(
+    settings: &Settings,
+    plan: &sceneworks_core::training::TrainingPlan,
+) -> Result<(), String> {
+    let (settings, plan) = (settings.clone(), plan.clone());
+    tokio::task::spawn_blocking(move || {
+        let crate::training_jobs::PreparedTrainingRun {
+            engine_id,
+            mut request,
+            prepared_inputs,
+        } = crate::training_jobs::preflight_training_run(&settings, &plan, false)
+            .expect("the probe plan preflights");
+        request.config.gradient_checkpointing = true;
+        let spec = crate::training_jobs::TrainerLoadInputs::resolve(&settings, &plan, engine_id)
+            .expect("the task's weights resolve")
+            .load_spec(engine_id, &request.config.train_dtype);
+        let answer = crate::inference_runtime::load_trainer(engine_id, &spec)
+            .and_then(|trainer| trainer.validate(&request))
+            .map_err(|error| error.to_string());
+        drop(request);
+        crate::training_jobs::finish_prepared_input_operation(Ok(()), prepared_inputs)
+            .expect("the probe's prepared inputs close");
+        answer
+    })
+    .await
+    .expect("the engine probe thread joins")
+}
+
+/// The verdict on the per-lane table `iris_gradient_checkpointing_lanes` against what the lane's
+/// trainer actually answered. The engine publishes no declaration of this capability, so the table
+/// is explicit — and this is what makes a drift loud: a lane whose trainer STARTS accepting it
+/// while the table still says no fails here, naming what to do.
+fn checkpointing_table_verdict(
+    task: &str,
+    lane: &str,
+    listed: bool,
+    answer: &Result<(), String>,
+) -> Result<(), String> {
+    match (answer, listed) {
+        (Ok(()), true) => Ok(()),
+        (Err(refusal), false) if refusal.contains("checkpointing") => Ok(()),
+        (Ok(()), false) => Err(format!(
+            "the {lane} Iris {task} trainer now ACCEPTS gradient (activation) checkpointing, but \
+             `iris_gradient_checkpointing_lanes` does not list {lane}: add the lane there, measure \
+             its `full_ac` floor rows and add them to the {task} floor table"
+        )),
+        (Err(refusal), true) => Err(format!(
+            "`iris_gradient_checkpointing_lanes` lists {lane} for {task}, but its trainer refuses \
+             gradient checkpointing: {refusal}"
+        )),
+        (Err(other), false) => Err(format!(
+            "the {lane} Iris {task} trainer failed for a reason other than checkpointing, so its \
+             answer is unknown: {other}"
+        )),
+    }
+}
+
+/// sc-25690: the depth / restoration gradient-checkpointing capability on this lane, on real
+/// weights. (1) Ask the lane's own trainer and hold `iris_gradient_checkpointing_lanes` to its
+/// answer ([`checkpointing_table_verdict`]). (2) On a lane that implements it, run a short job
+/// through the production path WITH the toggle on — admitted at the lane's `full_ac` row — and
+/// require it to complete; on a lane that does not, require the job path to refuse the toggle
+/// before load. Returns the evidence for the smoke's RESULT line.
+#[allow(clippy::too_many_arguments)]
+async fn checkpointing_capability(
+    settings: &Settings,
+    posts: &ProgressPosts,
+    project_id: &str,
+    target: &sceneworks_core::training::TrainingTarget,
+    dataset: &sceneworks_core::training::TrainingDataset,
+    dataset_root: &Path,
+    mut config: sceneworks_core::training::TrainingConfig,
+    task: &str,
+) -> String {
+    use sceneworks_core::training::iris::{iris_gradient_checkpointing_lanes, IrisObjective};
+    const STEPS: u32 = 2;
+    let objective =
+        IrisObjective::from_base_model(&target.base_model).expect("an Iris task target");
+    let lane = crate::iris_training::training_lane();
+    let listed = iris_gradient_checkpointing_lanes(objective).contains(&lane);
+    config.steps = STEPS;
+    config.save_every = STEPS;
+    config.advanced.insert("sampleEvery".into(), json!(STEPS));
+    let backbone = crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, BACKBONE_REPO)
+        .expect("HF_HUB_CACHE holds the pinned speridlabs/iris-3b snapshot");
+    let build = |suffix: &str, config| {
+        let id = format!("finetune_{task}_{suffix}");
+        let job = format!("iris-{task}-{suffix}");
+        let output_dir = settings.data_dir.join("models/finetunes").join(&id);
+        let plan = sceneworks_core::training::build_training_plan(
+            sceneworks_core::training::BuildTrainingPlan {
+                job_id: &job,
+                target,
+                dataset,
+                config,
+                preset: None,
+                lora_id: &id,
+                base_model_path: backbone.display().to_string(),
+                dataset_root,
+                output_dir: &output_dir,
+                file_name: format!("{task}_{suffix}.safetensors"),
+                created_at: "2026-10-13T00:00:00Z".to_owned(),
+            },
+        )
+        .expect("the checkpointing plan builds from the real target");
+        (job, plan)
+    };
+
+    // 1. The lane's own trainer, asked directly.
+    let (_, probe) = build("ac_probe", config.clone());
+    let answer = engine_checkpointing_answer(settings, &probe).await;
+    checkpointing_table_verdict(task, lane, listed, &answer)
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    // 2. The product path with the toggle on.
+    let mut on = config;
+    on.advanced
+        .insert("gradientCheckpointing".into(), json!(true));
+    let (job_id, plan) = build("ac_run", on.clone());
+    let mut snapshot = stub_job_snapshot(&job_id, "lora_train", project_id);
+    snapshot["payload"] = json!({ "dryRun": false, "plan": plan });
+    let job: JobSnapshot = serde_json::from_value(snapshot).unwrap();
+    let api = ApiClient::new(settings);
+    let started = std::time::Instant::now();
+    let outcome = crate::training_jobs::run_training_execution(&api, settings, &job, &plan).await;
+    if listed {
+        let gate = admitted_floor(settings, &target.base_model, &on).await;
+        outcome.unwrap_or_else(|error| panic!("the checkpointed {task} job completes: {error}"));
+        let result = completed_result(posts, &job_id);
+        assert_eq!(result["stepsCompleted"], STEPS, "{result:#}");
+        format!(
+            "checkpointing_lane={lane} engine_accepts=true checkpointed_run=pass \
+             checkpointed_steps={STEPS} checkpointed_s={:.1} checkpointed_{gate}",
+            started.elapsed().as_secs_f64()
+        )
+    } else {
+        match outcome {
+            Err(WorkerError::InvalidPayload(message))
+                if message.contains("checkpointing is not implemented") =>
+            {
+                format!(
+                    "checkpointing_lane={lane} engine_accepts=false checkpointed_run=refused_before_load"
+                )
+            }
+            other => panic!(
+                "on {lane} the {task} job path must refuse the gradient checkpointing toggle \
+                 before load, got {other:?}"
+            ),
+        }
+    }
 }
 
 /// The floor row the admission gate reads for `config` on this lane, and the capacity it is judged
@@ -2278,6 +2465,47 @@ mod unit {
                 "{lane}: restoration full fine-tune at 256²"
             );
         }
+    }
+
+    /// The table of lanes that implement task gradient checkpointing is held to the trainer's own
+    /// answer: agreement passes; a trainer that starts accepting it on an unlisted lane, a listed
+    /// lane whose trainer refuses, and an unrelated failure each fail, saying which.
+    #[test]
+    fn the_checkpointing_lane_table_is_held_to_the_trainers_answer() {
+        let refuses = Err(
+            "iris_3b_depth trainer: gradient (activation) checkpointing is not implemented for \
+             the depth task on the MLX backend"
+                .to_owned(),
+        );
+        assert_eq!(
+            checkpointing_table_verdict("depth", "candle", true, &Ok(())),
+            Ok(())
+        );
+        assert_eq!(
+            checkpointing_table_verdict("depth", "mlx", false, &refuses),
+            Ok(())
+        );
+        // The MLX twin lands: the trainer accepts, the table still says no -> loud, with the fix.
+        let drift = checkpointing_table_verdict("depth", "mlx", false, &Ok(())).unwrap_err();
+        assert!(
+            drift.contains("now ACCEPTS")
+                && drift.contains("add the lane")
+                && drift.contains("full_ac"),
+            "{drift}"
+        );
+        assert!(
+            checkpointing_table_verdict("restoration", "candle", true, &refuses)
+                .unwrap_err()
+                .contains("lists candle")
+        );
+        assert!(checkpointing_table_verdict(
+            "depth",
+            "mlx",
+            false,
+            &Err("weights missing".to_owned())
+        )
+        .unwrap_err()
+        .contains("other than checkpointing"));
     }
 
     const APPS: &str = "4321, GPU-aaaa\n8765, GPU-bbbb\n999, GPU-aaaa\n";

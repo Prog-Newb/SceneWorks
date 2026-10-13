@@ -13,6 +13,7 @@ import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Val
 import { numberFromDraft } from "../../training/drafts.js";
 import {
   choiceOptionsForTarget,
+  gradientCheckpointingLanes,
   gradientCheckpointingUnsupported,
   lossTypeOptions,
   ltx25WorkflowPlan,
@@ -546,7 +547,8 @@ export function ConfigureJobPanel({
   const visibleTimestepBiasOptions = choiceOptionsForTarget(selectedTarget, "timestepBiases", timestepBiasOptions);
   const visibleLossTypeOptions = choiceOptionsForTarget(selectedTarget, "lossTypes", lossTypeOptions);
   const advertisedPrecisions = choiceOptionsForTarget(selectedTarget, "mixedPrecisions", null);
-  const checkpointingUnsupported = gradientCheckpointingUnsupported(selectedTarget);
+  const checkpointingUnsupported = gradientCheckpointingUnsupported(selectedTarget, irisContext.trainingLane ?? null);
+  const checkpointingLanes = gradientCheckpointingLanes(selectedTarget);
   const sampleCountRange = Array.isArray(selectedTarget?.limits?.sampleCount) ? selectedTarget.limits.sampleCount : null;
   // Iris (sc-25685): generation shows the generation options; depth / restoration (sc-25687 /
   // sc-25688) take no prompt, no sampler and no trigger word, and always produce a model.
@@ -564,7 +566,13 @@ export function ConfigureJobPanel({
         configDraft.networkType,
         floorSize,
         irisContext.trainingLane ?? null,
-        configDraft.iris?.activation_checkpointing,
+        // Generation's policy option; a depth / restoration run under the shared toggle reads the
+        // same `full_ac` rows (irisOptions.js picks them only where the lane's table has them).
+        iris
+          ? configDraft.iris?.activation_checkpointing
+          : configDraft.gradientCheckpointing && !checkpointingUnsupported
+            ? "full"
+            : undefined,
       )
     : [];
   const laneNames = { mlx: "MLX (Apple Silicon unified memory)", candle: "Candle/CUDA (GPU memory)" };
@@ -1198,7 +1206,13 @@ export function ConfigureJobPanel({
             )}
 
             <div className="training-advanced-toggles">
-              {checkpointingUnsupported ? (
+              {checkpointingUnsupported && checkpointingLanes ? (
+                <p className="training-field-hint" aria-label="Gradient checkpointing availability">
+                  Gradient checkpointing for this target is implemented on{" "}
+                  {checkpointingLanes.map((lane) => laneNames[lane] ?? lane).join(" and ") || "no backend yet"}, not on this
+                  machine&apos;s backend, so it is not applied here. Lower the training size if the run does not fit.
+                </p>
+              ) : checkpointingUnsupported ? (
                 <p className="training-field-hint">
                   This target's trainer does not implement gradient checkpointing, so it is not applied. Lower the
                   training resolution if the run does not fit.

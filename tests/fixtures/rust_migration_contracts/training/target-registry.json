@@ -2255,7 +2255,7 @@
         ]
       },
       "memoryFloors": {
-        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by artifact and training resolution; `full_ac` is a full fine-tune under full activation checkpointing. Measured rows are the whole-process peak of a real full fine-tune at batch 1, converted to GiB, plus a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without that being need. Each row carries its own provenance. Measured at the row's own shape: mlx full 512; mlx full 1024; mlx full_ac 1024; candle full 512; candle full_ac 1024. Extrapolated from measured rows: mlx full 256; mlx full_ac 256; mlx full_ac 512; candle full 1024; candle full_ac 512. Declared, not measured: mlx adapter 256; mlx adapter 512; mlx adapter 1024; candle adapter 256; candle adapter 512; candle adapter 1024; candle full 256; candle full_ac 256. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
+        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by artifact and training resolution; `full_ac` is a full fine-tune under full activation checkpointing. Measured rows are the whole-process peak of a real full fine-tune at batch 1, converted to GiB, plus a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without that being need. Candle peaks are the live pool peak over six optimizer steps (steady from step 2) on a 95.59 GiB card; a row marked measured_spill is a need the run met only by spilling to system memory, so it does not fit that card. Each row carries its own provenance. Measured at the row's own shape: mlx full 512; mlx full 1024; mlx full_ac 1024; candle full 512; candle full_ac 512; candle full_ac 1024. Measured need that did not fit the measuring device (completed only by spilling to system memory): candle full 1024. Extrapolated from measured rows: mlx full 256; mlx full_ac 256; mlx full_ac 512; candle full 256; candle full_ac 256. Declared, not measured: mlx adapter 256; mlx adapter 512; mlx adapter 1024; candle adapter 256; candle adapter 512; candle adapter 1024. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
         "lanes": {
           "candle": {
             "adapter": {
@@ -2264,14 +2264,14 @@
               "512": 32
             },
             "full": {
-              "1024": 130,
-              "256": 80,
-              "512": 93
+              "1024": 122,
+              "256": 79,
+              "512": 79
             },
             "full_ac": {
-              "1024": 88,
-              "256": 80,
-              "512": 88
+              "1024": 79,
+              "256": 67,
+              "512": 67
             }
           },
           "mlx": {
@@ -2300,14 +2300,14 @@
               "512": "declared"
             },
             "full": {
-              "1024": "extrapolated",
-              "256": "declared",
+              "1024": "measured_spill",
+              "256": "extrapolated",
               "512": "measured"
             },
             "full_ac": {
               "1024": "measured",
-              "256": "declared",
-              "512": "extrapolated"
+              "256": "extrapolated",
+              "512": "measured"
             }
           },
           "mlx": {
@@ -2398,7 +2398,9 @@
           1,
           64
         ],
-        "gradientCheckpointing": false,
+        "gradientCheckpointingLanes": [
+          "candle"
+        ],
         "lossTypes": [
           "l1"
         ],
@@ -2459,14 +2461,22 @@
       },
       "irisObjective": "depth",
       "memoryFloors": {
-        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by the pixels of one micro-batch (batch size × training height × width). Evidence is the whole-process peak of a real full fine-tune of the 3B depth model at batch 1, converted to GiB, plus a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without that being need. Each row carries its own provenance. Measured at the row's own shape: mlx 262144; mlx 1048576. Extrapolated from measured rows: mlx 16384; mlx 307200; mlx 589824; candle 307200; candle 589824; candle 1048576. Declared, not measured: candle 16384. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
+        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by the pixels of one micro-batch (batch size × training height × width); `full_ac` holds the rows of a run under gradient (activation) checkpointing on the lanes that implement it. Evidence is the whole-process peak of a real full fine-tune of the 3B depth model at batch 1, converted to GiB, plus a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without that being need. Candle peaks are the live pool peak over six optimizer steps (steady from step 2) on a 95.59 GiB card; a row marked measured_spill is a need the run met only by spilling to system memory, so it does not fit that card. Each row carries its own provenance. Measured at the row's own shape: mlx 262144; mlx 1048576; candle 262144; candle full_ac 1048576. Measured need that did not fit the measuring device (completed only by spilling to system memory): candle 1048576. Extrapolated from measured rows: mlx 16384; mlx 307200; mlx 589824; candle 307200; candle 589824; candle full_ac 262144; candle full_ac 307200; candle full_ac 589824. Declared, not measured: candle 16384; candle full_ac 16384. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
         "key": "microBatchPixels",
         "lanes": {
           "candle": {
-            "1048576": 119,
+            "1048576": 111,
             "16384": 68,
-            "307200": 85,
-            "589824": 98
+            "262144": 68,
+            "307200": 71,
+            "589824": 86,
+            "full_ac": {
+              "1048576": 68,
+              "16384": 68,
+              "262144": 68,
+              "307200": 68,
+              "589824": 68
+            }
           },
           "mlx": {
             "1048576": 89,
@@ -2478,10 +2488,18 @@
         },
         "provenance": {
           "candle": {
-            "1048576": "extrapolated",
+            "1048576": "measured_spill",
             "16384": "declared",
+            "262144": "measured",
             "307200": "extrapolated",
-            "589824": "extrapolated"
+            "589824": "extrapolated",
+            "full_ac": {
+              "1048576": "measured",
+              "16384": "declared",
+              "262144": "extrapolated",
+              "307200": "extrapolated",
+              "589824": "extrapolated"
+            }
           },
           "mlx": {
             "1048576": "measured",
@@ -2558,7 +2576,9 @@
           1,
           16
         ],
-        "gradientCheckpointing": false,
+        "gradientCheckpointingLanes": [
+          "candle"
+        ],
         "lossTypes": [
           "mse"
         ],
@@ -2614,7 +2634,7 @@
       },
       "irisObjective": "restoration",
       "memoryFloors": {
-        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by artifact and the pixels of one micro-batch (batch size × crop²). Measured rows are the whole-process peak of the paper's full recipe at batch 1, converted to GiB, plus a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without that being need. Each row carries its own provenance. Measured at the row's own shape: mlx full 262144; candle full 65536; candle full 262144. Extrapolated from measured rows: mlx full 65536. Declared above a measured lower bound: mlx full 1048576; candle full 1048576. Declared, not measured: mlx adapter 65536; mlx adapter 262144; mlx adapter 1048576; candle adapter 65536; candle adapter 262144; candle adapter 1048576. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
+        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by artifact and the pixels of one micro-batch (batch size × crop²). Measured rows are the whole-process peak of the paper's full recipe at batch 1, converted to GiB, plus a 2 GiB reserve; `full_ac` is the full fine-tune under gradient (activation) checkpointing on the lanes that implement it. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without that being need. Candle peaks are the live pool peak over six optimizer steps (steady from step 2) on a 95.59 GiB card; a row marked measured_spill is a need the run met only by spilling to system memory, so it does not fit that card. Each row carries its own provenance. Measured at the row's own shape: mlx full 262144; candle full 65536; candle full 262144; candle full_ac 1048576. Measured need that did not fit the measuring device (completed only by spilling to system memory): candle full 1048576. Extrapolated from measured rows: mlx full 65536; candle full_ac 65536; candle full_ac 262144. Declared above a measured lower bound: mlx full 1048576. Declared, not measured: mlx adapter 65536; mlx adapter 262144; mlx adapter 1048576; candle adapter 65536; candle adapter 262144; candle adapter 1048576. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
         "key": "microBatchPixels",
         "lanes": {
           "candle": {
@@ -2624,9 +2644,14 @@
               "65536": 32
             },
             "full": {
-              "1048576": 140,
-              "262144": 95,
-              "65536": 95
+              "1048576": 136,
+              "262144": 84,
+              "65536": 73
+            },
+            "full_ac": {
+              "1048576": 83,
+              "262144": 83,
+              "65536": 73
             }
           },
           "mlx": {
@@ -2650,9 +2675,14 @@
               "65536": "declared"
             },
             "full": {
-              "1048576": "lower_bound",
+              "1048576": "measured_spill",
               "262144": "measured",
               "65536": "measured"
+            },
+            "full_ac": {
+              "1048576": "measured",
+              "262144": "extrapolated",
+              "65536": "extrapolated"
             }
           },
           "mlx": {

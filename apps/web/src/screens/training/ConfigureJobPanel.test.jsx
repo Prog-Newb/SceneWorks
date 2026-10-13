@@ -701,6 +701,43 @@ describe("Iris depth / restoration (sc-25687 / sc-25688)", () => {
     return configValidity;
   };
 
+  const checkpointingToggle = () =>
+    [...container.querySelectorAll("label.training-checkbox-field")].find((label) => label.textContent.includes("Gradient checkpointing"));
+
+  it("offers gradient checkpointing for a task on a lane that implements it, with the full_ac floor", () => {
+    mountTask(irisDepthTarget(), { irisContext: { trainingLane: "candle" } });
+    expect(checkpointingToggle()).toBeDefined();
+    expect(container.querySelector('[aria-label="Gradient checkpointing availability"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Memory floor"]').textContent).toContain("84 GiB (extrapolated");
+    // Toggle on: the hint reads the lane's full_ac row, as the gate does.
+    const selectedTarget = irisDepthTarget();
+    const configDraft = { ...configDraftFromTarget(selectedTarget, DATASET, ["auto"]), outputName: "out", gradientCheckpointing: true };
+    act(() =>
+      root.render(
+        <ConfigureJobPanel
+          {...baseProps({ selectedTarget, configDraft, showAdvancedConfig: true, isFullFinetune: true, irisContext: { trainingLane: "candle" } })}
+        />,
+      ),
+    );
+    expect(container.querySelector('[aria-label="Memory floor"]').textContent).toContain("68 GiB (extrapolated");
+  });
+
+  it("explains where gradient checkpointing is implemented on a lane that lacks it", () => {
+    const selectedTarget = irisDepthTarget();
+    const configDraft = { ...configDraftFromTarget(selectedTarget, DATASET, ["auto"]), outputName: "out", gradientCheckpointing: true };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({ selectedTarget, configDraft, showAdvancedConfig: true, isFullFinetune: true, irisContext: { trainingLane: "mlx" } })}
+      />,
+    );
+    expect(checkpointingToggle()).toBeUndefined();
+    const why = container.querySelector('[aria-label="Gradient checkpointing availability"]');
+    expect(why.textContent).toContain("implemented on Candle/CUDA (GPU memory)");
+    expect(container.textContent).not.toContain("does not implement gradient checkpointing");
+    // A stale toggle never moves the floor on a lane that would refuse it.
+    expect(container.querySelector('[aria-label="Memory floor"]').textContent).toContain("80 GiB (declared");
+  });
+
   it("hides the prompt/sampler controls, shows the start, size and invalid-example policy, and is ready", () => {
     const validity = mountTask(irisDepthTarget(), { irisContext: { checkDataset: async () => ({}) } });
     expect(validity.ready).toBe(true);
