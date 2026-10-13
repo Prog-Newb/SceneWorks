@@ -1766,12 +1766,14 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo test -p sceneworks-worker --features backend-candle --release %IRIS_TRAINING_FILTER% -- --ignored --nocapture --test-threads=1
+          cargo test -p sceneworks-worker --features backend-candle --release %IRIS_TRAINING_FILTER% -- --ignored --nocapture --test-threads=1 --skip iris_two_card_distributed_smoke
       # SC-25690 (epic 25678 acceptance 5): REAL two-GPU distributed training through the job path —
       # DDP on two cards canceled after a durable checkpoint and resumed, a killed rank failing the
       # job typed, and FSDP on two cards. Each rank's card is read from the run (its own pid's
-      # context in nvidia-smi), not from the plan. Its name is deliberately outside the
-      # `iris_training_gpu_smoke` filter: the one-card dispatches above never select it.
+      # context in nvidia-smi), not from the plan. It lives in the `iris_training_gpu_smoke`
+      # module, so the one-card step's filter matches its path: that step passes
+      # `--skip iris_two_card_distributed_smoke` (run 38455663460 showed the default dispatch
+      # selecting it on one card, where it refuses).
       - name: Run the Iris-3B two-card distributed smoke
         if: ${{ inputs.iris_smoke_cards == '0,1' }}
         shell: cmd

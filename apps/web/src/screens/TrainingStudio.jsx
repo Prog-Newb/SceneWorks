@@ -933,7 +933,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     } catch {
       return null;
     }
-  }, [irisSelected, activeDataset, configDraft, selectedPreset, selectedTarget]);
+  }, [irisSelected, activeDataset, configDraft, selectedPreset, selectedTarget, macCapabilities]);
   const irisPlanCheck = useIrisPlanCheck({ enabled: irisSelected, targetId: selectedTarget?.id, config: irisPlanConfig, token });
   const irisResumeMetrics = useIrisMetrics(irisSelected ? configDraft.resumeFromJobId : "", token);
   const irisContext = useMemo(() => {
