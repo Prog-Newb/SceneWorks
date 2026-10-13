@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:918001dbd9564ac60281a18d6492b6f2ae459ca0e1115b9234f314ecc1692739",
+    "sceneWorksRevision": "source-tree:5960bbdce16bb5a5bb2dcca693732a5f9f854b725a8e2ab5c43a927a327b1224",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "24803359380460bd43482e079e60351f4b60d81329454a4f7e00e16156cb0b89"
+        "sha256": "1a3c2f23e1d8768468707195a34d80b070214e8652faf84a31f0902a9210c26d"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -69,15 +69,15 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "7db55ec08bbd97bfda4056d7a5bc22d2963b295cc0c44d85a1a85bb7eb8ffa39"
+        "sha256": "9dbf5745ac368efa5bffae151a3dad706f6f9d56aec77a3f193168eb0196a599"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "451b91032c57817d8c667ee0070ba6685d7fcff99d6906e0c8949548af07c11a"
+        "sha256": "f250526b1b2128c83ad19b36341cd6287376134d727173bee1f6c4c3c4871318"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "4194ef6b62bb6b2e14a53d4b5271c170df5911e22a5907beaae599d72d35db04"
+        "sha256": "3c71fa2c7676224e6bfee0950491622adef416b6d60a37f7b2faea04fb8fde2d"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9590,
-    "publishedCells": 3868,
-    "elidedCells": 5722,
+    "publishedCells": 3872,
+    "elidedCells": 5718,
     "elidedByState": {
-      "Implemented": 1242,
+      "Implemented": 1238,
       "Missing": 4480
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -174,9 +174,9 @@
         "reason": "a utility-modality entry with its own engine memory-strategy contract (a composed, resident-only route registered by mlx-gen-iris and candle-gen-iris): outside the image/video matrix universe by modality, and anchored — planned, armed and closed over on both lanes"
       }
     ],
-    "anchors": 250,
-    "analyticOnlyCells": 101,
-    "anchoredCells": 3864,
+    "anchors": 251,
+    "analyticOnlyCells": 100,
+    "anchoredCells": 3870,
     "staleAnchors": 250,
     "attestedAnchors": 0,
     "fullModels": 0
@@ -6026,6 +6026,24 @@
       "current": false,
       "currencyAttestation": null,
       "cells": 55
+    },
+    {
+      "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
+      "modelId": "iris_3b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "provider": "iris_3b",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-25690/iris-3b-bf16-mlx-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 6
     },
     {
       "id": "kolors:mlx:bf16:base:base:kolors-bf16-mlx-shared-ladder-v1:imc-95a91671619b4e40f246",
@@ -13290,11 +13308,11 @@
       "backend": "mlx",
       "rung": "resident",
       "coordinates": 2,
-      "published": 0,
-      "elided": 2,
+      "published": 2,
+      "elided": 0,
       "implemented": 2,
       "states": {
-        "Implemented": 2
+        "Anchored": 2
       }
     },
     {
@@ -13302,11 +13320,11 @@
       "backend": "mlx",
       "rung": "staged_residency",
       "coordinates": 2,
-      "published": 0,
-      "elided": 2,
+      "published": 2,
+      "elided": 0,
       "implemented": 2,
       "states": {
-        "Implemented": 2
+        "Anchored": 2
       }
     },
     {
@@ -88566,7 +88584,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 25678,
@@ -88583,7 +88608,121 @@
             "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: iris_3b denoises in pixel space, so there is no latent, no autoencoder and no decoder scratch to tile (the decode phase is the [-1, 1] to RGB8 conversion)."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "iris_3b:iris_3b:mlx:bf16:text_to_image:lora:resident",
+      "modelId": "iris_3b",
+      "resolvedRoute": "iris_3b",
+      "provider": "iris_3b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344",
+          "768x768",
+          "512x512"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 25678,
+      "owningModelStory": 25679,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "iris_3b:iris_3b:mlx:bf16:text_to_image:lora:staged_residency",
+      "modelId": "iris_3b",
+      "resolvedRoute": "iris_3b",
+      "provider": "iris_3b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344",
+          "768x768",
+          "512x512"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 25678,
+      "owningModelStory": 25679,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0"
+          }
+        ]
       }
     },
     {
@@ -88612,7 +88751,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 25678,
@@ -88629,7 +88775,121 @@
             "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: iris_3b denoises in pixel space, so there is no latent, no autoencoder and no decoder scratch to tile (the decode phase is the [-1, 1] to RGB8 conversion)."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "iris_3b:iris_3b:mlx:bf16:text_to_image:none:resident",
+      "modelId": "iris_3b",
+      "resolvedRoute": "iris_3b",
+      "provider": "iris_3b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344",
+          "768x768",
+          "512x512"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 25678,
+      "owningModelStory": 25679,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "iris_3b:iris_3b:mlx:bf16:text_to_image:none:staged_residency",
+      "modelId": "iris_3b",
+      "resolvedRoute": "iris_3b",
+      "provider": "iris_3b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344",
+          "768x768",
+          "512x512"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 25678,
+      "owningModelStory": 25679,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0"
+          }
+        ]
       }
     },
     {
@@ -243659,7 +243919,11 @@
       "iris_3b:iris_3b:candle:bf16:text_to_image:lora:bounded_decode",
       "iris_3b:iris_3b:candle:bf16:text_to_image:none:bounded_decode",
       "iris_3b:iris_3b:mlx:bf16:text_to_image:lora:bounded_decode",
-      "iris_3b:iris_3b:mlx:bf16:text_to_image:none:bounded_decode"
+      "iris_3b:iris_3b:mlx:bf16:text_to_image:lora:resident",
+      "iris_3b:iris_3b:mlx:bf16:text_to_image:lora:staged_residency",
+      "iris_3b:iris_3b:mlx:bf16:text_to_image:none:bounded_decode",
+      "iris_3b:iris_3b:mlx:bf16:text_to_image:none:resident",
+      "iris_3b:iris_3b:mlx:bf16:text_to_image:none:staged_residency"
     ],
     "kolors": [
       "kolors:kolors:mlx:bf16:character_image:control:resident",
