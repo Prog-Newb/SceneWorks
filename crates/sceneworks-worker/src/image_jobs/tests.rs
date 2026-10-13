@@ -27998,8 +27998,9 @@ fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw
         .0;
     assert!(
         selection_block
-            .contains("let telemetry = evaluation.selection_telemetry(engine_id, tier);"),
-        "the shared selection must build its telemetry from the evaluation the selector produced"
+            .contains("let telemetry = evaluation.selection_telemetry(engine_id, shared_tier);"),
+        "the shared selection must build its telemetry from the evaluation the selector produced, \
+         under the tier the selector bound it to (sc-25690: `candle_shared_memory_tier`)"
     );
     assert!(
         selection_block.contains("emit_event(\"image_memory_strategy_selected\", telemetry);"),

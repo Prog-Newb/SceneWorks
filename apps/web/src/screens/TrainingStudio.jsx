@@ -929,11 +929,11 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const irisPlanConfig = useMemo(() => {
     if (!irisSelected || !activeDataset || !selectedTarget) return null;
     try {
-      return trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget }).config;
+      return trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, trainingLane: trainingLaneFromCapabilities(macCapabilities) }).config;
     } catch {
       return null;
     }
-  }, [irisSelected, activeDataset, configDraft, selectedPreset, selectedTarget]);
+  }, [irisSelected, activeDataset, configDraft, selectedPreset, selectedTarget, macCapabilities]);
   const irisPlanCheck = useIrisPlanCheck({ enabled: irisSelected, targetId: selectedTarget?.id, config: irisPlanConfig, token });
   const irisResumeMetrics = useIrisMetrics(irisSelected ? configDraft.resumeFromJobId : "", token);
   const irisContext = useMemo(() => {
@@ -967,7 +967,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
             projectId: activeProject?.id,
             datasetId: activeDataset?.id,
             targetId: selectedTarget.id,
-            config: trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget }).config,
+            config: trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, trainingLane: trainingLaneFromCapabilities(macCapabilities) }).config,
           },
           { token },
         ),
@@ -2351,7 +2351,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
       // The dry-run mode selector is gone (sc-10492); the studio only ever queues a
       // real training job. The API still accepts dryRun, so send it explicitly.
       const dryRun = false;
-      const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun });
+      const snapshot = trainingConfigSnapshot({
+        activeDataset,
+        configDraft,
+        selectedPreset,
+        selectedTarget,
+        dryRun,
+        trainingLane: trainingLaneFromCapabilities(macCapabilities),
+      });
       const job = await createTrainingJob({
         targetId: snapshot.targetId,
         datasetId: snapshot.datasetId,

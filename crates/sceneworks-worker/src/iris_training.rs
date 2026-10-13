@@ -10,9 +10,10 @@
 //!   train on 640). The trainer prints that on stderr only, so SceneWorks computes it from the SAME
 //!   `gen_core::iris::train::DataWalk` the trainer walks and surfaces it before launch (the API's
 //!   data-walk endpoint) and in the job (progress message, structured log event and result);
-//! * the **declared memory floor** gate — a routed Iris training lane is never admitted unbounded:
-//!   a host under `sceneworks_core::training::iris::iris_training_memory_floor_gb` is refused
-//!   before the model loads (and so is a host whose capacity cannot be read).
+//! * the **memory floor** gate — a routed Iris training lane is never admitted unbounded: a host
+//!   under its floor row (`sceneworks_core::training::iris::floors`, GiB against a capacity in GiB)
+//!   is refused before the model loads (and so is a host whose capacity cannot be read). The
+//!   refusal names the row's own provenance — measured, extrapolated, lower bound or declared.
 
 use std::path::{Path, PathBuf};
 
@@ -86,13 +87,13 @@ pub(crate) fn device_noun(lane: &str) -> &'static str {
 }
 
 /// The admission decision for a whole Iris run (sc-25689) on a worker with `devices` accelerators:
-/// the declared floor of ONE rank (+ the REPA teacher) times the ranks sharing the busiest device,
-/// against that device's capacity. Missing evidence refuses, exactly like [`iris_memory_refusal`].
+/// the floor of ONE rank (+ the REPA teacher) times the ranks sharing the busiest device, against
+/// that device's capacity. Missing evidence refuses, exactly like [`iris_memory_refusal`].
 pub(crate) fn iris_run_memory_refusal(
     lane: &str,
     config: &sceneworks_core::training::TrainingConfig,
     devices: u64,
-    capacity_gb: Option<f64>,
+    capacity_gib: Option<f64>,
 ) -> Option<String> {
     use sceneworks_core::training::iris::curricula;
     let world = curricula::iris_world_size(config);
@@ -102,7 +103,7 @@ pub(crate) fn iris_run_memory_refusal(
         .get("networkType")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("lora");
-    let floor = curricula::iris_run_memory_floor_gb(lane, config, devices);
+    let floor = curricula::iris_run_memory_floor(lane, config, devices);
     let repa = sceneworks_core::training::iris::iris_options(config)
         .map(|options| curricula::iris_repa_enabled(&options))
         .unwrap_or(false);
@@ -116,7 +117,65 @@ pub(crate) fn iris_run_memory_refusal(
             device_noun(lane)
         ));
     }
-    memory_refusal_for_floor(lane, floor, &shape, capacity_gb)
+    let advice = match activation_checkpointing_hint(lane, config, devices, capacity_gib) {
+        Some(hint) => format!("{hint} Otherwise: {GENERATION_ADVICE}"),
+        None => GENERATION_ADVICE.to_owned(),
+    };
+    memory_refusal_for_floor(lane, floor, &shape, capacity_gib, "", &advice)
+}
+
+const GENERATION_ADVICE: &str = "lower the training resolution, train a LoRA/LoKr adapter instead \
+                                 of a full fine-tune, run fewer ranks on one device, or run on a \
+                                 machine with more memory.";
+const TASK_ADVICE: &str = "lower the batch size or the training size, train a LoRA/LoKr where the \
+                           objective offers one, or run on a machine with more memory.";
+const TASK_NO_ROW: &str =
+    " Lower the batch size or the training size (raise gradient accumulation \
+                           to keep the global batch), or train a LoRA/LoKr where the objective \
+                           offers one.";
+
+/// sc-25690: a FULL generation run refused at its plain row is told when the SAME run under
+/// activation checkpointing (`advanced.iris.activation_checkpointing` = `full` or `selective_op`,
+/// the `full_ac` rows) fits this machine — the one change that admits it without giving up the
+/// resolution or the full fine-tune. `None` when the run already checkpoints every region, is not
+/// a full run, or would still not fit.
+fn activation_checkpointing_hint(
+    lane: &str,
+    config: &sceneworks_core::training::TrainingConfig,
+    devices: u64,
+    capacity_gib: Option<f64>,
+) -> Option<String> {
+    use sceneworks_core::training::iris::{
+        curricula, iris_full_activation_checkpointing, IRIS_OPTIONS_KEY,
+    };
+    let full = config
+        .advanced
+        .get("networkType")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|network| network.trim().eq_ignore_ascii_case("full"));
+    if !full || iris_full_activation_checkpointing(config) {
+        return None;
+    }
+    let mut checkpointed = config.clone();
+    let options = checkpointed
+        .advanced
+        .entry(IRIS_OPTIONS_KEY.to_owned())
+        .or_insert_with(|| serde_json::json!({}));
+    options
+        .as_object_mut()?
+        .insert("activation_checkpointing".to_owned(), "full".into());
+    let floor = curricula::iris_run_memory_floor(lane, &checkpointed, devices)?;
+    under_floor(lane, floor.gib, capacity_gib?)
+        .is_none()
+        .then(|| {
+            format!(
+                "With activation checkpointing (Memory → Activation checkpointing = full or \
+                 selective_op) the same run needs {} GiB ({}) and fits this machine, at the cost \
+                 of slower steps.",
+                floor.gib,
+                floor.provenance.describe()
+            )
+        })
 }
 
 fn run_shape(network_type: &str, resolution: u32) -> String {
@@ -136,142 +195,167 @@ fn capacity_noun(lane: &str) -> &'static str {
     }
 }
 
-/// The admission decision for an Iris run against a host of `capacity_gb` on `lane`: `Some(message)`
-/// to refuse, `None` to admit. Missing evidence REFUSES (the inverse of the generation fit gate's
-/// fail-open): the floors are the only bound a training lane has, so an unreadable host or an
-/// undeclared shape is never admitted unbounded.
+/// The admission decision for an Iris run against a host of `capacity_gib` on `lane`:
+/// `Some(message)` to refuse, `None` to admit. Missing evidence REFUSES (the inverse of the
+/// generation fit gate's fail-open): the floors are the only bound a training lane has, so an
+/// unreadable host or a shape no row covers is never admitted unbounded.
 #[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
 pub(crate) fn iris_memory_refusal(
     lane: &str,
     network_type: &str,
     resolution: u32,
-    capacity_gb: Option<f64>,
+    capacity_gib: Option<f64>,
 ) -> Option<String> {
-    let floor = sceneworks_core::training::iris::iris_training_memory_floor_gb(
+    let floor = sceneworks_core::training::iris::iris_generation_memory_floor(
         lane,
         network_type,
         resolution,
+        false,
     );
     memory_refusal_for_floor(
         lane,
         floor,
         &run_shape(network_type, resolution),
-        capacity_gb,
+        capacity_gib,
+        "",
+        GENERATION_ADVICE,
     )
 }
 
-/// [`iris_memory_refusal`] for an already-resolved declared `floor` of a run described by `shape`.
+/// `Some((usable, reserve))` when a host of `capacity_gib` (GiB) is under a floor of `floor_gib`
+/// (GiB) on `lane`. Unified memory is shared with macOS and the other apps, so an MLX floor is
+/// judged against the pool minus the same OS/app reserve the MLX generation gate holds out. (A
+/// Candle floor already folds its allocator reserve into the row; dedicated VRAM has no OS share.)
+fn under_floor(lane: &str, floor_gib: u32, capacity_gib: f64) -> Option<(f64, f64)> {
+    let reserve = if lane == "mlx" {
+        crate::mlx_fit_gate::OS_APP_RESERVE_GB
+    } else {
+        0.0
+    };
+    let usable = capacity_gib - reserve;
+    (usable + 0.05 < f64::from(floor_gib)).then_some((usable, reserve))
+}
+
+/// The refusal of a run described by `shape` whose resolved floor row is `floor`, or `None` to
+/// admit. Floor and capacity are both GiB; the message names the row's own provenance.
 fn memory_refusal_for_floor(
     lane: &str,
-    floor: Option<u32>,
+    floor: Option<sceneworks_core::training::iris::floors::IrisMemoryFloor>,
     shape: &str,
-    capacity_gb: Option<f64>,
+    capacity_gib: Option<f64>,
+    no_row_advice: &str,
+    advice: &str,
 ) -> Option<String> {
     let noun = capacity_noun(lane);
     let Some(floor) = floor else {
         return Some(format!(
             "Iris 3B training declares no memory floor for {shape} on the {lane} lane, so it is \
-             refused rather than admitted without a bound."
+             refused rather than admitted without a bound.{no_row_advice}"
         ));
     };
-    let Some(capacity) = capacity_gb else {
+    let needs = format!(
+        "Iris 3B training needs at least {} GiB of {noun} for {shape} ({})",
+        floor.gib,
+        floor.provenance.describe()
+    );
+    let Some(capacity) = capacity_gib else {
         return Some(format!(
-            "Iris 3B training needs at least {floor} GB of {noun} for {shape} (a declared floor, \
-             not yet measured), but this machine's {noun} could not be read, so the run is \
-             refused rather than admitted without a bound."
+            "{needs}, but this machine's {noun} could not be read, so the run is refused rather \
+             than admitted without a bound."
         ));
     };
-    // Unified memory is shared with macOS and the other apps, so an MLX floor is judged against the
-    // pool minus the same OS/app reserve the MLX generation gate holds out. (The Candle floors already
-    // fold their allocator reserve into the declared row; dedicated VRAM has no OS share.)
-    let reserve = if lane == "mlx" {
-        crate::mlx_fit_gate::OS_APP_RESERVE_GB
-    } else {
-        0.0
-    };
-    let usable = capacity - reserve;
-    (usable + 0.05 < f64::from(floor)).then(|| {
-        let reserve_note = if reserve > 0.0 {
-            format!(
-                " (~{} GB once the {} GB macOS/app reserve is held out)",
-                usable.max(0.0).round() as i64,
-                reserve.round() as i64
-            )
-        } else {
-            String::new()
-        };
+    let (usable, reserve) = under_floor(lane, floor.gib, capacity)?;
+    let reserve_note = if reserve > 0.0 {
         format!(
-            "Iris 3B training needs at least {floor} GB of {noun} for {shape} (a declared floor, \
-             not yet measured), but this machine has ~{} GB{reserve_note}. Lower the training \
-             resolution, train a LoRA/LoKr adapter instead of a full fine-tune, run fewer ranks \
-             on one device, or run on a machine with more memory.",
-            capacity.round() as i64
+            " ({:.1} GiB once the {} GiB macOS/app reserve is held out)",
+            usable.max(0.0),
+            reserve.round() as i64
         )
-    })
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "{needs}, but this machine has {capacity:.1} GiB{reserve_note}. To run it: {advice}"
+    ))
 }
 
 /// [`iris_memory_refusal`] for any Iris objective: the plan's base model selects the objective's
-/// declared floor table (generation: network type × resolution; depth: micro-batch pixels of the
-/// training size; restoration: artifact × micro-batch crop pixels). Same refusal discipline: no
-/// declared row or no capacity reading refuses; an MLX floor is judged against unified memory minus
-/// the macOS/app reserve.
+/// floor table (generation: network type × resolution; depth: micro-batch pixels of the training
+/// size; restoration: artifact × micro-batch crop pixels). Same refusal discipline: no row or no
+/// capacity reading refuses; an MLX floor is judged against unified memory minus the macOS/app
+/// reserve.
 pub(crate) fn iris_plan_memory_refusal(
     lane: &str,
     base_model: &str,
     config: &sceneworks_core::training::TrainingConfig,
     devices: u64,
-    capacity_gb: Option<f64>,
+    capacity_gib: Option<f64>,
 ) -> Option<String> {
     use sceneworks_core::training::iris::{
-        iris_objective_memory_floor_gb, iris_objective_shape, IrisObjective,
+        iris_objective_memory_floor, iris_objective_shape, IrisObjective,
     };
     let objective = IrisObjective::from_base_model(base_model)?;
     if objective == IrisObjective::Generation {
         // sc-25689: the whole run — one rank's floor (+ the REPA teacher) times the ranks sharing
         // the busiest of `devices`.
-        return iris_run_memory_refusal(lane, config, devices, capacity_gb);
+        return iris_run_memory_refusal(lane, config, devices, capacity_gib);
     }
-    let shape = iris_objective_shape(objective, config);
-    let noun = capacity_noun(lane);
-    let Some(floor) = iris_objective_memory_floor_gb(objective, lane, config) else {
-        return Some(format!(
-            "Iris 3B training declares no memory floor for {shape} on the {lane} lane, so it is \
-             refused rather than admitted without a bound. Lower the batch size or the training \
-             size (raise gradient accumulation to keep the global batch), or train a LoRA/LoKr \
-             where the objective offers one."
-        ));
+    // sc-25690: the shared gradient-checkpointing toggle is honoured only on the lanes whose task
+    // trainer implements it; elsewhere it is refused here, before load, never after the weights
+    // are in.
+    if let Some(refusal) = sceneworks_core::training::iris::iris_gradient_checkpointing_refusal(
+        objective, lane, config,
+    ) {
+        return Some(refusal);
+    }
+    let advice = match task_checkpointing_hint(objective, lane, config, capacity_gib) {
+        Some(hint) => format!("{hint} Otherwise: {TASK_ADVICE}"),
+        None => TASK_ADVICE.to_owned(),
     };
-    let Some(capacity) = capacity_gb else {
-        return Some(format!(
-            "Iris 3B training needs at least {floor} GB of {noun} for {shape} (a declared floor, not \
-             yet measured), but this machine's {noun} could not be read, so the run is refused \
-             rather than admitted without a bound."
-        ));
+    memory_refusal_for_floor(
+        lane,
+        iris_objective_memory_floor(objective, lane, config),
+        &iris_objective_shape(objective, config),
+        capacity_gib,
+        TASK_NO_ROW,
+        &advice,
+    )
+}
+
+/// sc-25690: a depth / restoration run refused at its plain row is told when the SAME run under
+/// gradient (activation) checkpointing fits this machine — on a lane whose task trainer implements
+/// it ([`sceneworks_core::training::iris::iris_gradient_checkpointing_lanes`]), and only when the
+/// lane's `full_ac` row would actually admit it. `None` when the toggle is already on, the lane
+/// lacks it, or the run would still not fit (an adapter run reads the same row either way).
+fn task_checkpointing_hint(
+    objective: sceneworks_core::training::iris::IrisObjective,
+    lane: &str,
+    config: &sceneworks_core::training::TrainingConfig,
+    capacity_gib: Option<f64>,
+) -> Option<String> {
+    use sceneworks_core::training::iris::{
+        iris_gradient_checkpointing, iris_gradient_checkpointing_lanes, iris_objective_memory_floor,
     };
-    let reserve = if lane == "mlx" {
-        crate::mlx_fit_gate::OS_APP_RESERVE_GB
-    } else {
-        0.0
-    };
-    let usable = capacity - reserve;
-    (usable + 0.05 < f64::from(floor)).then(|| {
-        let reserve_note = if reserve > 0.0 {
+    if iris_gradient_checkpointing(config)
+        || !iris_gradient_checkpointing_lanes(objective).contains(&lane)
+    {
+        return None;
+    }
+    let mut checkpointed = config.clone();
+    checkpointed
+        .advanced
+        .insert("gradientCheckpointing".to_owned(), true.into());
+    let floor = iris_objective_memory_floor(objective, lane, &checkpointed)?;
+    under_floor(lane, floor.gib, capacity_gib?)
+        .is_none()
+        .then(|| {
             format!(
-                " (~{} GB once the {} GB macOS/app reserve is held out)",
-                usable.max(0.0).round() as i64,
-                reserve.round() as i64
+                "With gradient checkpointing on (Training Studio → Gradient checkpointing) the \
+                 same run needs {} GiB ({}) and fits this machine, at the cost of slower steps.",
+                floor.gib,
+                floor.provenance.describe()
             )
-        } else {
-            String::new()
-        };
-        format!(
-            "Iris 3B training needs at least {floor} GB of {noun} for {shape} (a declared floor, not \
-             yet measured), but this machine has ~{} GB{reserve_note}. Lower the batch size or the \
-             training size, train a LoRA/LoKr where the objective offers one, or run on a machine \
-             with more memory.",
-            capacity.round() as i64
-        )
-    })
+        })
 }
 
 /// The submit-time twin of [`iris_plan_memory_refusal`] for the co-located macOS API. `None` off
@@ -446,80 +530,440 @@ mod tests {
 
     #[test]
     fn the_memory_gate_refuses_under_the_floor_and_without_evidence() {
-        // MLX LoRA at 256: floor 16 GB, judged against unified memory minus the 4 GB OS/app
-        // reserve — a 16 GB Mac (12 GB usable) is refused, a 24 GB Mac (20 GB usable) admitted.
+        // MLX LoRA at 256: floor 16 GiB, judged against unified memory minus the 4 GiB OS/app
+        // reserve — a 16 GiB Mac (12 usable) is refused, a 24 GiB Mac (20 usable) admitted.
         let sixteen = iris_memory_refusal("mlx", "lora", 256, Some(16.0))
-            .expect("a 16 GB Mac is under the floor once the OS/app reserve is held out");
+            .expect("a 16 GiB Mac is under the floor once the OS/app reserve is held out");
         assert!(sixteen.contains("reserve"), "{sixteen}");
         assert!(iris_memory_refusal("mlx", "lora", 256, Some(24.0)).is_none());
         assert!(iris_memory_refusal("mlx", "lora", 256, Some(64.0)).is_none());
-        let under = iris_memory_refusal("mlx", "lokr", 256, Some(8.0)).expect("8 GB is under");
+        let under = iris_memory_refusal("mlx", "lokr", 256, Some(8.0)).expect("8 GiB is under");
         assert!(
-            under.contains("16 GB") && under.contains("unified memory"),
+            under.contains("16 GiB") && under.contains("unified memory"),
+            "{under}"
+        );
+        // Floor and capacity are stated in the unit they are compared in.
+        assert!(
+            under.contains("this machine has 8.0 GiB") && !under.contains(" GB"),
             "{under}"
         );
         // Candle names VRAM, and a full run's floor is far above an adapter's.
-        let full = iris_memory_refusal("candle", "full", 256, Some(48.0)).expect("48 GB < full");
+        let full = iris_memory_refusal("candle", "full", 256, Some(48.0)).expect("48 GiB < full");
         assert!(
             full.contains("VRAM") && full.contains("full fine-tune"),
             "{full}"
         );
         assert!(iris_memory_refusal("candle", "lora", 256, Some(48.0)).is_none());
-        // No reading, no declared row: refused, never admitted unbounded.
+        // No reading, no row: refused, never admitted unbounded.
         assert!(iris_memory_refusal("mlx", "lora", 256, None).is_some());
         assert!(iris_memory_refusal("mlx", "lora", 4096, Some(512.0)).is_some());
     }
 
+    fn generation_config(
+        network: &str,
+        resolution: u32,
+        iris: serde_json::Value,
+    ) -> sceneworks_core::training::TrainingConfig {
+        let mut config = sceneworks_core::training::iris::iris_generation_target().defaults;
+        config.resolution = resolution;
+        config
+            .advanced
+            .insert("networkType".into(), serde_json::json!(network));
+        config.advanced.insert("iris".into(), iris);
+        config
+    }
+
+    /// sc-25690 (the unit mismatch): floors are GiB, like the capacity they are compared to. The
+    /// campaign card — an RTX PRO 6000, 97,887 MiB = 95.59 GiB, which `nvidia_vram_budget_gb`
+    /// reports as `memory_total_mb / 1024` — measurably held the Candle full 512² generation run,
+    /// the checkpointed 1024² run and the restoration full fine-tunes at 256² and 512², so the gate
+    /// admits it for each; and it still refuses the 1024² shapes that ran out of memory on it.
+    #[test]
+    fn the_card_that_held_a_measured_candle_run_is_admitted_for_it() {
+        use sceneworks_core::training::iris::floors::CAMPAIGN_CUDA_CARD;
+        use sceneworks_core::training::iris::restore;
+        let card = 97_887.0 / 1024.0;
+        assert_eq!(card, CAMPAIGN_CUDA_CARD.gib());
+        assert_eq!(format!("{card:.2}"), "95.59");
+        let json = serde_json::json!({});
+
+        let full_512 = generation_config("full", 512, json.clone());
+        assert_eq!(
+            iris_plan_memory_refusal("candle", "iris_3b", &full_512, 1, Some(card)),
+            None,
+            "the card that ran the full 512² fine-tune must not be refused for it"
+        );
+        let full_1024_ac = generation_config(
+            "full",
+            1024,
+            serde_json::json!({"activation_checkpointing": "full"}),
+        );
+        assert_eq!(
+            iris_plan_memory_refusal("candle", "iris_3b", &full_1024_ac, 1, Some(card)),
+            None
+        );
+        let full_1024 = generation_config("full", 1024, json);
+        let spilled = iris_plan_memory_refusal("candle", "iris_3b", &full_1024, 1, Some(card))
+            .expect("1024² without checkpointing met its need only by spilling off this card");
+        assert!(
+            spilled.contains("a measured need") && spilled.contains("spilling to system memory"),
+            "{spilled}"
+        );
+
+        // Restoration and depth: the shapes that ran on the card are admitted; 1024² without
+        // checkpointing (a measured need above the card) is refused, and admitted WITH it.
+        let mut restore = restore::iris_restore_target().defaults;
+        for (side, admitted) in [(256, true), (512, true), (1024, false)] {
+            restore.resolution = side;
+            assert_eq!(
+                iris_plan_memory_refusal("candle", "iris_3b_restore", &restore, 1, Some(card))
+                    .is_none(),
+                admitted,
+                "restoration full fine-tune at {side}²"
+            );
+        }
+        let mut depth = sceneworks_core::training::iris::depth::iris_depth_target().defaults;
+        for (side, admitted) in [(512, true), (1024, false)] {
+            depth.resolution = side;
+            depth.advanced["iris"]["depth_size"] = serde_json::json!([side, side]);
+            assert_eq!(
+                iris_plan_memory_refusal("candle", "iris_3b_depth", &depth, 1, Some(card))
+                    .is_none(),
+                admitted,
+                "depth full fine-tune at {side}²"
+            );
+        }
+        for (base, config) in [
+            ("iris_3b_restore", &mut restore),
+            ("iris_3b_depth", &mut depth),
+        ] {
+            config
+                .advanced
+                .insert("gradientCheckpointing".into(), serde_json::json!(true));
+            assert_eq!(
+                iris_plan_memory_refusal("candle", base, config, 1, Some(card)),
+                None,
+                "{base} at 1024² under gradient checkpointing ran on this card"
+            );
+        }
+    }
+
+    /// sc-25690: gradient (activation) checkpointing for depth / restoration is a per-lane
+    /// capability. On a lane whose trainer implements it, a run refused at its plain row is told
+    /// the toggle admits it — exactly when the `full_ac` row fits — and a run with the toggle on
+    /// reads that row. On a lane without it, the toggle is refused typed before load and no hint
+    /// is offered.
+    #[test]
+    fn task_gradient_checkpointing_is_offered_and_gated_per_lane() {
+        use sceneworks_core::training::iris::{
+            depth, iris_gradient_checkpointing_lanes, iris_objective_memory_floor, restore,
+            IrisObjective,
+        };
+        let mut depth = depth::iris_depth_target().defaults;
+        depth.resolution = 1024;
+        depth.advanced["iris"]["depth_size"] = serde_json::json!([1024, 1024]);
+        let restore = restore::iris_restore_target().defaults; // the paper's 1024² crop, full
+        for (objective, base, config) in [
+            (IrisObjective::Depth, "iris_3b_depth", &depth),
+            (IrisObjective::Restoration, "iris_3b_restore", &restore),
+        ] {
+            let mut on = config.clone();
+            on.advanced
+                .insert("gradientCheckpointing".into(), serde_json::json!(true));
+            for lane in ["mlx", "candle"] {
+                let supported = iris_gradient_checkpointing_lanes(objective).contains(&lane);
+                let plain = iris_objective_memory_floor(objective, lane, config).unwrap();
+                let checkpointed = iris_objective_memory_floor(objective, lane, &on).unwrap();
+                // A capacity that holds the checkpointed row but not the plain one.
+                let reserve = if lane == "mlx" {
+                    crate::mlx_fit_gate::OS_APP_RESERVE_GB
+                } else {
+                    0.0
+                };
+                if supported {
+                    assert!(checkpointed.gib < plain.gib, "{base} {lane}");
+                    let between = f64::from(checkpointed.gib) + reserve;
+                    let refusal = iris_plan_memory_refusal(lane, base, config, 1, Some(between))
+                        .expect("under the plain row");
+                    assert!(
+                        refusal.contains("With gradient checkpointing on")
+                            && refusal.contains(&format!("needs {} GiB", checkpointed.gib))
+                            && refusal.contains("fits this machine"),
+                        "{base} {lane}: {refusal}"
+                    );
+                    // Not when even the checkpointed row would not fit.
+                    let short =
+                        iris_plan_memory_refusal(lane, base, config, 1, Some(between - 1.0))
+                            .expect("under both rows");
+                    assert!(!short.contains("gradient checkpointing"), "{short}");
+                    // With the toggle on the run is admitted at that capacity, and a refusal of it
+                    // (one GiB short) offers nothing more.
+                    assert_eq!(
+                        iris_plan_memory_refusal(lane, base, &on, 1, Some(between)),
+                        None,
+                        "{base} {lane}"
+                    );
+                    let still = iris_plan_memory_refusal(lane, base, &on, 1, Some(between - 1.0))
+                        .expect("one GiB short of the checkpointed row");
+                    assert!(!still.contains("With gradient checkpointing on"), "{still}");
+                } else {
+                    // The lane's trainer refuses it: no row to offer, no hint, and the toggle
+                    // itself is refused before load however much memory there is.
+                    assert_eq!(checkpointed, plain, "{base} {lane}");
+                    let refusal = iris_plan_memory_refusal(lane, base, config, 1, Some(8.0))
+                        .expect("8 GiB is under");
+                    assert!(!refusal.contains("gradient checkpointing"), "{refusal}");
+                    let toggled = iris_plan_memory_refusal(lane, base, &on, 1, Some(4096.0))
+                        .expect("the toggle is refused on this lane");
+                    assert!(
+                        toggled.contains("checkpointing is not implemented")
+                            && toggled.contains("Turn gradient checkpointing off"),
+                        "{toggled}"
+                    );
+                }
+            }
+        }
+        // A restoration ADAPTER run reads the adapter row either way: nothing to offer.
+        let mut lora = restore.clone();
+        lora.advanced
+            .insert("networkType".into(), serde_json::json!("lora"));
+        let refusal = iris_plan_memory_refusal("candle", "iris_3b_restore", &lora, 1, Some(8.0))
+            .expect("8 GiB is under");
+        assert!(!refusal.contains("gradient checkpointing"), "{refusal}");
+    }
+
+    /// sc-25690: a refusal names the provenance of the row it read — measured, extrapolated, lower
+    /// bound or declared — never one blanket phrase for every row.
+    #[test]
+    fn a_refusal_names_the_provenance_of_its_own_row() {
+        use sceneworks_core::training::iris::{depth, restore};
+        let refusal = |base: &str, config: &sceneworks_core::training::TrainingConfig| {
+            iris_plan_memory_refusal("candle", base, config, 1, Some(8.0)).expect("8 GiB is under")
+        };
+        let no_iris = serde_json::json!({});
+        let measured = refusal("iris_3b", &generation_config("full", 512, no_iris.clone()));
+        assert!(measured.contains("(a measured floor)"), "{measured}");
+        assert!(!measured.contains("not yet measured"), "{measured}");
+        // 256² is bounded by the measured 512² row: an extrapolation, never called measured.
+        let extrapolated = refusal("iris_3b", &generation_config("full", 256, no_iris.clone()));
+        assert!(
+            extrapolated.contains("extrapolated from measured runs"),
+            "{extrapolated}"
+        );
+        // 1024² without checkpointing was measured only by spilling off the card.
+        let spilled = refusal("iris_3b", &generation_config("full", 1024, no_iris.clone()));
+        assert!(
+            spilled
+                .contains("(a measured need: on a 96 GB card the run completed only by spilling"),
+            "{spilled}"
+        );
+        let declared = refusal("iris_3b", &generation_config("lora", 256, no_iris.clone()));
+        assert!(
+            declared.contains("(a declared floor, not yet measured)"),
+            "{declared}"
+        );
+        // A measured row plus the REPA teacher, or times two ranks, is arithmetic on a measurement.
+        let with_teacher = refusal(
+            "iris_3b",
+            &generation_config("full", 512, serde_json::json!({"repa": {"weight": 0.5}})),
+        );
+        assert!(
+            with_teacher.contains("extrapolated from measured runs"),
+            "{with_teacher}"
+        );
+        // Depth (Candle, its default 480×640): extrapolated. Restoration full at 1024²: the runs
+        // were stopped before their peak, so only a lower bound is measured.
+        let depth = refusal("iris_3b_depth", &depth::iris_depth_target().defaults);
+        assert!(depth.contains("extrapolated from measured runs"), "{depth}");
+        let mut restore = restore::iris_restore_target().defaults;
+        restore.resolution = 1024;
+        assert!(refusal("iris_3b_restore", &restore).contains("(a measured need"));
+        let bound = iris_plan_memory_refusal("mlx", "iris_3b_restore", &restore, 1, Some(8.0))
+            .expect("8 GiB is under");
+        assert!(bound.contains("above a measured lower bound"), "{bound}");
+        restore.resolution = 512;
+        let restore_measured = refusal("iris_3b_restore", &restore);
+        assert!(
+            restore_measured.contains("(a measured floor)"),
+            "{restore_measured}"
+        );
+        // An unreadable host is refused with the same provenance, and without a capacity.
+        let unread = iris_plan_memory_refusal("candle", "iris_3b_restore", &restore, 1, None)
+            .expect("no reading refuses");
+        assert!(
+            unread.contains("(a measured floor)") && unread.contains("could not be read"),
+            "{unread}"
+        );
+    }
+
+    /// sc-25690: a full 1024² run refused at its plain row is told that activation checkpointing
+    /// admits it — exactly when the `full_ac` row fits this machine — and not otherwise.
+    #[test]
+    fn a_refused_full_run_is_told_when_activation_checkpointing_would_admit_it() {
+        use sceneworks_core::training::iris::iris_generation_memory_floor;
+        let plain = iris_generation_memory_floor("candle", "full", 1024, false).unwrap();
+        let checkpointed = iris_generation_memory_floor("candle", "full", 1024, true).unwrap();
+        assert!(checkpointed.gib < plain.gib);
+        let config = generation_config("full", 1024, serde_json::json!({}));
+        // Between the two rows: refused, and the checkpointing option is named with its floor.
+        let between = f64::from(checkpointed.gib);
+        let refusal = iris_plan_memory_refusal("candle", "iris_3b", &config, 1, Some(between))
+            .expect("under the plain row");
+        assert!(
+            refusal.contains("activation checkpointing")
+                && refusal.contains("selective_op")
+                && refusal.contains(&format!("needs {} GiB", checkpointed.gib))
+                && refusal.contains("fits this machine"),
+            "{refusal}"
+        );
+        // Under the checkpointed row too: no hint (it would not admit).
+        let too_small = iris_plan_memory_refusal(
+            "candle",
+            "iris_3b",
+            &config,
+            1,
+            Some(f64::from(checkpointed.gib) - 1.0),
+        )
+        .expect("under both rows");
+        assert!(
+            !too_small.contains("activation checkpointing"),
+            "{too_small}"
+        );
+        // Already checkpointing every region, and an adapter run: nothing to suggest.
+        for policy in ["full", "selective_op"] {
+            let already = generation_config(
+                "full",
+                1024,
+                serde_json::json!({"activation_checkpointing": policy}),
+            );
+            let refused = iris_plan_memory_refusal("candle", "iris_3b", &already, 1, Some(8.0))
+                .expect("8 GiB is under");
+            assert!(!refused.contains("fits this machine"), "{refused}");
+        }
+        let adapter = generation_config("lora", 1024, serde_json::json!({}));
+        let refused = iris_plan_memory_refusal("candle", "iris_3b", &adapter, 1, Some(8.0))
+            .expect("8 GiB is under");
+        assert!(!refused.contains("activation checkpointing"), "{refused}");
+        // `selective_layer` reads the plain row, so it gets the hint as `none` does.
+        let selective = generation_config(
+            "full",
+            1024,
+            serde_json::json!({"activation_checkpointing": "selective_layer"}),
+        );
+        assert!(
+            iris_plan_memory_refusal("candle", "iris_3b", &selective, 1, Some(between))
+                .expect("under the plain row")
+                .contains("fits this machine")
+        );
+        // MLX: the hint is judged after the OS/app reserve, like the floor itself.
+        let mlx_ac = iris_generation_memory_floor("mlx", "full", 1024, true).unwrap();
+        let mlx_plain = iris_generation_memory_floor("mlx", "full", 1024, false).unwrap();
+        assert!(mlx_ac.gib < mlx_plain.gib);
+        let reserve = crate::mlx_fit_gate::OS_APP_RESERVE_GB;
+        let fits = iris_plan_memory_refusal(
+            "mlx",
+            "iris_3b",
+            &config,
+            1,
+            Some(f64::from(mlx_ac.gib) + reserve),
+        )
+        .expect("under the plain MLX row");
+        assert!(fits.contains("fits this machine"), "{fits}");
+        let short = iris_plan_memory_refusal(
+            "mlx",
+            "iris_3b",
+            &config,
+            1,
+            Some(f64::from(mlx_ac.gib) + reserve - 1.0),
+        )
+        .expect("under both MLX rows once the reserve is held out");
+        assert!(!short.contains("fits this machine"), "{short}");
+    }
+
     /// The depth and restoration floors (sc-25687 / sc-25688): per objective and lane, with the MLX
-    /// OS reserve, refusing beyond the declared table and without a capacity reading.
+    /// OS reserve, refusing beyond the table and without a capacity reading. Each boundary is the
+    /// row's own value (GiB), so a re-measured row moves the boundary with it.
     #[test]
     fn task_objective_floors_gate_per_lane() {
         use sceneworks_core::training::iris::{depth, restore};
+        let reserve = crate::mlx_fit_gate::OS_APP_RESERVE_GB;
         let depth = depth::iris_depth_target().defaults;
-        // 480×640, batch 1: MLX 80 (+4 reserve), CUDA 84.
-        assert!(iris_plan_memory_refusal("mlx", "iris_3b_depth", &depth, 1, Some(84.0)).is_none());
-        let under = iris_plan_memory_refusal("mlx", "iris_3b_depth", &depth, 1, Some(83.0))
-            .expect("83 GB − 4 GB reserve < 80");
+        // 480×640, batch 1.
+        let mlx = f64::from(depth::depth_memory_floor("mlx", &depth).unwrap().gib);
+        let candle = f64::from(depth::depth_memory_floor("candle", &depth).unwrap().gib);
         assert!(
-            under.contains("80 GB") && under.contains("reserve"),
+            iris_plan_memory_refusal("mlx", "iris_3b_depth", &depth, 1, Some(mlx + reserve))
+                .is_none()
+        );
+        let under =
+            iris_plan_memory_refusal("mlx", "iris_3b_depth", &depth, 1, Some(mlx + reserve - 1.0))
+                .expect("one GiB under the floor once the reserve is held out");
+        assert!(
+            under.contains(&format!("{mlx} GiB")) && under.contains("reserve"),
             "{under}"
         );
         assert!(
-            iris_plan_memory_refusal("candle", "iris_3b_depth", &depth, 1, Some(84.0)).is_none()
+            iris_plan_memory_refusal("candle", "iris_3b_depth", &depth, 1, Some(candle)).is_none()
         );
         assert!(
-            iris_plan_memory_refusal("candle", "iris_3b_depth", &depth, 1, Some(83.0)).is_some()
+            iris_plan_memory_refusal("candle", "iris_3b_depth", &depth, 1, Some(candle - 1.0))
+                .is_some()
         );
         assert!(iris_plan_memory_refusal("mlx", "iris_3b_depth", &depth, 1, None).is_some());
         let mut big = depth.clone();
         big.batch_size = 32;
         big.gradient_accumulation = 1;
         let refused = iris_plan_memory_refusal("mlx", "iris_3b_depth", &big, 1, Some(512.0))
-            .expect("no declared row for 32 × 480×640");
+            .expect("no row for 32 × 480×640");
         assert!(refused.contains("declares no memory floor"), "{refused}");
 
         let mut restore = restore::iris_restore_target().defaults;
         restore.resolution = 256;
-        // Full recipe at 256²: MLX 92 (+4), CUDA 94 (the measured peak on the 96 GB card).
-        assert!(
-            iris_plan_memory_refusal("mlx", "iris_3b_restore", &restore, 1, Some(96.0)).is_none()
-        );
-        assert!(
-            iris_plan_memory_refusal("mlx", "iris_3b_restore", &restore, 1, Some(95.0)).is_some()
-        );
-        assert!(
-            iris_plan_memory_refusal("candle", "iris_3b_restore", &restore, 1, Some(95.6))
-                .is_none()
-        );
+        // The full recipe at 256².
+        let mlx = f64::from(restore::restore_memory_floor("mlx", &restore).unwrap().gib);
+        assert!(iris_plan_memory_refusal(
+            "mlx",
+            "iris_3b_restore",
+            &restore,
+            1,
+            Some(mlx + reserve)
+        )
+        .is_none());
+        assert!(iris_plan_memory_refusal(
+            "mlx",
+            "iris_3b_restore",
+            &restore,
+            1,
+            Some(mlx + reserve - 1.0)
+        )
+        .is_some());
         restore
             .advanced
             .insert("networkType".into(), serde_json::json!("lora"));
+        let mlx_lora = f64::from(restore::restore_memory_floor("mlx", &restore).unwrap().gib);
+        let candle_lora = restore::restore_memory_floor("candle", &restore)
+            .unwrap()
+            .gib;
+        assert!(iris_plan_memory_refusal(
+            "mlx",
+            "iris_3b_restore",
+            &restore,
+            1,
+            Some(mlx_lora + reserve)
+        )
+        .is_none());
+        let lora = iris_plan_memory_refusal(
+            "candle",
+            "iris_3b_restore",
+            &restore,
+            1,
+            Some(f64::from(candle_lora) - 1.0),
+        )
+        .expect("one GiB under the adapter floor");
         assert!(
-            iris_plan_memory_refusal("mlx", "iris_3b_restore", &restore, 1, Some(32.0)).is_none()
+            lora.contains("VRAM") && lora.contains(&format!("{candle_lora} GiB")),
+            "{lora}"
         );
-        let lora = iris_plan_memory_refusal("candle", "iris_3b_restore", &restore, 1, Some(24.0))
-            .expect("24 < 32");
-        assert!(lora.contains("VRAM") && lora.contains("32 GB"), "{lora}");
         // Non-Iris base models are not this gate's.
         assert!(iris_plan_memory_refusal("mlx", "sdxl", &restore, 1, Some(1.0)).is_none());
     }
@@ -573,7 +1017,17 @@ mod job_tests {
         /// Report a step, wait for the cancel flag, then publish the checkpoint + export and return
         /// `Ok` — the trainer's contract for a cancel after the first optimizer step.
         CancelAfterFirstStep,
+        /// Train a step, publish a checkpoint, then fail at the export the way the engine does (its
+        /// publication is atomic — `gen_core::iris::train::lineage` — so no export is left at the
+        /// final path): the typed error, the checkpoint kept, nothing exported.
+        FailsExport,
+        /// Run the ENGINE's own depth dataset pass (`depth_dataset_pass`, the first thing both depth
+        /// trainers do) on the request the worker shaped, then complete if it accepts the dataset.
+        DepthDatasetPass,
     }
+
+    /// The release depth architecture the engine's depth plan resolves against.
+    const DEPTH_CONFIG: &str = include_str!("iris_restore/fixtures/depth_config.yaml");
 
     #[derive(Default)]
     struct Seen {
@@ -626,6 +1080,12 @@ mod job_tests {
         ) -> gen_core::Result<TrainingOutput> {
             self.seen.lock().unwrap().request = Some(req.clone());
             on_progress(TrainingProgress::Preparing);
+            if self.behavior == Behavior::DepthDatasetPass {
+                use gen_core::iris::train::depth as depth_train;
+                let model = gen_core::iris::IrisConfig::parse(DEPTH_CONFIG)?;
+                let plan = depth_train::DepthTrainPlan::resolve(req, &model)?;
+                depth_train::depth_dataset_pass(req, &plan, |_| {})?;
+            }
             on_progress(TrainingProgress::LoadingModel);
             on_progress(TrainingProgress::Caching {
                 current: 1,
@@ -641,7 +1101,24 @@ mod job_tests {
                 req.cancel.is_cancelled()
             };
             match self.behavior {
-                Behavior::Completes => {
+                Behavior::FailsExport => {
+                    on_progress(TrainingProgress::Training {
+                        step: 1,
+                        total: req.config.steps,
+                        loss: 0.5,
+                    });
+                    on_progress(TrainingProgress::Checkpoint { step: 1 });
+                    on_progress(TrainingProgress::Saving);
+                    // The checkpoint is durable; the export never reaches its final path.
+                    let exported = write_export(req);
+                    std::fs::remove_file(exported).unwrap();
+                    Err(gen_core::Error::Msg(
+                        "iris: export failed: write model.safetensors: No space left on device \
+                         (os error 28)"
+                            .to_owned(),
+                    ))
+                }
+                Behavior::Completes | Behavior::DepthDatasetPass => {
                     let accumulation = req.config.gradient_accumulation.max(1);
                     on_progress(TrainingProgress::Training {
                         step: accumulation,
@@ -1726,11 +2203,51 @@ mod job_tests {
         assert_eq!(run.seen.loads, 0);
     }
 
+    /// sc-25690: the shared gradient-checkpointing toggle on a depth run, through the real job
+    /// path. On a lane whose depth trainer implements it the flag reaches the trainer as the
+    /// engine's `gradient_checkpointing`; on a lane that lacks it the job is refused before the
+    /// loader runs, naming where it is implemented.
+    #[test]
+    fn the_depth_checkpointing_toggle_reaches_the_trainer_only_on_a_lane_that_implements_it() {
+        use sceneworks_core::training::iris::{iris_gradient_checkpointing_lanes, IrisObjective};
+        let _env = isolated_env("128");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        stage_task_export(&data, "depth");
+        let plan = task_plan(
+            &data,
+            "iris_3b_depth",
+            task_dataset(&data, "depth", 1, false),
+            |config| {
+                config
+                    .advanced
+                    .insert("gradientCheckpointing".into(), json!(true));
+            },
+        );
+        let run = run_as("iris_3b_depth", Behavior::Completes, plan, &data);
+        let lane = crate::iris_training::training_lane();
+        if iris_gradient_checkpointing_lanes(IrisObjective::Depth).contains(&lane) {
+            assert!(run.outcome.is_ok(), "{:?}\n{:#?}", run.outcome, run.posts);
+            let request = run.seen.request.expect("the trainer ran");
+            assert!(request.config.gradient_checkpointing);
+        } else {
+            match &run.outcome {
+                Err(WorkerError::InvalidPayload(message)) => assert!(
+                    message.contains("checkpointing is not implemented for Iris 3B depth training")
+                        && message.contains("implemented on NVIDIA (Candle/CUDA)"),
+                    "{message}"
+                ),
+                other => panic!("the toggle must be refused before load on {lane}: {other:?}"),
+            }
+            assert_eq!(run.seen.loads, 0, "refused before the loader ran");
+        }
+    }
+
     /// The declared depth floor refuses an undersized host before load (MLX: unified memory minus
     /// the OS reserve; CUDA: VRAM).
     #[test]
     fn a_host_under_the_depth_floor_is_refused_before_load() {
-        let _env = isolated_env("64");
+        let _env = isolated_env("48");
         let data_holder = tempfile::tempdir().unwrap();
         let data = data_holder.path().canonicalize().unwrap();
         stage_task_export(&data, "depth");
@@ -1743,10 +2260,10 @@ mod job_tests {
         let run = run_as("iris_3b_depth", Behavior::Completes, plan, &data);
         match &run.outcome {
             Err(WorkerError::InvalidPayload(message)) => assert!(
-                message.contains("depth full fine-tune at 480×640") && message.contains("GB"),
+                message.contains("depth full fine-tune at 480×640") && message.contains("GiB"),
                 "{message}"
             ),
-            other => panic!("a 64 GB host must be refused for the 480×640 depth run: {other:?}"),
+            other => panic!("a 48 GiB host must be refused for the 480×640 depth run: {other:?}"),
         }
         assert_eq!(run.seen.loads, 0);
     }
@@ -1779,6 +2296,289 @@ mod job_tests {
         let last = terminal(&run.posts);
         assert_eq!(last["status"], "canceled", "{last:#}");
         assert_eq!(last["result"]["trainedArtifactExported"], true, "{last:#}");
+    }
+
+    /// Every file under `root` with its bytes (sorted) — a run's SOURCE, compared before and after.
+    fn tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    files.push((path.clone(), std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    /// A REAL depth dataset the engine's readers decode (64x48 RGB + aligned `.npy` depth): item 0
+    /// has a usable depth ramp and a validity mask, item 1 a depth plane and no mask.
+    fn real_depth_dataset(
+        data: &Path,
+        mask_value: u8,
+        item1_depth: impl Fn(u32) -> f32,
+    ) -> (TrainingDataset, PathBuf) {
+        let (dataset, root) = task_dataset(data, "depth", 2, false);
+        let npy = |f: &dyn Fn(u32) -> f32| {
+            let values: Vec<f32> = (0..48u32)
+                .flat_map(|y| (0..64).map(move |_| y))
+                .map(f)
+                .collect();
+            sceneworks_core::depth_map::encode_npy_f32(64, 48, &values).unwrap()
+        };
+        for index in 0..2 {
+            image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([x as u8, y as u8, 7]))
+                .save(root.join(format!("images/item{index}.png")))
+                .unwrap();
+        }
+        // Stored millimetres under the dataset's `scale: 0.001` / `maxDepth: 80`.
+        std::fs::write(
+            root.join("sidecars/item0.depth.npy"),
+            npy(&|y| 1000.0 + 100.0 * y as f32),
+        )
+        .unwrap();
+        image::GrayImage::from_pixel(64, 48, image::Luma([mask_value]))
+            .save(root.join("sidecars/item0.mask.png"))
+            .unwrap();
+        std::fs::write(root.join("sidecars/item1.depth.npy"), npy(&item1_depth)).unwrap();
+        (dataset, root)
+    }
+
+    fn small_depth(c: &mut sceneworks_core::training::TrainingConfig) {
+        c.gradient_accumulation = 1;
+        c.steps = 4;
+        c.save_every = 2;
+        c.resolution = 64;
+        c.advanced.insert("sampleEvery".into(), json!(2));
+        c.advanced["iris"]["depth_size"] = json!([64, 64]);
+    }
+
+    /// Epic AT6 (sc-25690) — depth training on a dataset with NO valid depth pixel (item 0's mask
+    /// excludes every pixel; item 1's depth is 0 everywhere). The request the worker shapes reaches
+    /// the engine's own dataset pass, which refuses under BOTH invalid-example policies before any
+    /// step: the job fails with the engine's reason, posts no result (so the API registers nothing),
+    /// writes no export, and leaves the dataset and the installed export byte-identical. A dataset
+    /// with valid pixels passes the same pass and completes (the refusal is the data's, not the
+    /// fixture's).
+    #[test]
+    fn a_depth_dataset_with_no_valid_depth_pixels_is_refused_and_publishes_nothing() {
+        let _env = isolated_env("128");
+        for (policy, reason) in [
+            ("reject", "0 valid depth pixels (min_valid_pixels = 2)"),
+            ("skip", "no item of the dataset is a valid depth example"),
+        ] {
+            let data_holder = tempfile::tempdir().unwrap();
+            let data = data_holder.path().canonicalize().unwrap();
+            let export = stage_task_export(&data, "depth");
+            let (dataset, root) = real_depth_dataset(&data, 0, |_| 0.0);
+            let plan = task_plan(&data, "iris_3b_depth", (dataset, root.clone()), |c| {
+                small_depth(c);
+                c.advanced["iris"]["invalid_examples"] = json!(policy);
+            });
+            let (dataset_before, export_before) = (tree(&root), tree(&export));
+            let run = run_as("iris_3b_depth", Behavior::DepthDatasetPass, plan, &data);
+            let error = match &run.outcome {
+                Err(WorkerError::Engine(message)) => message.clone(),
+                other => panic!("{policy}: expected an engine refusal, got {other:?}"),
+            };
+            assert!(
+                error.contains("training failed") && error.contains(reason),
+                "{policy}: {error}"
+            );
+            if policy == "reject" {
+                assert!(error.contains("item0.png"), "the item is named: {error}");
+            }
+            let request = run.seen.request.as_ref().expect("the trainer was reached");
+            assert_eq!(request.items.len(), 2);
+            assert!(
+                run.posts
+                    .iter()
+                    .all(|post| post["status"] != "completed" && post["result"].is_null()),
+                "{policy}: no completion and no result: {:#?}",
+                run.posts
+            );
+            assert!(
+                run.posts.iter().all(|post| post["stage"] != "training"),
+                "{policy}: no optimizer step ran: {:#?}",
+                run.posts
+            );
+            assert_eq!(
+                tree(&data.join("models/finetunes")),
+                Vec::new(),
+                "{policy}: nothing was exported"
+            );
+            assert_eq!(tree(&root), dataset_before, "{policy}: dataset untouched");
+            assert_eq!(tree(&export), export_before, "{policy}: install untouched");
+        }
+
+        // The control: valid pixels pass the same engine pass and the run completes.
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        stage_task_export(&data, "depth");
+        let plan = task_plan(
+            &data,
+            "iris_3b_depth",
+            real_depth_dataset(&data, 255, |y| 2000.0 + 50.0 * y as f32),
+            small_depth,
+        );
+        let run = run_as("iris_3b_depth", Behavior::DepthDatasetPass, plan, &data);
+        assert!(run.outcome.is_ok(), "{:?}\n{:#?}", run.outcome, run.posts);
+        assert_eq!(terminal(&run.posts)["status"], "completed");
+    }
+
+    /// Epic AT6 (sc-25690) — a FAILED export, for every Iris training objective (generation full
+    /// fine-tune, generation LoRA and LoKr, depth, restoration): the job ends in the engine's error
+    /// with no completion and no result on any post (the API registers a trained artifact only from
+    /// a result), no export exists at the output path, the durable checkpoint the trainer published
+    /// before the failure is kept (the run stays resumable), and the run's sources — its dataset
+    /// and its installed weights — are byte-identical.
+    #[test]
+    fn a_failed_export_reports_the_failure_and_registers_nothing_for_every_objective() {
+        let _table = RESOURCE_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = isolated_env("128");
+        for objective in [
+            "generation_full",
+            "generation_lora",
+            "generation_lokr",
+            "depth",
+            "restoration",
+        ] {
+            let data_holder = tempfile::tempdir().unwrap();
+            let data = data_holder.path().canonicalize().unwrap();
+            let install = stage_install(&data);
+            let small = |c: &mut sceneworks_core::training::TrainingConfig| {
+                c.gradient_accumulation = 1;
+                c.steps = 4;
+                c.save_every = 2;
+                c.advanced.insert("sampleEvery".into(), json!(2));
+            };
+            let (engine, plan, output, dataset_root) = match objective {
+                "depth" => {
+                    stage_task_export(&data, "depth");
+                    let dataset = task_dataset(&data, "depth", 2, false);
+                    let root = dataset.1.clone();
+                    (
+                        "iris_3b_depth",
+                        task_plan(&data, "iris_3b_depth", dataset, small),
+                        data.join("models/finetunes/finetune_task"),
+                        root,
+                    )
+                }
+                "restoration" => {
+                    stage_task_export(&data, "upscaler");
+                    let resources = vec![
+                        fixture_resource(
+                            &data,
+                            "lpips_vgg16",
+                            "fixture/vgg",
+                            "model.safetensors",
+                            b"vgg",
+                        ),
+                        fixture_resource(
+                            &data,
+                            "lpips_lin",
+                            "fixture/lin",
+                            "lin.safetensors",
+                            b"lin",
+                        ),
+                        fixture_resource(
+                            &data,
+                            "critic_trunk",
+                            "fixture/trunk",
+                            "trunk.bin",
+                            b"trunk",
+                        ),
+                    ];
+                    *crate::iris_task_training::TEST_TRAINING_RESOURCES
+                        .lock()
+                        .unwrap() = Some(resources);
+                    let dataset = task_dataset(&data, "restoration", 2, true);
+                    let root = dataset.1.clone();
+                    (
+                        "iris_3b_restore",
+                        task_plan(&data, "iris_3b_restore", dataset, |c| {
+                            small(c);
+                            c.resolution = 512;
+                        }),
+                        data.join("models/finetunes/finetune_task"),
+                        root,
+                    )
+                }
+                generation => {
+                    let network = generation.trim_start_matches("generation_");
+                    (
+                        "iris_3b",
+                        plan(&data, &install.backbone, 2, |c| {
+                            small(c);
+                            c.advanced.insert("networkType".into(), json!(network));
+                        }),
+                        data.join("loras/lora_iris"),
+                        data.join("projects/p1/training/datasets/ds1"),
+                    )
+                }
+            };
+            let file_name = plan.output.file_name.clone();
+            let hub = sceneworks_core::hf_home::huggingface_repo_cache_path(&data, BACKBONE_REPO)
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            let (dataset_before, installs_before) = (tree(&dataset_root), tree(&hub));
+            assert!(!dataset_before.is_empty() && !installs_before.is_empty());
+
+            let run = run_as(engine, Behavior::FailsExport, plan, &data);
+            *crate::iris_task_training::TEST_TRAINING_RESOURCES
+                .lock()
+                .unwrap() = None;
+
+            let error = match &run.outcome {
+                Err(WorkerError::Engine(message)) => message.clone(),
+                other => panic!("{objective}: expected the export failure, got {other:?}"),
+            };
+            assert!(
+                error.contains("training failed") && error.contains("export failed"),
+                "{objective}: {error}"
+            );
+            assert!(run.seen.request.is_some(), "{objective}: the trainer ran");
+            assert!(
+                run.posts.iter().any(|post| post["stage"] == "training"),
+                "{objective}: a step was reported before the failure: {:#?}",
+                run.posts
+            );
+            assert!(
+                run.posts
+                    .iter()
+                    .all(|post| post["status"] != "completed" && post["result"].is_null()),
+                "{objective}: no completion and no result (nothing to register): {:#?}",
+                run.posts
+            );
+            let stem = file_name.trim_end_matches(".safetensors");
+            assert!(
+                !output.join(&file_name).exists() && !output.join(stem).exists(),
+                "{objective}: no export at the output path"
+            );
+            let left: Vec<PathBuf> = tree(&output).into_iter().map(|(path, _)| path).collect();
+            assert_eq!(
+                left,
+                [output.join(format!("{stem}.checkpoints/step_00000001/state.json"))],
+                "{objective}: only the durable checkpoint is left beside the missing export"
+            );
+            assert_eq!(
+                tree(&dataset_root),
+                dataset_before,
+                "{objective}: dataset untouched"
+            );
+            assert_eq!(
+                tree(&hub),
+                installs_before,
+                "{objective}: installs untouched"
+            );
+        }
     }
 
     fn fixture_resource(
@@ -2084,6 +2884,94 @@ mod job_tests {
             .as_str()
             .unwrap()
             .contains("shape=area"));
+    }
+
+    /// sc-25690: the real-weight FULL fine-tune smokes' OWN configs
+    /// (`iris_training_gpu_smoke::CancelResumeArm::FullStage1` and `restore_smoke_config(true)`)
+    /// through this real job path with only the trainer faked — the memory floor at the full rows,
+    /// the REPA teacher / restoration resources staged, the engine plan resolved — for the first
+    /// run and for its resumed twin. A real-weight dispatch then starts from a config the job path
+    /// is known to admit and hand to the trainer as a FULL fine-tune of the official stage.
+    #[test]
+    fn the_full_fine_tune_smoke_configs_reach_the_trainer_through_the_job_path() {
+        use crate::iris_training_gpu_smoke::{
+            apply_resume_translation, restore_smoke_config, CancelResumeArm,
+        };
+        let _table = RESOURCE_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = isolated_env("128");
+        let _pin = crate::iris_curricula::test_teacher_integrity(Some(TEACHER_BYTES));
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        let teacher = stage_teacher(&data);
+
+        let smoke = CancelResumeArm::FullStage1.config();
+        for resumed in [false, true] {
+            let mut plan = plan(&data, &install.backbone, 4, |config| {
+                *config = smoke.clone()
+            });
+            if resumed {
+                let root = data.join("loras/lora_iris/iris_style.checkpoints");
+                std::fs::create_dir_all(&root).unwrap();
+                apply_resume_translation(&mut plan.config, &root);
+            }
+            let run = run(Behavior::Completes, plan, &data);
+            assert!(run.outcome.is_ok(), "{:?}\n{:#?}", run.outcome, run.posts);
+            assert_eq!(run.seen.teacher.as_deref(), Some(teacher.as_path()));
+            let request = run.seen.request.expect("the trainer ran");
+            assert!(request.config.full_finetune, "a FULL fine-tune");
+            assert_eq!(request.config.optimizer, "muon");
+            assert_eq!(
+                (request.config.batch_size, request.config.resolution),
+                (1, 256)
+            );
+            let options = &request.config.model_options["iris"];
+            assert_eq!(options["stage"], json!("stage1_256"));
+            assert!(options["repa"]["weight"].as_f64() > Some(0.0));
+            assert_eq!(
+                options.get("resume_from").is_some(),
+                resumed,
+                "only the resumed run carries the checkpoint root: {options:#}"
+            );
+            let resolved = &terminal(&run.posts)["result"]["irisPlan"];
+            assert_eq!(resolved["stage"], json!("stage1_256"));
+            assert!(resolved["repa"].is_object(), "{resolved:#}");
+        }
+
+        stage_task_export(&data, "upscaler");
+        *crate::iris_task_training::TEST_TRAINING_RESOURCES
+            .lock()
+            .unwrap() = Some(vec![
+            fixture_resource(
+                &data,
+                "lpips_vgg16",
+                "fixture/vgg",
+                "model.safetensors",
+                b"vgg",
+            ),
+            fixture_resource(&data, "lpips_lin", "fixture/lin", "lin.safetensors", b"lin"),
+            fixture_resource(
+                &data,
+                "critic_trunk",
+                "fixture/trunk",
+                "trunk.bin",
+                b"trunk",
+            ),
+        ]);
+        let plan = task_plan(
+            &data,
+            "iris_3b_restore",
+            task_dataset(&data, "restoration", 2, false),
+            |config| *config = restore_smoke_config(true),
+        );
+        let run = run_as("iris_3b_restore", Behavior::Completes, plan, &data);
+        *crate::iris_task_training::TEST_TRAINING_RESOURCES
+            .lock()
+            .unwrap() = None;
+        assert!(run.outcome.is_ok(), "{:?}\n{:#?}", run.outcome, run.posts);
+        let request = run.seen.request.expect("the restoration trainer ran");
+        assert!(request.config.full_finetune, "the paper's FULL fine-tune");
+        assert_eq!(request.config.resolution, 256);
     }
 
     /// REPA without the installed teacher is refused before the loader runs, naming the Model

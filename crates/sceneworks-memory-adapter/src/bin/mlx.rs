@@ -40,6 +40,17 @@ mod mlx_ltx25;
 #[path = "mlx_wan_scail2.rs"]
 mod mlx_wan_scail2;
 
+#[path = "mlx_iris.rs"]
+mod mlx_iris;
+
+/// The three Iris-3B task routes (sc-25690), served by `mlx_iris`. Registry ids of `mlx-gen-iris`
+/// (`gen_core::iris::GENERATION_MODEL_ID` / `DEPTH_MODEL_ID` / `restoration::MODEL_ID`), which are
+/// also the catalog model ids. Spelled here, as consts, because
+/// `scripts/stale-lane-report.mjs::adapterCapturableProviders` reads the dispatch arms off this file.
+const IRIS_PROVIDER: &str = "iris_3b";
+const IRIS_DEPTH_PROVIDER: &str = "iris_3b_depth";
+const IRIS_RESTORE_PROVIDER: &str = "iris_3b_restore";
+
 const EDGES: [u32; 7] = [768, 640, 512, 448, 384, 320, 256];
 const MAX_THRESHOLD: f64 = 3e-2;
 const MEAN_THRESHOLD: f64 = 3e-3;
@@ -22611,6 +22622,13 @@ fn run_with(
         // name. Validates against Bernini's own advertised canvases rather than refusing multi-frame
         // geometry, exactly as the two video arms above it do.
         BERNINI_PROVIDER => run_bernini(request),
+        // sc-25690: the three Iris-3B task routes. Generation is a registry generator; depth and
+        // restoration are NOT generators (a provider-specific estimator and a `Transform`), so the
+        // arm drives each the way its own task is driven — one estimate / one tiled pass at the
+        // plan geometry — after the same batch/frames validation every image arm keeps.
+        IRIS_PROVIDER => mlx_iris::run(request),
+        IRIS_DEPTH_PROVIDER => mlx_iris::run(request),
+        IRIS_RESTORE_PROVIDER => mlx_iris::run(request),
         other => Err(format!(
             "MLX five-rung calibration does not implement provider {other:?}"
         )),

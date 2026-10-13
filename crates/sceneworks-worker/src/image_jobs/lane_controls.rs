@@ -163,6 +163,24 @@ pub(crate) fn resolve_native_prompt_batch(
     Ok(Some(batch))
 }
 
+/// The output area, in pixels, the declared single-image Candle floors carry: 1024² = 1 MP. The
+/// declared activation overlay charges every megapixel (and every image) beyond it.
+pub(crate) const DECLARED_ACTIVATION_FLOOR_PIXELS: u64 = 1024 * 1024;
+
+/// `candle.imageActivationGbPerMegapixel` when the entry DECLARES it — the term
+/// [`declared_activation_overlay_bytes`] charges. An entry that declares it has every image and
+/// megapixel beyond one image at [`DECLARED_ACTIVATION_FLOOR_PIXELS`] priced by that overlay, so no
+/// other estimator may scale the same activations by batch or area again
+/// (`candle_memory_strategy::law_geometry`).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn declared_activation_gb_per_megapixel(manifest: &JsonObject) -> Option<f64> {
+    manifest
+        .get("candle")
+        .and_then(|candle| candle.get("imageActivationGbPerMegapixel"))
+        .and_then(Value::as_f64)
+        .filter(|gb| gb.is_finite() && *gb > 0.0)
+}
+
 /// The DECLARED pixel-space activation overlay of a Candle image request, in bytes, charged on top of
 /// the single-image floors (`candle.minMemoryGb` / `sequentialPeakGb`, which carry ONE image at
 /// <= 1024²): `candle.imageActivationGbPerMegapixel × (images × max(1, width·height / 1024²) − 1)`.
@@ -182,17 +200,13 @@ pub(crate) fn declared_activation_overlay_bytes(
     height: u32,
 ) -> WorkerResult<u64> {
     let images = batch.map_or(1, NativePromptBatch::images);
-    let megapixels = (f64::from(width) * f64::from(height) / (1024.0 * 1024.0)).max(1.0);
+    let megapixels =
+        (f64::from(width) * f64::from(height) / DECLARED_ACTIVATION_FLOOR_PIXELS as f64).max(1.0);
     let units = f64::from(images) * megapixels - 1.0;
     if units <= 0.0 {
         return Ok(0);
     }
-    let per_megapixel_gb = request
-        .model_manifest_entry
-        .get("candle")
-        .and_then(|candle| candle.get("imageActivationGbPerMegapixel"))
-        .and_then(Value::as_f64)
-        .filter(|gb| gb.is_finite() && *gb > 0.0);
+    let per_megapixel_gb = declared_activation_gb_per_megapixel(&request.model_manifest_entry);
     match per_megapixel_gb {
         Some(gb) => Ok((units * gb * crate::fit_gate::BYTES_PER_GIB).round() as u64),
         None if batch.is_some() => Err(WorkerError::InvalidPayload(format!(

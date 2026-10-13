@@ -769,3 +769,167 @@ async fn the_dataset_check_reports_per_item_under_the_runs_policy() {
     assert_eq!(report["items"][0]["status"], "ok", "{report:#}");
     assert_eq!(report["trainable"], true);
 }
+
+/// Every dataset file and every installed (HF snapshot) file under `root`, with its bytes — the
+/// sources a training run reads and must never modify (sc-25690).
+pub(super) fn source_tree(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .components()
+                .any(|part| matches!(part.as_os_str().to_str(), Some("datasets" | "snapshots")))
+            {
+                files.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    files
+}
+
+/// The ids of every catalog model.
+pub(super) async fn model_ids(app: &axum::Router) -> Vec<String> {
+    let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{models}");
+    let mut ids: Vec<String> = models
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|model| model["id"].as_str().map(str::to_owned))
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Epic AT6 (sc-25690) — a FAILED export of a depth and of a restoration run. The worst case is
+/// staged on purpose: the complete export directory IS on disk at the run's output path (as if the
+/// failure came after the bytes were written), and the job is then reported `failed`. Nothing is
+/// registered — no result flag, no new catalog model — and the run's sources (its dataset files and
+/// sidecars, the installed task export and training resources) are byte-identical. The same export
+/// reported `completed` registers, so it is the failure that withholds registration, not the files.
+#[tokio::test]
+async fn a_failed_task_export_registers_no_model_and_leaves_its_sources_untouched() {
+    let _env = env("128");
+    let temp_dir = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).unwrap();
+    let project_id = project(&app).await;
+    stage_task_export(&settings.data_dir, "depth", DEPTH_CONFIG);
+    stage_task_export(&settings.data_dir, "upscaler", UPSCALER_CONFIG);
+    stage_training_resources(&settings.data_dir, None);
+
+    for (target_id, export_config) in [
+        (DEPTH_TARGET, DEPTH_CONFIG),
+        (RESTORE_TARGET, UPSCALER_CONFIG),
+    ] {
+        let dataset = dataset(&app, &project_id, 1).await;
+        let dataset_id = dataset["id"].as_str().unwrap().to_owned();
+        let item_id = dataset["items"][0]["id"].as_str().unwrap().to_owned();
+        let task_target = target(&app, target_id).await;
+        let config = if target_id == DEPTH_TARGET {
+            let (status, body) = upload_sidecar(
+                &app,
+                &project_id,
+                &dataset_id,
+                &item_id,
+                "depth",
+                "d.npy",
+                &npy(16, 32),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            small_depth_config(&task_target)
+        } else {
+            let (status, body) = upload_sidecar(
+                &app,
+                &project_id,
+                &dataset_id,
+                &item_id,
+                "degraded",
+                "lq.png",
+                &png(16, 8),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            let mut config = task_target["defaults"].clone();
+            config["advanced"]["networkType"] = json!("lora");
+            config["resolution"] = json!(256);
+            config["steps"] = json!(4);
+            config["saveEvery"] = json!(2);
+            config["advanced"]["sampleEvery"] = json!(2);
+            config
+        };
+
+        let mut outcomes = Vec::new();
+        for status in ["failed", "completed"] {
+            let models_before = model_ids(&app).await;
+            let (code, job) =
+                submit(&app, &project_id, &dataset_id, target_id, config.clone()).await;
+            assert_eq!(code, StatusCode::CREATED, "{target_id}: {job}");
+            let plan = &job["payload"]["plan"];
+            let job_id = job["id"].as_str().unwrap().to_owned();
+            let output_dir =
+                std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
+            let stem = plan["output"]["fileName"]
+                .as_str()
+                .unwrap()
+                .trim_end_matches(".safetensors")
+                .to_owned();
+            claim_training_job_as_mlx_worker(&app, &job_id).await;
+            let export = output_dir.join(&stem);
+            std::fs::create_dir_all(&export).unwrap();
+            std::fs::write(export.join("config.yaml"), export_config).unwrap();
+            write_test_safetensors(&export.join("model.safetensors"));
+            std::fs::write(export.join("empty_prompt.safetensors"), b"prompt").unwrap();
+            let sources_before = source_tree(temp_dir.path());
+            assert!(
+                sources_before.keys().any(|path| path.ends_with(format!(
+                    "sidecars/{item_id}.{}",
+                    if target_id == DEPTH_TARGET {
+                        "depth.npy"
+                    } else {
+                        "degraded.png"
+                    }
+                ))),
+                "{target_id}: the dataset's sidecar is among the sources"
+            );
+            let reported = complete(&app, &job_id, status, json!({})).await;
+            assert_eq!(reported["status"], status, "{target_id}: {reported}");
+            assert_eq!(
+                source_tree(temp_dir.path()),
+                sources_before,
+                "{target_id} ({status}): the run's sources are untouched"
+            );
+            let registered = reported["result"]["baseCheckpointRegistered"] == json!(true);
+            let new_models = model_ids(&app)
+                .await
+                .into_iter()
+                .filter(|id| !models_before.contains(id))
+                .count();
+            outcomes.push((status, registered, new_models, reported));
+        }
+        let (_, registered, new_models, reported) = &outcomes[0];
+        assert!(
+            !registered && *new_models == 0,
+            "{target_id}: a failed export registers nothing: {reported}"
+        );
+        assert!(
+            reported["result"].get("baseCheckpointModelId").is_none()
+                && reported["result"].get("loraRegistered").is_none(),
+            "{target_id}: {reported}"
+        );
+        let (_, registered, new_models, reported) = &outcomes[1];
+        assert!(
+            *registered && *new_models == 1,
+            "{target_id}: the same export, completed, registers: {reported}"
+        );
+    }
+}

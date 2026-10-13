@@ -636,9 +636,22 @@ export function choiceOptionsForTarget(target, key, fallback) {
   return Array.isArray(advertised) && advertised.length ? advertised : fallback;
 }
 
-// `limits.gradientCheckpointing: false` — the target's trainer does not implement it (Iris).
-export function gradientCheckpointingUnsupported(target) {
-  return target?.limits?.gradientCheckpointing === false;
+// The training lanes a target's gradient checkpointing is limited to
+// (`limits.gradientCheckpointingLanes`, Iris depth / restoration: the lanes whose task trainer
+// implements activation checkpointing), or null when the target does not limit it by lane.
+export function gradientCheckpointingLanes(target) {
+  const lanes = target?.limits?.gradientCheckpointingLanes;
+  return Array.isArray(lanes) ? lanes : null;
+}
+
+// `limits.gradientCheckpointing: false` — the target's trainer does not implement it at all (Iris
+// generation). `limits.gradientCheckpointingLanes` — it is implemented on those lanes only:
+// unsupported on a KNOWN lane outside the list. An unknown lane keeps the control; the worker
+// refuses it typed before load on a lane that lacks it.
+export function gradientCheckpointingUnsupported(target, lane) {
+  if (target?.limits?.gradientCheckpointing === false) return true;
+  const lanes = gradientCheckpointingLanes(target);
+  return Boolean(lanes) && Boolean(lane) && !lanes.includes(lane);
 }
 
 export function networkTypeLabel(value) {
@@ -1242,7 +1255,7 @@ export function promptListToLines(list) {
   return (Array.isArray(list) ? list : []).join("\n");
 }
 
-export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun = true }) {
+export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun = true, trainingLane = null }) {
   const defaults = selectedTarget?.defaults ?? {};
   const networkType = asText(configDraft.networkType).trim() || "lora";
   const isFullFinetune = isFullFinetuneNetworkType(networkType);
@@ -1307,7 +1320,7 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     trainingAdapterVersion: asText(configDraft.trainingAdapterVersion).trim(),
     // Platform-effective target metadata carries any backend-specific full-tune requirement. MLX
     // has no override and keeps the submitted draft; Candle Mage advertises f32/no-checkpointing.
-    gradientCheckpointing: gradientCheckpointingUnsupported(selectedTarget)
+    gradientCheckpointing: gradientCheckpointingUnsupported(selectedTarget, trainingLane)
       ? false
       : fullFinetuneConfig?.gradientCheckpointing ?? Boolean(configDraft.gradientCheckpointing),
     mixedPrecision: fullFinetuneConfig?.mixedPrecision ?? asText(configDraft.precision).trim(),

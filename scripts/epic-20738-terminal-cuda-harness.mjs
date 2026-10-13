@@ -184,8 +184,7 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // decoders, the sc-24831 MediaPipe FaceMesh-v2 re-host, the sc-24833 FLUX.2 VAE / E-LatentLPIPS
 // weights, ViTPose+ base and the HybrIK / Sapiens re-hosts; the epic's final main sync (sc-2124) adds
 // main's YuE1 re-hosts, YuE2's three upstream m-a-p repos and the Wan-VACE base/transformer entries
-// (135 repo@revision keys incl. the two frozen importer authorities; sc-19383 left 117).
-// The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
+// (137 repo@revision keys incl. the two frozen importer authorities; sc-19383 left 117).
 // The Iris-3B epic (sc-25678) merges with main's record: its two generation keys (speridlabs/iris-3b,
 // Qwen/Qwen3-VL-4B-Instruct), the three restoration TRAINING resources (timm/vgg16.tv_in1k,
 // vivym/lpips, laion/CLIP-convnext_xxlarge-…-soup) and the REPA teacher (facebook/dinov2-base) join

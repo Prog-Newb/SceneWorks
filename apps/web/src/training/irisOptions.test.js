@@ -11,6 +11,7 @@ import {
 import {
   IRIS_OPTION_KEYS,
   irisCaptionFieldOptions,
+  irisFloorSummary,
   irisMemoryFloors,
   irisPreviousRuns,
   irisRunOutcome,
@@ -349,14 +350,47 @@ describe("limit-driven choice lists", () => {
 describe("Iris helpers", () => {
   it("reads the declared floor for the lane, artifact and resolution (next row up)", () => {
     const target = irisTarget();
-    expect(irisMemoryFloors(target, "lora", 256, "mlx")).toEqual([{ lane: "mlx", gb: 16 }]);
-    expect(irisMemoryFloors(target, "full", 384, "candle")).toEqual([{ lane: "candle", gb: 88 }]);
+    expect(irisMemoryFloors(target, "lora", 256, "mlx")).toEqual([{ lane: "mlx", gib: 16, provenance: "declared" }]);
+    expect(irisMemoryFloors(target, "full", 384, "candle")).toEqual([{ lane: "candle", gib: 88, provenance: "measured" }]);
     expect(irisMemoryFloors(target, "lokr", 512, null)).toEqual([
-      { lane: "mlx", gb: 24 },
-      { lane: "candle", gb: 32 },
+      { lane: "mlx", gib: 24, provenance: "declared" },
+      { lane: "candle", gib: 32, provenance: "declared" },
     ]);
     expect(irisMemoryFloors(target, "lora", 2048, "mlx")).toEqual([]);
     expect(irisMemoryFloors({}, "lora", 256, "mlx")).toEqual([]);
+  });
+
+  it("reads each row's own provenance, and the full_ac row under full activation checkpointing", () => {
+    const target = irisTarget();
+    // The same table mixes measured, extrapolated and declared rows.
+    expect(irisMemoryFloors(target, "full", 512, "mlx")).toEqual([{ lane: "mlx", gib: 88, provenance: "measured" }]);
+    expect(irisMemoryFloors(target, "full", 1024, "candle")).toEqual([{ lane: "candle", gib: 104, provenance: "extrapolated" }]);
+    // A full run that recomputes every region reads full_ac; selective_layer and adapters do not.
+    for (const policy of ["full", "selective_op"]) {
+      expect(irisMemoryFloors(target, "full", 1024, "mlx", policy)).toEqual([{ lane: "mlx", gib: 96, provenance: "measured" }]);
+    }
+    expect(irisMemoryFloors(target, "full", 1024, "mlx", "selective_layer")).toEqual([{ lane: "mlx", gib: 104, provenance: "measured" }]);
+    expect(irisMemoryFloors(target, "lora", 1024, "mlx", "full")).toEqual([{ lane: "mlx", gib: 40, provenance: "declared" }]);
+    // A lane whose table has no full_ac rows keeps reading full.
+    expect(irisMemoryFloors(target, "full", 1024, "candle", "full")).toEqual([{ lane: "candle", gib: 104, provenance: "extrapolated" }]);
+    // A table that publishes no provenance is declared, never assumed measured.
+    const bare = { memoryFloors: { lanes: target.memoryFloors.lanes } };
+    expect(irisMemoryFloors(bare, "full", 512, "mlx")).toEqual([{ lane: "mlx", gib: 88, provenance: "declared" }]);
+  });
+
+  it("names every floor with its unit and its own evidence", () => {
+    const summary = irisFloorSummary(
+      [
+        { lane: "mlx", gib: 88, provenance: "measured" },
+        { lane: "candle", gib: 104, provenance: "extrapolated" },
+        { lane: "x", gib: 128, provenance: "lower_bound" },
+      ],
+      { mlx: "MLX", candle: "Candle" },
+    );
+    expect(summary).toBe(
+      "MLX 88 GiB (measured) · Candle 104 GiB (extrapolated from measured runs) · x 128 GiB (declared above a measured lower bound)",
+    );
+    expect(irisFloorSummary([{ lane: "mlx", gib: 16, provenance: "declared" }])).toBe("mlx 16 GiB (declared, not yet measured)");
   });
 
   it("derives the lane from the capability switches", () => {

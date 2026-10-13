@@ -146,8 +146,8 @@ all = "warn"
 # the same inference revision as the direct crates. The bump script moves both revs and the lock
 # guard refuses a missing, upstream, or skewed resolution.
 [patch."https://github.com/huggingface/candle"]
-candle-core = { git = "https://github.com/SceneWorks/inference", rev = "25231d15b582dc90d332a1f3a41ff45b8032f5b2" }
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "25231d15b582dc90d332a1f3a41ff45b8032f5b2" }
+candle-core = { git = "https://github.com/SceneWorks/inference", rev = "6e402df8f4fddcb5affde6e6955e170c1d99bff9" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "6e402df8f4fddcb5affde6e6955e170c1d99bff9" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
 #

@@ -19,8 +19,9 @@
 //! * [`validate_iris_dataset_captions`] / [`validate_item_captions`] — per-item named captions
 //!   (`TrainingItem.model_options["captions"] = {field: text}`, upstream's per-sample `info`
 //!   dict) and the `caption_field(s)` selection that reads them.
-//! * [`iris_training_memory_floor_gb`] — the DECLARED (measured: false) per-lane floors, so a routed
-//!   Iris training lane is never admitted unbounded. S6 owns the measured values.
+//! * [`iris_training_memory_floor_gib`] / [`iris_generation_memory_floor`] — the per-lane floors, in
+//!   GiB, each row with its own provenance ([`floors`]: measured / extrapolated / lower bound /
+//!   declared), so a routed Iris training lane is never admitted unbounded.
 //!
 //! The S11 surface of GENERATION training (sc-25689) — official stage presets, bucket/area shapes,
 //! the RoPE law, REPA / iREPA, activation-checkpointing policies, holdout validation, fp16 and
@@ -34,9 +35,12 @@
 
 pub mod curricula;
 pub mod depth;
+pub mod floors;
 pub mod restore;
 
 use serde_json::{json, Map, Value};
+
+use floors::{IrisMemoryFloor, Peak, CAMPAIGN_CUDA_CARD, CANDLE_RESERVE_GIB, MLX_RESERVE_GIB};
 
 use super::{
     object, ContractNumber, ExtraFields, TrainingConfig, TrainingDataset, TrainingModality,
@@ -183,22 +187,90 @@ pub fn iris_objective(target: &TrainingTarget) -> Option<IrisObjective> {
     IrisObjective::from_base_model(&target.base_model)
 }
 
-/// The declared floor (GB) of an Iris run of `objective` with `config` on `lane`, or `None` when no
-/// floor is declared for that shape (callers refuse rather than admit unbounded).
-pub fn iris_objective_memory_floor_gb(
+/// The floor (GiB, with its provenance) of an Iris run of `objective` with `config` on `lane`, or
+/// `None` when no floor row covers that shape (callers refuse rather than admit unbounded).
+pub fn iris_objective_memory_floor(
     objective: IrisObjective,
     lane: &str,
     config: &TrainingConfig,
-) -> Option<u32> {
+) -> Option<IrisMemoryFloor> {
     match objective {
-        IrisObjective::Generation => iris_training_memory_floor_gb(
+        IrisObjective::Generation => iris_generation_memory_floor(
             lane,
             advanced_string(config, "networkType").unwrap_or("lora"),
             config.resolution,
+            iris_full_activation_checkpointing(config),
         ),
-        IrisObjective::Depth => depth::depth_memory_floor_gb(lane, config),
-        IrisObjective::Restoration => restore::restore_memory_floor_gb(lane, config),
+        IrisObjective::Depth => depth::depth_memory_floor(lane, config),
+        IrisObjective::Restoration => restore::restore_memory_floor(lane, config),
     }
+}
+
+/// The lanes whose trainer implements activation checkpointing for `objective` through the shared
+/// `advanced.gradientCheckpointing` toggle (the engine's `TrainingConfig::gradient_checkpointing`,
+/// which the depth and restoration trainers map to the `full` policy).
+///
+/// The engine publishes NO declaration of this — its trainer descriptor has no such flag, and a
+/// lane that has not wired the regions refuses in `Trainer::validate`, which needs the weights
+/// loaded. So this is an explicit table of what each lane's trainer accepts at the pinned inference
+/// revision (Candle since inference #1242, MLX since #1243). The real-weight depth / restoration
+/// training smokes ask the lane's own trainer and FAIL when its answer differs from this table, so
+/// the table cannot drift from the engine unnoticed.
+///
+/// Generation has none: its control is the richer `advanced.iris.activation_checkpointing` policy,
+/// and its trainer refuses the shared toggle on both lanes.
+pub fn iris_gradient_checkpointing_lanes(objective: IrisObjective) -> &'static [&'static str] {
+    match objective {
+        IrisObjective::Generation => &[],
+        IrisObjective::Depth | IrisObjective::Restoration => &["candle", "mlx"],
+    }
+}
+
+/// Whether a run asks for the shared gradient (activation) checkpointing toggle.
+pub fn iris_gradient_checkpointing(config: &TrainingConfig) -> bool {
+    config.advanced.get("gradientCheckpointing") == Some(&Value::Bool(true))
+}
+
+/// `Some(message)` when a depth / restoration run asks for gradient checkpointing on a lane whose
+/// trainer does not implement it for that task — a typed refusal before load, never a knob the
+/// trainer would refuse after the weights are in (or silently ignore).
+pub fn iris_gradient_checkpointing_refusal(
+    objective: IrisObjective,
+    lane: &str,
+    config: &TrainingConfig,
+) -> Option<String> {
+    if objective == IrisObjective::Generation || !iris_gradient_checkpointing(config) {
+        return None;
+    }
+    let lanes = iris_gradient_checkpointing_lanes(objective);
+    (!lanes.contains(&lane)).then(|| {
+        let backend = |lane: &str| {
+            match lane {
+                "mlx" => "Apple Silicon (MLX)",
+                "candle" => "NVIDIA (Candle/CUDA)",
+                other => other,
+            }
+            .to_owned()
+        };
+        let supported = if lanes.is_empty() {
+            "no backend implements it for this objective yet".to_owned()
+        } else {
+            format!(
+                "it is implemented on {}",
+                lanes
+                    .iter()
+                    .map(|lane| backend(lane))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            )
+        };
+        format!(
+            "Gradient (activation) checkpointing is not implemented for Iris 3B {} training on \
+             {}; {supported}. Turn gradient checkpointing off to run here.",
+            objective.task(),
+            backend(lane)
+        )
+    })
 }
 
 /// A short description of the run shape a floor was declared for (refusal messages).
@@ -230,45 +302,157 @@ pub fn iris_objective_shape(objective: IrisObjective, config: &TrainingConfig) -
     }
 }
 
-/// Declared (NOT measured) memory floors, GB, per `(lane, artifact, resolution)`.
+// ---- Measured inputs of the generation full fine-tune rows --------------------------------------
+// The ONLY numbers to edit when a campaign re-measures: each is the whole-process peak its probe
+// printed, in the unit it printed it (`Peak`). Every dependent row below is computed from them.
+//
+// sc-25690 terminal campaign, `train_memory_probe`: full fine-tune, AdamW, bf16 over f32 masters,
+// EMA on, cached text conditioning, batch 1, whole-process peak; summaries print DECIMAL GB.
+//
+// MLX (nax-macos-2; inference PR 1238 @b1c04bd0d, runs 38312190794 two steps + export and
+// 38318086154 six steps): the ACTIVE peak with MLX's buffer cache DISABLED — what the run needs.
+// Steady by optimizer step 2 and flat through step 6; the process footprint with the cache off
+// agrees within 0.5 GB. Production runs keep the cache, so their footprint can rise to the
+// allocator's GC ceiling (0.95 × the recommended working set, 109.68 GB on that Mac) without that
+// being need — which is what the campaign's first MLX numbers were.
+//
+// Candle (RTX PRO 6000 card 1, 97,887 MiB = 95.59 GiB; inference run 38393679427 @1449045c8,
+// after the training-tape memory fix of inference #1242): the LIVE pool peak over six optimizer
+// steps, steady from step 2. 1024² without activation checkpointing needs 128.75 GB: it completed
+// only by spilling 29.2 GB to system memory (115–157 s/step) — a measured need that does NOT fit
+// that card.
+const MLX_FULL_512_PEAK: Peak = Peak::DecimalGb(65.57);
+const MLX_FULL_1024_PEAK: Peak = Peak::DecimalGb(104.49);
+const MLX_FULL_AC_1024_PEAK: Peak = Peak::DecimalGb(74.88);
+const CANDLE_FULL_512_PEAK: Peak = Peak::DecimalGb(82.41);
+const CANDLE_FULL_1024_SPILL_PEAK: Peak = Peak::DecimalGb(128.75);
+const CANDLE_FULL_AC_512_PEAK: Peak = Peak::DecimalGb(69.19);
+const CANDLE_FULL_AC_1024_PEAK: Peak = Peak::DecimalGb(82.58);
+
+const MLX_FULL_512: IrisMemoryFloor = IrisMemoryFloor::measured(MLX_FULL_512_PEAK, MLX_RESERVE_GIB);
+const MLX_FULL_1024: IrisMemoryFloor =
+    IrisMemoryFloor::measured(MLX_FULL_1024_PEAK, MLX_RESERVE_GIB);
+const MLX_FULL_AC_1024: IrisMemoryFloor =
+    IrisMemoryFloor::measured(MLX_FULL_AC_1024_PEAK, MLX_RESERVE_GIB);
+const CANDLE_FULL_512: IrisMemoryFloor =
+    IrisMemoryFloor::measured(CANDLE_FULL_512_PEAK, CANDLE_RESERVE_GIB)
+        .held_on(CAMPAIGN_CUDA_CARD.gib());
+const CANDLE_FULL_1024: IrisMemoryFloor = IrisMemoryFloor::measured_with_spill(
+    CANDLE_FULL_1024_SPILL_PEAK,
+    CANDLE_RESERVE_GIB,
+    CAMPAIGN_CUDA_CARD.gib(),
+);
+const CANDLE_FULL_AC_512: IrisMemoryFloor =
+    IrisMemoryFloor::measured(CANDLE_FULL_AC_512_PEAK, CANDLE_RESERVE_GIB)
+        .held_on(CAMPAIGN_CUDA_CARD.gib());
+const CANDLE_FULL_AC_1024: IrisMemoryFloor =
+    IrisMemoryFloor::measured(CANDLE_FULL_AC_1024_PEAK, CANDLE_RESERVE_GIB)
+        .held_on(CAMPAIGN_CUDA_CARD.gib());
+/// The 256² full rows are declared (80) from the 256² evidence below, and never above the measured
+/// 512² row (a smaller run never needs more than a larger one).
+const MLX_FULL_256: IrisMemoryFloor = IrisMemoryFloor::declared(80).bounded_by(MLX_FULL_512);
+const CANDLE_FULL_256: IrisMemoryFloor = IrisMemoryFloor::declared(80).bounded_by(CANDLE_FULL_512);
+
+/// Memory floors, **GiB** ([`floors`]), per `(lane, artifact, resolution)`, each with its own
+/// provenance. `full_ac` is a FULL run under activation checkpointing
+/// (`advanced.iris.activation_checkpointing` = `full` / `selective_op`,
+/// [`iris_generation_memory_floor`]); every other full run reads `full`.
 ///
-/// Evidence (inference real-weight runs on the 3B backbone, 256², batch 1, bf16): MLX LoRA peak
-/// 15.3 GB; Candle LoRA peak 21.8 GB. Each 256 floor is that peak rounded up (Candle adds the 2 GB
-/// allocator reserve every padded Candle floor folds in). Nothing larger has been run, so the 512 /
-/// 1024 rows scale the activation term conservatively, and a FULL run holds the f32 masters, the
-/// AdamW moments, the gradients and the EMA of every 3B weight (~60 GB of state before activations)
-/// — declared, honestly, far above any adapter run. S6 (sc-25684) replaces these with measured
-/// values; until then a machine under the floor is refused before load, never admitted unbounded.
-const IRIS_MEMORY_FLOORS_GB: [(&str, &str, u32, u32); 12] = [
-    ("mlx", "adapter", 256, 16),
-    ("mlx", "adapter", 512, 24),
-    ("mlx", "adapter", 1024, 40),
-    ("mlx", "full", 256, 80),
-    ("mlx", "full", 512, 88),
-    ("mlx", "full", 1024, 104),
-    ("candle", "adapter", 256, 24),
-    ("candle", "adapter", 512, 32),
-    ("candle", "adapter", 1024, 48),
-    ("candle", "full", 256, 80),
-    ("candle", "full", 512, 88),
-    ("candle", "full", 1024, 104),
+/// * MEASURED — `full` 512 / 1024 and `full_ac` 1024 on MLX; `full` 512 and `full_ac` 512 / 1024
+///   on Candle: the `*_PEAK` constants above, converted to GiB, plus the lane's 2 GiB reserve
+///   ([`floors::MLX_RESERVE_GIB`] / [`CANDLE_RESERVE_GIB`]), rounded up; a Candle row that ran
+///   without spilling never exceeds the card that held its run.
+/// * MEASURED WITH SPILL — Candle `full` 1024 ([`CANDLE_FULL_1024`]): the measured need, which the
+///   card met only by spilling to system memory; the row refuses that card.
+/// * EXTRAPOLATED — the `full` 256 rows where the measured 512 row bounds them; the `full_ac` rows
+///   with no run of their own, each the lower of the no-AC row at that size and the next measured
+///   AC row up (checkpointing only lowers a peak, and a smaller run never needs more than a larger
+///   one).
+/// * DECLARED — the adapter rows: inference real-weight runs on the 3B backbone, 256², batch 1,
+///   bf16 — MLX LoRA peak 15.3 GB, Candle LoRA peak 21.8 GB (decimal) — padded up (Candle adds the
+///   2 GiB reserve); larger adapter rows scale the activation term conservatively.
+///
+/// A machine under its floor is refused before load, never admitted unbounded.
+const IRIS_MEMORY_FLOORS_GIB: [(&str, &str, u32, IrisMemoryFloor); 18] = [
+    ("mlx", "adapter", 256, IrisMemoryFloor::declared(16)),
+    ("mlx", "adapter", 512, IrisMemoryFloor::declared(24)),
+    ("mlx", "adapter", 1024, IrisMemoryFloor::declared(40)),
+    ("mlx", "full", 256, MLX_FULL_256),
+    ("mlx", "full", 512, MLX_FULL_512),
+    ("mlx", "full", 1024, MLX_FULL_1024),
+    (
+        "mlx",
+        "full_ac",
+        256,
+        IrisMemoryFloor::bound_from(MLX_FULL_256).bounded_by(MLX_FULL_AC_1024),
+    ),
+    (
+        "mlx",
+        "full_ac",
+        512,
+        IrisMemoryFloor::bound_from(MLX_FULL_512).bounded_by(MLX_FULL_AC_1024),
+    ),
+    ("mlx", "full_ac", 1024, MLX_FULL_AC_1024),
+    ("candle", "adapter", 256, IrisMemoryFloor::declared(24)),
+    ("candle", "adapter", 512, IrisMemoryFloor::declared(32)),
+    ("candle", "adapter", 1024, IrisMemoryFloor::declared(48)),
+    ("candle", "full", 256, CANDLE_FULL_256),
+    ("candle", "full", 512, CANDLE_FULL_512),
+    ("candle", "full", 1024, CANDLE_FULL_1024),
+    (
+        "candle",
+        "full_ac",
+        256,
+        IrisMemoryFloor::bound_from(CANDLE_FULL_256).bounded_by(CANDLE_FULL_AC_512),
+    ),
+    ("candle", "full_ac", 512, CANDLE_FULL_AC_512),
+    ("candle", "full_ac", 1024, CANDLE_FULL_AC_1024),
 ];
 
-/// The declared memory floor (GB) an Iris run of `network_type` at `resolution` needs on `lane`
-/// (`"mlx"` unified memory, `"candle"` device VRAM). A resolution between two declared rows takes
-/// the next row up (conservative); `None` above the largest declared row or for an unknown lane —
-/// which callers treat as a refusal, never as "unbounded".
-pub fn iris_training_memory_floor_gb(
+/// The memory floor (GiB) an Iris run of `network_type` at `resolution` needs on `lane` (`"mlx"`
+/// unified memory, `"candle"` device VRAM). A resolution between two rows takes the next row up
+/// (conservative); `None` above the largest row or for an unknown lane — which callers treat as a
+/// refusal, never as "unbounded".
+pub fn iris_training_memory_floor_gib(
     lane: &str,
     network_type: &str,
     resolution: u32,
 ) -> Option<u32> {
+    iris_generation_memory_floor(lane, network_type, resolution, false).map(|floor| floor.gib)
+}
+
+/// Whether a run's `advanced.iris.activation_checkpointing` recomputes every region (`full`, or
+/// `selective_op`, which natively enters and recomputes every region too) — the shape the
+/// `full_ac` floor rows were measured at. `selective_layer` and `none` read the plain rows.
+pub fn iris_full_activation_checkpointing(config: &TrainingConfig) -> bool {
+    matches!(
+        config
+            .advanced
+            .get(IRIS_OPTIONS_KEY)
+            .and_then(|options| options.get("activation_checkpointing"))
+            .and_then(Value::as_str),
+        Some("full" | "selective_op")
+    )
+}
+
+/// The floor row (GiB + provenance) of a generation run, with the run's activation checkpointing:
+/// a FULL run that recomputes every region reads the `full_ac` rows.
+pub fn iris_generation_memory_floor(
+    lane: &str,
+    network_type: &str,
+    resolution: u32,
+    full_activation_checkpointing: bool,
+) -> Option<IrisMemoryFloor> {
     let artifact = if network_type.trim().eq_ignore_ascii_case("full") {
-        "full"
+        if full_activation_checkpointing {
+            "full_ac"
+        } else {
+            "full"
+        }
     } else {
         "adapter"
     };
-    IRIS_MEMORY_FLOORS_GB
+    IRIS_MEMORY_FLOORS_GIB
         .iter()
         .filter(|(row_lane, row_artifact, row_resolution, _)| {
             *row_lane == lane && *row_artifact == artifact && *row_resolution >= resolution
@@ -278,31 +462,27 @@ pub fn iris_training_memory_floor_gb(
 }
 
 /// The floor table as published on the target (`memoryFloors`), so the Studio can say what a run
-/// needs before launch.
+/// needs — and what that number rests on — before launch.
 fn memory_floors_json() -> Value {
-    let mut lanes = Map::new();
-    for (lane, artifact, resolution, floor) in IRIS_MEMORY_FLOORS_GB {
-        let lane_entry = lanes
-            .entry(lane.to_owned())
-            .or_insert_with(|| Value::Object(Map::new()));
-        let artifacts = lane_entry.as_object_mut().expect("lane entry is an object");
-        let rows = artifacts
-            .entry(artifact.to_owned())
-            .or_insert_with(|| Value::Object(Map::new()));
-        rows.as_object_mut()
-            .expect("artifact rows are an object")
-            .insert(resolution.to_string(), json!(floor));
-    }
-    json!({
-        "measured": false,
-        "unit": "GB",
-        "basis": "Declared floors (no measurement campaign): MLX LoRA 256px peak 15.3 GB and Candle \
-                  LoRA 256px peak 21.8 GB on the real 3B backbone; larger resolutions and full \
-                  fine-tuning are conservative declarations. An MLX floor is judged against unified \
-                  memory minus the macOS/app reserve the MLX generation gate holds out. A machine \
-                  under its floor is refused before the model loads.",
-        "lanes": Value::Object(lanes),
-    })
+    floors::memory_floors_json(
+        None,
+        "Keyed by artifact and training resolution; `full_ac` is a full fine-tune under full \
+         activation checkpointing. Measured rows are the whole-process peak of a real full \
+         fine-tune at batch 1, converted to GiB, plus a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the \
+         cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the \
+         recommended working set) without that being need. Candle peaks are the live pool peak over six optimizer steps (steady from step 2) on a 95.59 \
+         GiB card; a row marked measured_spill is a need the run met only by spilling to system \
+         memory, so it does not fit that card.",
+        IRIS_MEMORY_FLOORS_GIB
+            .iter()
+            .map(|(lane, artifact, resolution, floor)| {
+                (
+                    *lane,
+                    vec![(*artifact).to_owned(), resolution.to_string()],
+                    *floor,
+                )
+            }),
+    )
 }
 
 /// The Iris-3B generation training target: random-init / weights-init FULL training and LoRA /
@@ -938,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_floors_are_declared_for_every_offered_lane_artifact_and_resolution() {
+    fn a_floor_row_covers_every_offered_lane_artifact_and_resolution() {
         let target = iris_generation_target();
         let resolutions: Vec<u32> = target.limits["resolutions"]
             .as_array()
@@ -950,30 +1130,236 @@ mod tests {
             for network in ["lora", "lokr", "full"] {
                 for resolution in &resolutions {
                     assert!(
-                        iris_training_memory_floor_gb(lane, network, *resolution).is_some(),
-                        "{lane}/{network}/{resolution} has no declared floor"
+                        iris_training_memory_floor_gib(lane, network, *resolution).is_some(),
+                        "{lane}/{network}/{resolution} has no floor row"
                     );
                 }
             }
         }
-        // The evidence-backed rows, and full far above adapters.
-        assert_eq!(iris_training_memory_floor_gb("mlx", "lora", 256), Some(16));
+        // The declared adapter rows, and full far above adapters.
+        assert_eq!(iris_training_memory_floor_gib("mlx", "lora", 256), Some(16));
         assert_eq!(
-            iris_training_memory_floor_gb("candle", "lokr", 256),
+            iris_training_memory_floor_gib("candle", "lokr", 256),
             Some(24)
         );
         assert!(
-            iris_training_memory_floor_gb("mlx", "full", 256).unwrap()
-                > iris_training_memory_floor_gb("mlx", "lora", 1024).unwrap()
+            iris_training_memory_floor_gib("mlx", "full", 256).unwrap()
+                > iris_training_memory_floor_gib("mlx", "lora", 1024).unwrap()
         );
         // Between rows takes the next row up; beyond the table and unknown lanes are refusals.
-        assert_eq!(iris_training_memory_floor_gb("mlx", "lora", 384), Some(24));
-        assert_eq!(iris_training_memory_floor_gb("mlx", "lora", 2048), None);
-        assert_eq!(iris_training_memory_floor_gb("cpu", "lora", 256), None);
+        assert_eq!(iris_training_memory_floor_gib("mlx", "lora", 384), Some(24));
+        assert_eq!(iris_training_memory_floor_gib("mlx", "lora", 2048), None);
+        assert_eq!(iris_training_memory_floor_gib("cpu", "lora", 256), None);
         assert_eq!(
             target.extra["memoryFloors"]["lanes"]["candle"]["adapter"]["256"],
             json!(24)
         );
-        assert_eq!(target.extra["memoryFloors"]["measured"], json!(false));
+    }
+
+    /// sc-25690: the shared gradient-checkpointing toggle is a depth / restoration control on the
+    /// lanes whose trainer implements it — both native lanes at this pin; a lane outside the table
+    /// is refused typed, naming where it works.
+    #[test]
+    fn task_gradient_checkpointing_is_refused_on_a_lane_that_lacks_it() {
+        let mut config = depth::iris_depth_target().defaults;
+        for objective in [IrisObjective::Depth, IrisObjective::Restoration] {
+            assert_eq!(
+                iris_gradient_checkpointing_lanes(objective),
+                ["candle", "mlx"]
+            );
+            // Off: nothing to refuse on any lane.
+            for lane in ["mlx", "candle", "cpu"] {
+                assert_eq!(
+                    iris_gradient_checkpointing_refusal(objective, lane, &config),
+                    None
+                );
+            }
+        }
+        config
+            .advanced
+            .insert("gradientCheckpointing".into(), json!(true));
+        assert!(iris_gradient_checkpointing(&config));
+        for objective in [IrisObjective::Depth, IrisObjective::Restoration] {
+            for lane in ["mlx", "candle", "cpu"] {
+                let refusal = iris_gradient_checkpointing_refusal(objective, lane, &config);
+                assert_eq!(
+                    refusal.is_none(),
+                    iris_gradient_checkpointing_lanes(objective).contains(&lane),
+                    "{objective:?} on {lane}: {refusal:?}"
+                );
+            }
+            let refusal =
+                iris_gradient_checkpointing_refusal(objective, "cpu", &config).expect("refused");
+            assert!(
+                refusal.contains(objective.task())
+                    && refusal.contains("training on cpu")
+                    && refusal
+                        .contains("implemented on NVIDIA (Candle/CUDA) and Apple Silicon (MLX)"),
+                "{refusal}"
+            );
+        }
+        // Generation's control is `iris.activation_checkpointing`; this gate is not its.
+        assert!(iris_gradient_checkpointing_lanes(IrisObjective::Generation).is_empty());
+        assert_eq!(
+            iris_gradient_checkpointing_refusal(IrisObjective::Generation, "mlx", &config),
+            None
+        );
+    }
+
+    /// sc-25690: provenance is PER ROW and everything published derives from it — the measured
+    /// full rows say measured, the Candle 1024² row no card here holds says extrapolated, the
+    /// adapter rows say declared; there is no table-wide `measured` flag to disagree with them.
+    #[test]
+    fn every_floor_row_publishes_its_own_provenance() {
+        use floors::FloorProvenance::{Declared, Measured, MeasuredSpill};
+        let floor = |lane, artifact, resolution| {
+            IRIS_MEMORY_FLOORS_GIB
+                .iter()
+                .find(|row| row.0 == lane && row.1 == artifact && row.2 == resolution)
+                .map(|row| row.3)
+                .unwrap()
+        };
+        for lane in ["mlx", "candle"] {
+            for resolution in [256, 512, 1024] {
+                assert_eq!(floor(lane, "adapter", resolution).provenance, Declared);
+            }
+            assert_eq!(floor(lane, "full", 512).provenance, Measured, "{lane}");
+            assert_eq!(floor(lane, "full_ac", 1024).provenance, Measured, "{lane}");
+            // Bounds borrowed from another shape's measurement are never called measured.
+            assert_ne!(floor(lane, "full_ac", 256).provenance, Measured, "{lane}");
+            assert_ne!(floor(lane, "full", 256).provenance, Measured, "{lane}");
+        }
+        assert_ne!(floor("mlx", "full_ac", 512).provenance, Measured);
+        assert_eq!(floor("candle", "full_ac", 512).provenance, Measured);
+        assert_eq!(floor("mlx", "full", 1024).provenance, Measured);
+        // Candle 1024² without checkpointing was measured, but only by spilling off the card.
+        assert_eq!(floor("candle", "full", 1024).provenance, MeasuredSpill);
+
+        let published = &iris_generation_target().extra["memoryFloors"];
+        assert_eq!(published["unit"], json!("GiB"));
+        assert!(published.get("measured").is_none(), "{published:#}");
+        for (lane, artifact, resolution, row) in IRIS_MEMORY_FLOORS_GIB {
+            assert_eq!(
+                published["provenance"][lane][artifact][resolution.to_string()],
+                json!(row.provenance.as_str()),
+                "{lane} {artifact} {resolution}"
+            );
+            assert_eq!(
+                published["lanes"][lane][artifact][resolution.to_string()],
+                json!(row.gib)
+            );
+        }
+        let basis = published["basis"].as_str().unwrap();
+        assert!(basis.contains("Floors are GiB"), "{basis}");
+        assert!(
+            basis.contains("completed only by spilling to system memory): candle full 1024."),
+            "{basis}"
+        );
+    }
+
+    /// sc-25690: the measured rows are the probe peaks converted from the unit the probe printed
+    /// (decimal GB ÷ 1.073741824), plus the Candle reserve, rounded UP — and a floor never shrinks
+    /// as the resolution grows, nor does checkpointing ever raise one.
+    #[test]
+    fn measured_rows_are_the_converted_peaks_and_the_table_is_monotonic() {
+        use floors::{ceil_gib, DECIMAL_GB_PER_GIB};
+        let gib = |peak: Peak| match peak {
+            Peak::DecimalGb(gb) => gb / DECIMAL_GB_PER_GIB,
+            other => other.gib(),
+        };
+        let mlx = |peak: Peak| ceil_gib(gib(peak) + f64::from(MLX_RESERVE_GIB));
+        assert_eq!(MLX_FULL_512.gib, mlx(MLX_FULL_512_PEAK));
+        assert_eq!(MLX_FULL_1024.gib, mlx(MLX_FULL_1024_PEAK));
+        assert_eq!(MLX_FULL_AC_1024.gib, mlx(MLX_FULL_AC_1024_PEAK));
+        let card = CAMPAIGN_CUDA_CARD.gib() as u32;
+        assert_eq!(
+            CANDLE_FULL_512.gib,
+            ceil_gib(gib(CANDLE_FULL_512_PEAK) + f64::from(CANDLE_RESERVE_GIB)).min(card)
+        );
+        assert_eq!(
+            CANDLE_FULL_AC_1024.gib,
+            ceil_gib(gib(CANDLE_FULL_AC_1024_PEAK) + f64::from(CANDLE_RESERVE_GIB)).min(card)
+        );
+        assert_eq!(
+            CANDLE_FULL_AC_512.gib,
+            ceil_gib(gib(CANDLE_FULL_AC_512_PEAK) + f64::from(CANDLE_RESERVE_GIB)).min(card)
+        );
+        // Candle 1024² without checkpointing did not fit the campaign card: its row is the measured
+        // need, above the card, never capped to it.
+        assert_eq!(
+            CANDLE_FULL_1024.gib,
+            ceil_gib(gib(CANDLE_FULL_1024_SPILL_PEAK) + f64::from(CANDLE_RESERVE_GIB))
+        );
+        assert!(CANDLE_FULL_1024.gib > card, "{CANDLE_FULL_1024:?}");
+        for lane in ["mlx", "candle"] {
+            for artifact in ["adapter", "full", "full_ac"] {
+                let rows: Vec<u32> = [256, 512, 1024]
+                    .into_iter()
+                    .map(|resolution| {
+                        iris_generation_memory_floor(
+                            lane,
+                            if artifact == "adapter" {
+                                "lora"
+                            } else {
+                                "full"
+                            },
+                            resolution,
+                            artifact == "full_ac",
+                        )
+                        .unwrap()
+                        .gib
+                    })
+                    .collect();
+                assert!(
+                    rows.windows(2).all(|pair| pair[0] <= pair[1]),
+                    "{lane} {artifact}: {rows:?}"
+                );
+            }
+            for resolution in [256, 512, 1024] {
+                let plain = iris_generation_memory_floor(lane, "full", resolution, false).unwrap();
+                let checkpointed =
+                    iris_generation_memory_floor(lane, "full", resolution, true).unwrap();
+                assert!(checkpointed.gib <= plain.gib, "{lane} {resolution}");
+            }
+        }
+    }
+
+    /// sc-25690: a full 1024² run under full activation checkpointing reads the measured `full_ac`
+    /// row (it fits a 96 GB card on Candle), one without reads the higher plain row, and an adapter
+    /// run ignores the policy.
+    #[test]
+    fn full_runs_read_the_activation_checkpointing_floor_rows() {
+        let mut config = iris_generation_target().defaults;
+        config.resolution = 1024;
+        config.advanced.insert("networkType".into(), json!("full"));
+        assert!(!iris_full_activation_checkpointing(&config));
+        let plain = iris_objective_memory_floor(IrisObjective::Generation, "candle", &config);
+        config.advanced["iris"]["activation_checkpointing"] = json!("full");
+        assert!(iris_full_activation_checkpointing(&config));
+        let checkpointed =
+            iris_objective_memory_floor(IrisObjective::Generation, "candle", &config);
+        assert_eq!(
+            (plain, checkpointed),
+            (Some(CANDLE_FULL_1024), Some(CANDLE_FULL_AC_1024))
+        );
+        assert!(checkpointed.unwrap().gib < plain.unwrap().gib);
+        assert!(
+            f64::from(checkpointed.unwrap().gib) <= CAMPAIGN_CUDA_CARD.gib(),
+            "the checkpointed 1024² row fits the card that ran it"
+        );
+        assert_eq!(
+            iris_objective_memory_floor(IrisObjective::Generation, "mlx", &config),
+            Some(MLX_FULL_AC_1024)
+        );
+        config.advanced["iris"]["activation_checkpointing"] = json!("selective_layer");
+        assert!(!iris_full_activation_checkpointing(&config));
+        assert_eq!(
+            iris_generation_memory_floor("mlx", "lora", 1024, true).map(|floor| floor.gib),
+            iris_training_memory_floor_gib("mlx", "lora", 1024)
+        );
+        assert_eq!(
+            iris_generation_target().extra["memoryFloors"]["lanes"]["mlx"]["full_ac"]["1024"],
+            json!(MLX_FULL_AC_1024.gib)
+        );
     }
 }

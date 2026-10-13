@@ -13,6 +13,7 @@ import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Val
 import { numberFromDraft } from "../../training/drafts.js";
 import {
   choiceOptionsForTarget,
+  gradientCheckpointingLanes,
   gradientCheckpointingUnsupported,
   lossTypeOptions,
   ltx25WorkflowPlan,
@@ -72,7 +73,7 @@ import {
   targetSupportsFaceLandmarkLoss,
   targetSupportsIdentityLoss,
 } from "../../training/trainingConfig.js";
-import { irisMemoryFloors, irisObjective, irisUpstreamPromptsOn } from "../../training/irisOptions.js";
+import { irisFloorSummary, irisMemoryFloors, irisObjective, irisUpstreamPromptsOn } from "../../training/irisOptions.js";
 import { irisFloorSize } from "../../training/irisTaskOptions.js";
 
 // A number input bound to the config-draft key `field` (`draft` = { configDraft, configValidity,
@@ -546,7 +547,8 @@ export function ConfigureJobPanel({
   const visibleTimestepBiasOptions = choiceOptionsForTarget(selectedTarget, "timestepBiases", timestepBiasOptions);
   const visibleLossTypeOptions = choiceOptionsForTarget(selectedTarget, "lossTypes", lossTypeOptions);
   const advertisedPrecisions = choiceOptionsForTarget(selectedTarget, "mixedPrecisions", null);
-  const checkpointingUnsupported = gradientCheckpointingUnsupported(selectedTarget);
+  const checkpointingUnsupported = gradientCheckpointingUnsupported(selectedTarget, irisContext.trainingLane ?? null);
+  const checkpointingLanes = gradientCheckpointingLanes(selectedTarget);
   const sampleCountRange = Array.isArray(selectedTarget?.limits?.sampleCount) ? selectedTarget.limits.sampleCount : null;
   // Iris (sc-25685): generation shows the generation options; depth / restoration (sc-25687 /
   // sc-25688) take no prompt, no sampler and no trigger word, and always produce a model.
@@ -559,7 +561,19 @@ export function ConfigureJobPanel({
   const floorSize = irisFloorSize(selectedTarget, configDraft);
   const pixelFloors = selectedTarget?.memoryFloors?.key === "microBatchPixels";
   const memoryFloors = objective
-    ? irisMemoryFloors(selectedTarget, configDraft.networkType, floorSize, irisContext.trainingLane ?? null)
+    ? irisMemoryFloors(
+        selectedTarget,
+        configDraft.networkType,
+        floorSize,
+        irisContext.trainingLane ?? null,
+        // Generation's policy option; a depth / restoration run under the shared toggle reads the
+        // same `full_ac` rows (irisOptions.js picks them only where the lane's table has them).
+        iris
+          ? configDraft.iris?.activation_checkpointing
+          : configDraft.gradientCheckpointing && !checkpointingUnsupported
+            ? "full"
+            : undefined,
+      )
     : [];
   const laneNames = { mlx: "MLX (Apple Silicon unified memory)", candle: "Candle/CUDA (GPU memory)" };
   // Restoration's paper default is a FULL fine-tune with the highest floors; the lighter LoRA arm is
@@ -747,9 +761,8 @@ export function ConfigureJobPanel({
           </div>
 
           {memoryFloors.length ? (
-            <p className="training-field-hint" aria-label="Declared memory floor">
-              Memory floor (declared, not yet measured):{" "}
-              {memoryFloors.map((floor) => `${laneNames[floor.lane] ?? floor.lane} ${floor.gb} GB`).join(" · ")} for a{" "}
+            <p className="training-field-hint" aria-label="Memory floor">
+              Memory floor: {irisFloorSummary(memoryFloors, laneNames)} for a{" "}
               {pixelFloors ? `${floorSize}-pixel micro-batch` : `${floorSize}px`} {isFullFinetune ? "full fine-tune" : "adapter"} run. On a Mac the floor must fit
               after the macOS/app memory reserve. A machine under its floor is refused before the model loads.
               {irisTask && selectedTarget.memoryFloors?.basis ? ` ${selectedTarget.memoryFloors.basis}` : null}
@@ -758,7 +771,7 @@ export function ConfigureJobPanel({
           {restoreLoraFloors.length ? (
             <p className="training-field-hint" aria-label="Lighter restoration option">
               The paper&apos;s full fine-tune is the default. A LoRA run (merged into the export) needs{" "}
-              {restoreLoraFloors.map((floor) => `${laneNames[floor.lane] ?? floor.lane} ${floor.gb} GB`).join(" · ")}.{" "}
+              {irisFloorSummary(restoreLoraFloors, laneNames)}.{" "}
               <button className="secondary-action" onClick={() => updateConfigDraft("networkType", "lora")} type="button">
                 Use LoRA instead
               </button>
@@ -1193,7 +1206,13 @@ export function ConfigureJobPanel({
             )}
 
             <div className="training-advanced-toggles">
-              {checkpointingUnsupported ? (
+              {checkpointingUnsupported && checkpointingLanes ? (
+                <p className="training-field-hint" aria-label="Gradient checkpointing availability">
+                  Gradient checkpointing for this target is implemented on{" "}
+                  {checkpointingLanes.map((lane) => laneNames[lane] ?? lane).join(" and ") || "no backend yet"}, not on this
+                  machine&apos;s backend, so it is not applied here. Lower the training size if the run does not fit.
+                </p>
+              ) : checkpointingUnsupported ? (
                 <p className="training-field-hint">
                   This target's trainer does not implement gradient checkpointing, so it is not applied. Lower the
                   training resolution if the run does not fit.

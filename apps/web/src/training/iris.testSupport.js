@@ -94,17 +94,28 @@ export function irisTarget() {
     },
     ui: { label: "Iris 3B", recommendedFor: ["character", "style", "concept"], datasetModality: "image" },
     memoryFloors: {
-      measured: false,
-      unit: "GB",
-      basis: "Declared floors (no measurement campaign).",
+      unit: "GiB",
+      basis: "Floors are GiB.",
       lanes: {
         mlx: {
           adapter: { 256: 16, 512: 24, 1024: 40 },
           full: { 256: 80, 512: 88, 1024: 104 },
+          full_ac: { 256: 80, 512: 88, 1024: 96 },
         },
         candle: {
           adapter: { 256: 24, 512: 32, 1024: 48 },
           full: { 256: 80, 512: 88, 1024: 104 },
+        },
+      },
+      provenance: {
+        mlx: {
+          adapter: { 256: "declared", 512: "declared", 1024: "declared" },
+          full: { 256: "extrapolated", 512: "measured", 1024: "measured" },
+          full_ac: { 256: "extrapolated", 512: "extrapolated", 1024: "measured" },
+        },
+        candle: {
+          adapter: { 256: "declared", 512: "declared", 1024: "declared" },
+          full: { 256: "extrapolated", 512: "measured", 1024: "extrapolated" },
         },
       },
     },
@@ -145,7 +156,7 @@ export function irisJob({
 const TASK_LIMITS = {
   lrSchedulers: ["constant", "cosine"],
   mixedPrecisions: ["bf16", "f32"],
-  gradientCheckpointing: false,
+  gradientCheckpointingLanes: ["candle"],
   microStepFields: ["steps", "saveEvery", "sampleEvery", "lrWarmupSteps"],
   outputScopes: ["project", "global"],
 };
@@ -180,8 +191,18 @@ export function irisDepthTarget() {
     limits: { ...TASK_LIMITS, optimizers: ["adamw", "muon"], networkTypes: ["full"], lossTypes: ["l1"] },
     ui: { label: "Iris 3B Depth", objective: "depth" },
     memoryFloors: {
-      measured: false, unit: "GB", key: "microBatchPixels", basis: "Declared depth floors.",
-      lanes: { mlx: { 16384: 64, 307200: 80, 589824: 96 }, candle: { 16384: 68, 307200: 84, 589824: 100 } },
+      unit: "GiB", key: "microBatchPixels", basis: "Depth floors.",
+      lanes: {
+        mlx: { 16384: 64, 307200: 80, 589824: 96 },
+        candle: { 16384: 68, 307200: 84, 589824: 100, 1048576: 111, full_ac: { 307200: 68, 1048576: 68 } },
+      },
+      provenance: {
+        mlx: { 16384: "declared", 307200: "declared", 589824: "declared" },
+        candle: {
+          16384: "declared", 307200: "extrapolated", 589824: "extrapolated", 1048576: "measured_spill",
+          full_ac: { 307200: "extrapolated", 1048576: "measured" },
+        },
+      },
     },
   };
 }
@@ -221,8 +242,11 @@ export function irisRestoreTarget() {
     },
     ui: { label: "Iris 3B Restoration", objective: "restoration" },
     memoryFloors: {
-      measured: false, unit: "GB", key: "microBatchPixels", basis: "Declared restoration floors.",
+      unit: "GiB", key: "microBatchPixels", basis: "Restoration floors.",
       lanes: { mlx: { full: { 65536: 92, 1048576: 128 }, adapter: { 65536: 28, 1048576: 56 } } },
+      provenance: {
+        mlx: { full: { 65536: "declared", 1048576: "lower_bound" }, adapter: { 65536: "declared", 1048576: "declared" } },
+      },
     },
   };
 }

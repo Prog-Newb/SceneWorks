@@ -3922,7 +3922,7 @@ pub(crate) async fn consume_training_events(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn map_training_progress(
+pub(crate) fn map_training_progress(
     progress: TrainingProgress,
     total_steps: u32,
 ) -> (JobStatus, ProgressStage, f64, String) {

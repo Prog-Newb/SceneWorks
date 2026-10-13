@@ -2465,6 +2465,57 @@ export const OUT_OF_MATRIX_CATALOG_ENTRIES = new Map([
 ]);
 
 /**
+ * Catalog entries OUTSIDE the matrix modalities that nonetheless carry a memory anchor (sc-25690).
+ *
+ * The matrix universe is image and video entries (`MATRIX_MODALITIES`): a `utility` entry has no
+ * rung ladder for this generator to enumerate, so it is absent by design rather than subtracted.
+ * Iris-3B's depth and restoration tasks are `utility` entries, and they are also real engine
+ * routes with their own memory-strategy contract on both lanes — `mlx-gen-iris` and
+ * `candle-gen-iris` register `iris_3b_depth` and `iris_3b_restore` as composed (non-generator)
+ * memory routes, resident-only, each with its own calibration identity. Their peak is exactly what
+ * the worker's depth and restoration admission needs measured, so each carries one plan anchor per
+ * lane and an adapter arm.
+ *
+ * The anchor plan may only name a model id this artifact enumerates
+ * (`memory-calibration-harness.mjs` `matrixModelIds`), which is the guard against an invented id
+ * buying a second measurement of an existing cell. These ids are real catalog entries rather than
+ * inventions, so they are enumerated here — by name, with the reason — instead of loosening that
+ * guard. Not `OUT_OF_MATRIX_CATALOG_ENTRIES`: that table is for entries of a MATRIX modality the
+ * generator cannot route, and it is validated against the routing catalog, which lists neither.
+ */
+const IRIS_TASK_ROUTE_REASON =
+  "a utility-modality entry with its own engine memory-strategy contract (a composed, " +
+  "resident-only route registered by mlx-gen-iris and candle-gen-iris): outside the image/video " +
+  "matrix universe by modality, and anchored — planned, armed and closed over on both lanes";
+
+export const TASK_ROUTE_CATALOG_ENTRIES = new Map([
+  ["iris_3b_depth", { epic: 25678, reason: IRIS_TASK_ROUTE_REASON }],
+  ["iris_3b_restore", { epic: 25678, reason: IRIS_TASK_ROUTE_REASON }],
+]);
+
+/**
+ * A task-route entry must be a real catalog entry, and must stay OUTSIDE the matrix modalities: one
+ * the catalog no longer ships is a stale declaration, and one that became an image or video entry
+ * belongs in the universe (where its cells are enumerated) rather than in this side list.
+ */
+export function assertTaskRouteEntriesAreCatalogEntriesOutsideTheMatrix(manifestModels) {
+  for (const [id, entry] of TASK_ROUTE_CATALOG_ENTRIES) {
+    const model = manifestModels.find((candidate) => candidate.id === id);
+    if (!model) {
+      throw new Error(
+        `TASK_ROUTE_CATALOG_ENTRIES names ${id}, which the catalog no longer carries (epic ${entry.epic})`,
+      );
+    }
+    if (MATRIX_MODALITIES.has(model.type)) {
+      throw new Error(
+        `${id} is declared a task route, but its catalog type ${JSON.stringify(model.type)} is a matrix ` +
+          `modality: admit it to the universe instead (epic ${entry.epic})`,
+      );
+    }
+  }
+}
+
+/**
  * The subtraction may never outlive its reason. An out-of-matrix entry the catalog no longer carries
  * is a stale declaration, and one the generator CAN now resolve must join the universe rather than
  * stay silently subtracted.
@@ -2727,6 +2778,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   assertOutOfMatrixEntriesAreStillUnroutable(manifest.models, (model) =>
     resolveRoute(model, routes, videoRoutes, backendScopes(model, routedBackends)),
   );
+  assertTaskRouteEntriesAreCatalogEntriesOutsideTheMatrix(manifest.models);
   // NUL-separated (sc-16268): normalisation strips each body's trailing newline, so concatenating
   // bare would let content shift across a source boundary without moving the hash. A NUL cannot
   // occur in any of these text sources, so it is an unambiguous delimiter.
@@ -3051,6 +3103,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       outOfMatrixEntries: [...OUT_OF_MATRIX_CATALOG_ENTRIES]
         .map(([id, entry]) => ({ id, ...entry }))
         .sort((left, right) => left.id.localeCompare(right.id)),
+      // sc-25690: catalog entries outside the matrix modalities that carry a memory anchor anyway —
+      // named so the anchor plan can cite them without the matrix claiming a ladder for them.
+      taskRouteEntries: [...TASK_ROUTE_CATALOG_ENTRIES]
+        .map(([id, entry]) => ({ id, ...entry }))
+        .sort((left, right) => left.id.localeCompare(right.id)),
       // sc-22513: the anchor census. `anchors` counts the store's measured rows, `analyticOnlyCells`
       // the rows it explicitly classifies as underivable from retained evidence, and
       // `anchoredCells`/`staleAnchors` say how far the store reaches and how much of it the loader
@@ -3123,6 +3180,13 @@ export function renderMarkdown(matrix) {
     ...(matrix.summary.outOfMatrixEntries.length
       ? [
           `- Out-of-matrix entries (subtracted from the universe): ${matrix.summary.outOfMatrixEntries
+            .map((entry) => `\`${entry.id}\` — ${entry.reason} (sc-${entry.epic})`)
+            .join("; ")}`,
+        ]
+      : []),
+    ...(matrix.summary.taskRouteEntries.length
+      ? [
+          `- Task-route entries (outside the matrix modalities, anchored): ${matrix.summary.taskRouteEntries
             .map((entry) => `\`${entry.id}\` — ${entry.reason} (sc-${entry.epic})`)
             .join("; ")}`,
         ]

@@ -61,6 +61,8 @@ pub(crate) const INCOMPLETE_INSTALL: &str = "iris_depth_incomplete_install";
 pub(crate) const WRONG_TASK: &str = "iris_depth_wrong_task";
 pub(crate) const INVALID_SOURCE: &str = "iris_depth_invalid_source";
 pub(crate) const MEMORY_ADMISSION: &str = "iris_depth_memory_admission";
+/// The estimate holds no finite value at all — there is no depth to publish (sc-25690).
+pub(crate) const NO_VALID_DEPTH: &str = "iris_depth_no_valid_pixels";
 
 fn typed(code: &str, detail: impl std::fmt::Display) -> WorkerError {
     WorkerError::InvalidPayload(format!("[{code}] {detail}"))
@@ -247,6 +249,16 @@ where
             return Err(WorkerError::Engine(format!(
                 "the depth estimator returned a {}x{} map for a {width}x{height} source",
                 output.map.width, output.map.height
+            )));
+        }
+        // A map with no finite value is not depth (a numerically diverged estimate — e.g. a
+        // trained export that blew up): refuse it before anything is staged, rather than publish
+        // an asset every consumer would read as an all-NaN array. The raw values of any other map
+        // are published untouched.
+        if !output.map.values.iter().any(|value| value.is_finite()) {
+            return Err(WorkerError::Engine(format!(
+                "[{NO_VALID_DEPTH}] the depth estimator produced no finite depth value for the \
+                 {width}x{height} source; nothing was saved"
             )));
         }
         let npy = encode_npy_f32(output.map.width, output.map.height, &output.map.values)
