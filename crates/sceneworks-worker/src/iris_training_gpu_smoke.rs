@@ -1047,9 +1047,20 @@ async fn engine_checkpointing_answer(
         } = crate::training_jobs::preflight_training_run(&settings, &plan, false)
             .expect("the probe plan preflights");
         request.config.gradient_checkpointing = true;
-        let spec = crate::training_jobs::TrainerLoadInputs::resolve(&settings, &plan, engine_id)
-            .expect("the task's weights resolve")
-            .load_spec(engine_id, &request.config.train_dtype);
+        // A task trainer's load inputs, exactly as the job path resolves them (its task export and
+        // staged components; `TrainerLoadInputs::resolve` is the generation path's).
+        let objective =
+            crate::iris_task_training::task_objective(&plan.target.kernel, &plan.target.base_model)
+                .expect("a depth / restoration plan");
+        let inputs =
+            crate::iris_task_training::task_load_inputs(&settings, objective, &plan.config)
+                .expect("the task's weights and resources resolve");
+        let spec = crate::training_jobs::TrainerLoadInputs::from_task(
+            engine_id,
+            inputs.weights,
+            inputs.components,
+        )
+        .load_spec(engine_id, &request.config.train_dtype);
         let answer = crate::inference_runtime::load_trainer(engine_id, &spec)
             .and_then(|trainer| trainer.validate(&request))
             .map_err(|error| error.to_string());
