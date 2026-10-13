@@ -17707,7 +17707,10 @@ async fn no_person_track_string_reaches_a_published_clip_or_its_poster() {
 // ---------------------------------------------------------------------------
 
 /// A MiniMax-H3 payload for `model`, with whatever extra keys the test needs.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn minimax_h3_request(model: &str, extra: Value) -> VideoRequest {
     let mut payload = json!({
         "projectId": "p",

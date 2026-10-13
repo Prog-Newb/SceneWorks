@@ -10,7 +10,7 @@ export function VedaControls({ value, onChange, steps }) {
       {[["generated", "Generated sparsity"], ["reference", "Reference sparsity"], ["fullAttentionLayers", "Full-attention layers"], ["fullAttentionSteps", "Full-attention steps"]].map(([key, label]) => <label key={key}>
         {label}<input name={key} aria-label={label} onChange={update} value={value[key]} />
       </label>)}
-      <p className="helper-copy">Budgets: percentage (90%, below 100%) or positive key tiles (32); 0% keeps all keys. Zero-based lists/ranges (0, 2–4): layers 0–49, steps 0–{steps - 1}.</p>
+      <p className="helper-copy">Budget: &lt;100% (90%) or positive key tiles (32); 0% = all keys. Layers 0–49; steps 0–{steps - 1}; zero-based lists/ranges (0, 2–4).</p>
     </> : null}
   </div>;
 }

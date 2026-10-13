@@ -13,8 +13,8 @@ export function VedaOutcome({ asset, raw = asset?.recipe?.rawAdapterSettings, ou
   ];
   return <div className="veda-outcome" role="group" aria-label={label}>
     <strong>{label}: {effective}</strong>
-    {facts.map(([name, value]) => value ? <div key={name}>{name}: {value}</div> : null)}
-    {requested ? <div>Requested controls: {JSON.stringify(requested)}</div> : null}
+    {facts.map(([name, value]) => value && <div key={name}>{name}: {value}</div>)}
+    {requested && <div>Requested controls: {JSON.stringify(requested)}</div>}
   </div>;
 }
 
