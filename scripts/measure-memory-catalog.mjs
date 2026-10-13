@@ -1669,6 +1669,67 @@ export async function readMatrixCurrency(root = ROOT) {
 }
 
 /**
+ * Currency of the TASK-ROUTE cells (sc-25690), keyed like an anchor (`<modelId>:<tier>:<backend>`).
+ *
+ * A task route (`matrix.summary.taskRouteEntries` — the Iris-3B depth and restoration tasks) is a
+ * planned, armed, captured cell that sits outside the matrix modalities, so the anchor store never
+ * carries a row for it and `readMatrixCurrency` — which publishes only store anchors — could not
+ * see its capture: a cell measured minutes earlier at the pinned revision listed `runnable`, and a
+ * `--skip-current` run would have booked it again.
+ *
+ * With no store row there is no stamped loader-closure digest to compare, so the rule is the
+ * record's own: its `repositories.inference.closureDigest` — the provider crate closure the capture
+ * ran under — against the digest `config/inference-provider-closures.json` carries for that
+ * `(backend, provider)` at the pin. Any current record keeps the cell current; a record whose
+ * provider closure moved is stale and the cell is capturable again. Reported only: nothing reads
+ * this at runtime.
+ */
+export async function readTaskRouteCurrency(root = ROOT) {
+  const current = new Map();
+  let ids;
+  let providers;
+  let campaigns;
+  try {
+    const matrix = JSON.parse(await readFile(path.join(root, MATRIX_PATH), "utf8"));
+    ids = new Set((matrix.summary?.taskRouteEntries ?? []).map((entry) => entry.id));
+    providers = JSON.parse(await readFile(path.join(root, PROVIDER_CLOSURE_CONFIG_PATH), "utf8")).providers ?? {};
+    campaigns = await readdir(path.join(root, "docs/calibration"), { withFileTypes: true });
+  } catch {
+    return current;
+  }
+  if (ids.size === 0) return current;
+  for (const campaign of campaigns) {
+    if (!campaign.isDirectory()) continue;
+    let names;
+    try {
+      names = await readdir(path.join(root, "docs/calibration", campaign.name));
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!name.endsWith("-evidence.json")) continue;
+      let bundle;
+      try {
+        bundle = JSON.parse(await readFile(path.join(root, "docs/calibration", campaign.name, name), "utf8"));
+      } catch {
+        continue;
+      }
+      for (const record of bundle.records ?? []) {
+        const target = record.target ?? {};
+        if (!ids.has(target.modelId) || !target.tier || !record.backend) continue;
+        const declared = providers[`${record.backend}:${target.provider}`]?.digest;
+        const measured = record.repositories?.inference?.closureDigest;
+        const key = `${target.modelId}:${target.tier}:${record.backend}`;
+        const isCurrent = typeof declared === "string" && declared === measured;
+        if (current.get(key) === true && !isCurrent) continue;
+        current.set(key, isCurrent);
+      }
+    }
+  }
+  return current;
+}
+
+/**
  * The measured lower bounds the store already holds, keyed like an anchor
  * (`<modelId>:<tier>:<backend>`), each with whether it is CURRENT (sc-22738).
  *
@@ -4310,7 +4371,8 @@ export async function measureAnchor(row, context) {
 export async function planRun(args, root = ROOT) {
   const plan = await readPlan(root);
   const models = await readManifestModels(root);
-  const current = await readMatrixCurrency(root);
+  // sc-25690: store anchors first, then the task-route cells the store cannot carry.
+  const current = new Map([...(await readTaskRouteCurrency(root)), ...(await readMatrixCurrency(root))]);
   const campaign = args.campaign ?? `catalog-${new Date().toISOString().slice(0, 10)}`;
   const campaignDir = `docs/calibration/${campaign}`;
   const captured = await capturedInCampaign(root, campaignDir);

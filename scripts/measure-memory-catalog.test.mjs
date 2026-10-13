@@ -120,6 +120,8 @@ import {
   assertStageable,
   MAX_STAGED_FILE_BYTES,
   readExceededBounds,
+  readTaskRouteCurrency,
+  PROVIDER_CLOSURE_CONFIG_PATH,
   anchorDownloadTargets,
   hfDownloadArgv,
   hfDownloadArgvs,
@@ -2210,6 +2212,68 @@ test("the committed exceeded bound keeps its own cell out of the runnable set of
       !rows.filter((row) => row.status === "runnable").some((row) => bounds.get(row.key)?.current),
       "no cell with a current bound is scheduled for a capture",
     );
+  }
+});
+
+// sc-25690: a task route (Iris-3B depth / restoration) is captured but sits outside the matrix
+// modalities, so the anchor store carries no row for it and the matrix publishes no currency. Its
+// capture listed `runnable` minutes after it ran. Currency comes from the record's own provider
+// closure digest against the pinned provider closure table.
+test("a task-route capture is current while its provider closure is the pinned one", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "catalog-task-route-"));
+  const digest = "d".repeat(64);
+  const record = (closureDigest, backend = "mlx") => ({
+    backend,
+    target: { modelId: "iris_3b_depth", tier: "bf16", provider: "iris_3b_depth" },
+    repositories: { inference: { closureDigest } },
+  });
+  const seed = async (records, { taskRoutes = ["iris_3b_depth"], bundle = "sc-1" } = {}) => {
+    await mkdir(path.join(root, "docs/generated"), { recursive: true });
+    await mkdir(path.join(root, "config"), { recursive: true });
+    await mkdir(path.join(root, "docs/calibration", bundle), { recursive: true });
+    await writeFile(
+      path.join(root, MATRIX_PATH),
+      JSON.stringify({ anchors: [], summary: { taskRouteEntries: taskRoutes.map((id) => ({ id })) } }),
+    );
+    await writeFile(
+      path.join(root, PROVIDER_CLOSURE_CONFIG_PATH),
+      JSON.stringify({ providers: { "mlx:iris_3b_depth": { digest } } }),
+    );
+    await writeFile(path.join(root, "docs/calibration", bundle, "depth-evidence.json"), JSON.stringify({ records }));
+  };
+  await seed([record(digest)]);
+  assert.deepEqual([...(await readTaskRouteCurrency(root))], [["iris_3b_depth:bf16:mlx", true]]);
+  await seed([record("e".repeat(64))]);
+  assert.equal(
+    (await readTaskRouteCurrency(root)).get("iris_3b_depth:bf16:mlx"), false,
+    "a capture under another provider closure is stale",
+  );
+  await seed([record(digest, "candle")]);
+  assert.equal(
+    (await readTaskRouteCurrency(root)).get("iris_3b_depth:bf16:candle"), false,
+    "the digest is looked up per (LANE, provider); the mlx digest does not keep a candle capture current",
+  );
+  // A stale capture in a later-sorting campaign beside a current one leaves the cell current.
+  await seed([record(digest)]);
+  await seed([record("e".repeat(64))], { bundle: "sc-2" });
+  assert.equal((await readTaskRouteCurrency(root)).get("iris_3b_depth:bf16:mlx"), true);
+  // Only the matrix's named task routes are read this way: every other cell's currency is the store's.
+  await seed([record(digest)], { taskRoutes: [] });
+  assert.equal((await readTaskRouteCurrency(root)).size, 0);
+  assert.equal((await readTaskRouteCurrency(await mkdtemp(path.join(tmpdir(), "catalog-empty-")))).size, 0);
+});
+
+// The same question against the committed tree, through the walk: every task-route cell the tree
+// carries a current capture for lists `current`, and `--skip-current` does not schedule it.
+test("a committed task-route capture lists current in a real --list", async () => {
+  const taskRoutes = await readTaskRouteCurrency();
+  for (const backend of ["mlx", "candle"]) {
+    const { rows } = await planRun({ backend, anchors: null, campaign: "sc-catalog-test", hfCache: [], list: true, models: [] });
+    for (const [key, isCurrent] of taskRoutes) {
+      const row = rows.find((candidate) => candidate.key === key);
+      if (!row || row.backend !== backend || !isCurrent) continue;
+      if (["runnable", "current"].includes(row.status)) assert.equal(row.status, "current", `${key} has a current capture`);
+    }
   }
 });
 
