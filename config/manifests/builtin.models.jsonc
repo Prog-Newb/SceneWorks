@@ -6137,7 +6137,18 @@
       "candle": {
         // 8.4 GB recorded peak at the reference geometry + the 2 GB allocator reserve, rounded up.
         "measured": false,
-        "minMemoryGb": 11
+        "minMemoryGb": 11,
+        // sc-25690: the pinned candle-gen-iris iris_3b_depth contract classifies StagedResidency
+        // StructurallyNotApplicable — a truth about the task, not undelivered work — so this lane's
+        // memory anchor is measured at the resident rung instead of the lane's staged default.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: the depth task loads no text encoder (it runs one backbone forward on the export's shipped empty-prompt states), so the backbone is the only component and there is nothing to shed between phases." }
+            ]
+          }
+        }
       },
       "ui": {
         "label": "Iris 3B Depth",
@@ -25262,7 +25273,18 @@
       },
       "candle": {
         "measured": false,
-        "minMemoryGb": 14
+        "minMemoryGb": 14,
+        // sc-25690: the pinned candle-gen-iris iris_3b_restore contract classifies StagedResidency
+        // StructurallyNotApplicable — a truth about the task, not undelivered work — so this lane's
+        // memory anchor is measured at the resident rung instead of the lane's staged default.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: the restoration task loads no text encoder (it runs one backbone forward per tile on the export's shipped empty-prompt states), so the backbone is the only component and there is nothing to shed between phases." }
+            ]
+          }
+        }
       },
       "ui": {
         "label": "Iris 3B Restoration",

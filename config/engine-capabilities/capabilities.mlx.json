@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "25231d15b582dc90d332a1f3a41ff45b8032f5b2",
+    "inferenceRevision": "0b1a5a57f8c4cafaec02dfef372654f7c743ef66",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -5037,6 +5037,117 @@
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "iris_3b",
+      "composed": false,
+      "selectorDigest": "sha256:9dc34c16562e2cd09bc9fb8ea4df32086b11144500be3f85f5ce23a1ba7a8ec9",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode"
+          ],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "iris_3b_depth",
+      "composed": true,
+      "selectorDigest": "sha256:5bb34abbb2b96c7da7dae1f530e72eed26c4848b38197fa0c1177a12bdae9783",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "iris_3b_restore",
+      "composed": true,
+      "selectorDigest": "sha256:5bb34abbb2b96c7da7dae1f530e72eed26c4848b38197fa0c1177a12bdae9783",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
           "deferredMaterializationRungs": []
         }
       ]

@@ -27,6 +27,17 @@ use std::process::Command;
 #[path = "candle_wan_scail2.rs"]
 mod candle_wan_scail2;
 
+#[path = "candle_iris.rs"]
+mod candle_iris;
+
+/// The three Iris-3B task routes (sc-25690), served by `candle_iris`. Registry ids of
+/// `candle-gen-iris`, which are also the catalog model ids. Spelled here, as consts, for the same
+/// reason the Wan/SCAIL-2 ids below are: `adapterCapturableProviders` reads the pre-gate off this
+/// file.
+const IRIS_ID: &str = "iris_3b";
+const IRIS_DEPTH_ID: &str = "iris_3b_depth";
+const IRIS_RESTORE_ID: &str = "iris_3b_restore";
+
 /// Engine registry ids, not catalog ids: `wan_2_2` is the SceneWorks name for the TI2V-5B route
 /// (worker `engines.rs` `video_engine_ids`), and SCAIL-2's two names coincide.
 const WAN_TI2V_5B_ID: &str = "wan2_2_ti2v_5b";
@@ -7601,6 +7612,13 @@ fn run(request: &Value) -> Result<Value, String> {
     let provider = planned_provider(request)?;
     if provider == LTX25_ID {
         return run_ltx25_capture(request);
+    }
+    // sc-25690: the three Iris-3B task routes dispatch ABOVE the shared gates. Depth and restoration
+    // are not generators at all (a provider-specific estimator and a `Transform`), so the five-rung
+    // reference path cannot drive them, and the arm validates the still single-image geometry and
+    // the plain overlay itself (`protocol::validate_iris_plan`) before any env var or weight is read.
+    if matches!(provider, IRIS_ID | IRIS_DEPTH_ID | IRIS_RESTORE_ID) {
+        return candle_iris::run(request);
     }
     // sc-22736: the Wan 2.2 family and SCAIL-2 dispatch ABOVE the shared still gate, like LTX-2.5 —
     // they are VIDEO arms, and `validate_still_geometry` would refuse the multi-frame geometry they

@@ -221,6 +221,36 @@ export function requiredComponentsFor(family, backend) {
   return family.components.filter((component) => (component.arms ?? [backend]).includes(backend));
 }
 
+/** The ONE upstream repository all three Iris-3B task routes load from (sc-25690). */
+export const IRIS_REPOSITORY = "speridlabs/iris-3b";
+/**
+ * The generation task's files at the snapshot ROOT — `gen_core::iris::CONFIG_FILE` and
+ * `BACKBONE_WEIGHTS_FILE`, exactly the manifest's `iris_3b` download closure.
+ */
+export const IRIS_GENERATION_FILES = Object.freeze(["config.yaml", "model.safetensors"]);
+/**
+ * A downstream task export's files inside its folder (`depth/`, `upscaler/`): the fine-tuned
+ * backbone, its config (whose `task` section the engine checks) and the shipped empty-prompt
+ * conditioning (`gen_core::iris::downstream::EMPTY_PROMPT_FILE`).
+ */
+export const IRIS_TASK_EXPORT_FILES = Object.freeze([
+  "config.yaml", "model.safetensors", "empty_prompt.safetensors",
+]);
+/**
+ * The generation task's caller-staged text encoder, in `SDXL_COMPONENTS`' `{ env, repo }` shape.
+ * No `arms`: both engines declare it a required component, so it is a co-requisite on every lane.
+ * `files` are what both loaders open in it BY NAME before any shard (the tower config and the
+ * tokenizer); the shards themselves are whatever its own index names, which `classifyAnchor` checks
+ * for every component root.
+ */
+export const IRIS_GENERATION_COMPONENTS = Object.freeze([
+  {
+    env: "SCENEWORKS_IRIS_3B_COMPONENT_TEXT_ENCODER",
+    repo: "Qwen/Qwen3-VL-4B-Instruct",
+    files: ["config.json", "tokenizer.json", "model.safetensors.index.json"],
+  },
+]);
+
 /**
  * The three main tensor files `candle-gen-sdxl` opens inside a staged SDXL tier root, per tier
  * (sc-22738) — its `main_tensor_paths(root, packed)`, which is the ONE place the packed and dense
@@ -1255,6 +1285,43 @@ export const PROVIDER_FAMILIES = Object.freeze({
     tiers: { bf16: { env: "QWEN_IMAGE_2_1_BF16", repo: "Qwen/Qwen-Image-2.1", layout: "flat" } },
     requiredTensorComponents: ["text_encoder", "transformer", "vae"],
   },
+  // The three Iris-3B TASK routes (sc-25690, epic 25678): generation (`iris_3b`), monocular depth
+  // (`iris_3b_depth`) and restoration (`iris_3b_restore`). Three engine providers whose catalog ids
+  // equal their engine ids, registered by `mlx-gen-iris` and `candle-gen-iris` alike, and three
+  // separate fine-tunes shipped in ONE upstream repository at one revision: the generation backbone
+  // at the snapshot ROOT, the depth export in `depth/` and the restoration export in `upscaler/`.
+  // No route quantizes, so `bf16` is the only tier and no root carries a `<tier>` component —
+  // `layout: "flat"` for generation, and `subdir` (the task folder the worker's
+  // `resolve_depth_export_dir` / `resolve_restore_export_dir` hand the engine) for the other two.
+  //
+  // One env family per task, never a shared `IRIS`: the three are different weights, and a depth
+  // plan satisfied by the generation backbone would re-label that backbone's peaks as the depth
+  // fine-tune's (the engine refuses a wrong-task export in any case).
+  //
+  // `requiredTierFiles` is each task's whole manifest closure, so a host holding one task's files
+  // classifies the other two `weights_missing` by name rather than `runnable` on a snapshot
+  // directory that merely exists. `inventoryFiles` is the same closure for the generation root
+  // alone: that root is the snapshot root, which ALSO holds `depth/` and `upscaler/` on a host with
+  // all three tasks installed, and an inventory over the whole tree would bind the generation
+  // cell's artifact identity (and its model-byte figure) to which other tasks happen to be staged.
+  //
+  // Generation alone loads a text encoder — the pinned Qwen3-VL-4B-Instruct snapshot the manifest
+  // ships as a `coRequisite` and the worker stages as `LoadSpec::components["text_encoder"]`
+  // (`gen_core::iris::TEXT_ENCODER_COMPONENT`). Depth and restoration run on their export's shipped
+  // empty-prompt states and REFUSE a staged text encoder, so they declare none.
+  iris_3b: {
+    env: "IRIS_3B", repo: IRIS_REPOSITORY, arms: ["mlx", "candle"], layout: "flat",
+    components: IRIS_GENERATION_COMPONENTS,
+    requiredTierFiles: IRIS_GENERATION_FILES, inventoryFiles: IRIS_GENERATION_FILES,
+  },
+  iris_3b_depth: {
+    env: "IRIS_3B_DEPTH", repo: IRIS_REPOSITORY, arms: ["mlx", "candle"], subdir: "depth",
+    requiredTierFiles: IRIS_TASK_EXPORT_FILES,
+  },
+  iris_3b_restore: {
+    env: "IRIS_3B_RESTORE", repo: IRIS_REPOSITORY, arms: ["mlx", "candle"], subdir: "upscaler",
+    requiredTierFiles: IRIS_TASK_EXPORT_FILES,
+  },
   // The Wan 2.2 family (sc-22736). The FIRST families whose artifact is per (lane, TIER) rather
   // than per lane, which is why `familyArtifact` exists: each route ships a `SceneWorks/…-mlx`
   // rehost on macOS and a separate `SceneWorks/…-candle` rehost on Windows/Linux, and the candle
@@ -1721,13 +1788,36 @@ export function familyArtifact(family, backend, tier) {
   const merged = {
     env: family.env,
     repo: family.repo,
+    // A family whose EVERY cell shares one root shape states it on the row itself (sc-25690: the
+    // Iris task routes have a single tier, so there is no per-tier or per-lane override to hang
+    // `layout`/`subdir` on). Absent on every older row, which keeps them byte-for-byte as before.
+    ...(family.layout === undefined ? {} : { layout: family.layout }),
+    ...(family.subdir === undefined ? {} : { subdir: family.subdir }),
     ...(lane ?? {}),
     ...(family.tiers?.[tier] ?? {}),
     ...(override ?? {}),
   };
   // `layout: "flat"` and `tiered: false` say the same thing; the first is this function's word for
   // it and the second is the family table's.
-  return { ...merged, layout: merged.layout ?? (merged.tiered === false ? "flat" : "tiered") };
+  // `subdir` (sc-25690) is the third shape: the load root is ONE named folder of the snapshot that
+  // is not the tier — an Iris task export (`depth/`, `upscaler/`).
+  const layout = merged.layout ?? (merged.subdir ? "subdir" : merged.tiered === false ? "flat" : "tiered");
+  return { ...merged, layout };
+}
+
+/**
+ * The path elements between a snapshot directory and the root an artifact loads from: none for a
+ * `flat` artifact, the named folder for a `subdir` one (sc-25690), and the tier otherwise.
+ */
+export function artifactRootSuffix(artifact, tier) {
+  if (artifact.layout === "flat") return [];
+  if (artifact.layout === "subdir") {
+    if (typeof artifact.subdir !== "string" || !/^[A-Za-z0-9_-]+$/.test(artifact.subdir)) {
+      fail(`a subdir artifact of ${artifact.repo} must name exactly one path segment`);
+    }
+    return [artifact.subdir];
+  }
+  return [tier];
 }
 
 /** Snapshot revision directories of `repo` staged under one hub root. */
@@ -1751,8 +1841,8 @@ async function hostSnapshotRevisions(hub, repo) {
  * missing snapshot.
  */
 export async function resolveArtifactRoot(models, modelId, tier, artifact, hubs) {
-  const suffix = artifact.layout === "flat" ? [] : [tier];
-  const label = suffix.length > 0 ? `/${tier}` : "";
+  const suffix = artifactRootSuffix(artifact, tier);
+  const label = suffix.length > 0 ? `/${suffix.join("/")}` : "";
   const declared = tierVariantDownload(models, modelId, artifact.repo, tier);
   // sc-24112: a `pendingArtifact` row carries the null-SHA placeholder for an artifact that is not
   // on the Hub yet (its upload is the epic's terminal story), so there is no snapshot to probe and
@@ -2143,7 +2233,7 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   const artifact = familyArtifact(family, backend, parts.tier);
   const resolved = await resolveArtifactRoot(models, parts.modelId, parts.tier, artifact, hubs);
   row.roots.push({
-    label: artifact.layout === "flat" ? "snapshot root" : "tier root",
+    label: artifact.layout === "flat" ? "snapshot root" : artifact.layout === "subdir" ? "task root" : "tier root",
     path: resolved.root ?? resolved.expected,
   });
   if (!resolved.root) {
@@ -2154,6 +2244,10 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   row.env[`SCENEWORKS_${artifact.env}_REVISION`] = resolved.revision;
   row.env[`SCENEWORKS_${artifact.env}_ROOT`] = tierRoot;
   row.tierRoot = tierRoot;
+  // sc-25690: a root that is SHARED with other artifacts (the Iris generation backbone lives at the
+  // snapshot root beside the `depth/` and `upscaler/` task exports) inventories only its own
+  // declared files — see the `iris_3b` family row.
+  if (family.inventoryFiles) row.inventoryFiles = [...family.inventoryFiles];
   // A converter-written file the ENGINE requires INSIDE the resolved tier root, beyond the weights
   // the manifest download ships (sc-22734 review). The SenseNova `_fast` rehosts are the live case:
   // `mlx-gen-sensenova`'s `production_calibration_identity` and `candle-gen-sensenova`'s
@@ -2287,6 +2381,24 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     row.roots.push({ label: `component ${component.env}`, path: root ?? snapshotPath(hubs[0], component.repo, download.revision) });
     if (!root) {
       return { ...row, status: "weights_missing", reason: `no ${component.repo}@${download.revision.slice(0, 8)} snapshot on this host` };
+    }
+    // sc-25690: a component that declares the `files` its engine opens in it by name is checked for
+    // them and for every shard its own index names — a config-only or half-fetched text encoder is
+    // exactly as unloadable as an absent one (both Iris loaders price the tower from its shard
+    // headers before reading a weight, so the load fails outright). A component declaring no
+    // `files` (the SDXL three) keeps the directory-only probe it has always had.
+    if (component.files) {
+      const missingComponentFiles = [];
+      for (const file of component.files) {
+        if (!(await isFile(path.join(root, file)))) missingComponentFiles.push(file);
+      }
+      missingComponentFiles.push(...await missingIndexedShards(root));
+      if (missingComponentFiles.length > 0) {
+        return {
+          ...row, status: "weights_missing",
+          reason: `${component.repo} snapshot ${root} is missing ${missingComponentFiles.join(", ")}, which the ${backend} arm opens as this cell's staged component`,
+        };
+      }
     }
     row.env[component.env] = root;
   }
@@ -3881,7 +3993,15 @@ export async function measureAnchor(row, context) {
     // every anchor the run has not reached yet, which is exactly what it did at cell 61 of 132.
     let inventory;
     try {
-      inventory = await hashArtifactInventory(row.tierRoot);
+      inventory = await hashArtifactInventory(
+        row.tierRoot,
+        // A hub snapshot's files are symlinks into the repository's `blobs/` beside `snapshots/`,
+        // and an explicit file list is confined to its root unless told otherwise — so the trusted
+        // root is the repository directory two levels above the snapshot root.
+        row.inventoryFiles
+          ? { includeFiles: row.inventoryFiles, trustedRoot: path.dirname(path.dirname(row.tierRoot)) }
+          : {},
+      );
     } catch (error) {
       return finish("weights_missing", inventoryUnusableReason(row.tierRoot, error));
     }

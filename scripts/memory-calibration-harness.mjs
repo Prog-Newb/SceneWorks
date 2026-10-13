@@ -1588,7 +1588,9 @@ export function parseAnchorKey(key) {
  *
  * - `models[].id` in `docs/generated/memory-matrix.json` — the routed catalog, and
  * - `summary.outOfMatrixEntries[].id` — the models deliberately absent from that catalog (today
- *   exactly the MiniMax-H3 pair, which has no familyGroup arm and no video-route resolver row).
+ *   exactly the MiniMax-H3 pair, which has no familyGroup arm and no video-route resolver row), and
+ * - `summary.taskRouteEntries[].id` — catalog entries outside the matrix MODALITIES that carry a
+ *   memory anchor anyway (sc-25690: the Iris-3B depth and restoration task routes).
  *
  * The schema's key pattern only constrains the SHAPE of a model id, so without this a plan could
  * name an INVENTED model — `krea_2_turbo_b:q4:mlx`, a byte-for-byte copy of `krea_2_turbo:q4:mlx` —
@@ -1612,6 +1614,9 @@ function matrixModelIds() {
   const ids = new Set([
     ...(matrix.models ?? []).map((model) => model.id),
     ...(matrix.summary?.outOfMatrixEntries ?? []).map((entry) => entry.id),
+    // sc-25690: catalog entries outside the matrix modalities that carry a memory anchor (the
+    // Iris-3B depth and restoration task routes) — real entries, enumerated by the matrix by name.
+    ...(matrix.summary?.taskRouteEntries ?? []).map((entry) => entry.id),
   ].filter((id) => typeof id === "string" && id));
   return (matrixModelIdsCache = ids.size ? ids : null);
 }
@@ -1639,7 +1644,7 @@ export function validatePlan(plan) {
     if (knownModelIds && !syntheticFixture && !knownModelIds.has(modelId)) {
       fail(
         `${key}: model id ${JSON.stringify(modelId)} is not a docs/generated/memory-matrix.json ` +
-          "model and is not one of its summary.outOfMatrixEntries; an invented model id is a " +
+          "model and is not one of its summary.outOfMatrixEntries or summary.taskRouteEntries; an invented model id is a " +
           "second measurement of an existing cell wearing a new name",
       );
     }

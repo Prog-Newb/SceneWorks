@@ -723,18 +723,39 @@ mod tests {
         weight: f64,
     }
 
-    /// Write a minimal, header-valid safetensors adapter (one f32 tensor) with `metadata`.
+    /// Write a minimal adapter with `metadata` that both engines can PRICE against the staged
+    /// backbone's one `[4, 4]` projection (sc-25690: the memory contract reads every adapter's
+    /// header before load and refuses factors that match no projection): a rank-1 LoRA pair, or —
+    /// when the metadata stamps `networkType: lokr` — two `[2, 2]` Kronecker factors.
     fn write_adapter(path: &Path, metadata: &Value) {
-        let header = json!({
-            "__metadata__": metadata,
-            "blocks.0.attn.qkv.lora_down.weight": {
-                "dtype": "F32", "shape": [1], "data_offsets": [0, 4]
-            },
-        })
-        .to_string();
+        let target = "blocks.0.attn.qkv";
+        let lokr = metadata.get("networkType").and_then(Value::as_str) == Some("lokr");
+        let factors: [(String, [usize; 2]); 2] = if lokr {
+            [
+                (format!("{target}.lokr_w1"), [2, 2]),
+                (format!("{target}.lokr_w2"), [2, 2]),
+            ]
+        } else {
+            [
+                (format!("{target}.lora_down.weight"), [1, 4]),
+                (format!("{target}.lora_up.weight"), [4, 1]),
+            ]
+        };
+        let mut header = serde_json::Map::new();
+        header.insert("__metadata__".to_owned(), metadata.clone());
+        let mut offset = 0_usize;
+        for (name, shape) in factors {
+            let bytes = shape.iter().product::<usize>() * 4;
+            header.insert(
+                name,
+                json!({ "dtype": "F32", "shape": shape, "data_offsets": [offset, offset + bytes] }),
+            );
+            offset += bytes;
+        }
+        let header = Value::Object(header).to_string();
         let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
         bytes.extend_from_slice(header.as_bytes());
-        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.resize(bytes.len() + offset, 0);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
     }
