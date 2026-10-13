@@ -122,6 +122,11 @@ const UNREAD_ADVANCED_KEYS: [&str; 6] = [
 // activation checkpointing (`gradientCheckpointing`, new at that pin) it peaks at 86.47 GB.
 const MLX_RESTORE_FULL_512_PEAK: Peak = Peak::DecimalGb(71.57);
 const MLX_RESTORE_FULL_1024_LOWER_BOUND: Peak = Peak::DecimalGb(116.47);
+// Under full activation checkpointing (`gradientCheckpointing`; MLX since inference #1243):
+// inference run 38405154244 on nax-macos-2 — active peak, cache off, six steps, steady. The 1024²
+// crop COMPLETES under it (77.25 GB); without it only the lower bound above is known.
+const MLX_RESTORE_FULL_AC_512_PEAK: Peak = Peak::DecimalGb(63.21);
+const MLX_RESTORE_FULL_AC_1024_PEAK: Peak = Peak::DecimalGb(77.25);
 const CANDLE_RESTORE_FULL_256_PEAK: Peak = Peak::DecimalGb(76.15);
 const CANDLE_RESTORE_FULL_512_PEAK: Peak = Peak::DecimalGb(87.36);
 const CANDLE_RESTORE_FULL_1024_SPILL_PEAK: Peak = Peak::DecimalGb(142.96);
@@ -129,6 +134,12 @@ const CANDLE_RESTORE_FULL_AC_1024_PEAK: Peak = Peak::DecimalGb(86.47);
 
 const MLX_RESTORE_FULL_512: IrisMemoryFloor =
     IrisMemoryFloor::measured(MLX_RESTORE_FULL_512_PEAK, MLX_RESERVE_GIB);
+const MLX_RESTORE_FULL_256: IrisMemoryFloor =
+    IrisMemoryFloor::declared(92).bounded_by(MLX_RESTORE_FULL_512);
+const MLX_RESTORE_FULL_AC_512: IrisMemoryFloor =
+    IrisMemoryFloor::measured(MLX_RESTORE_FULL_AC_512_PEAK, MLX_RESERVE_GIB);
+const MLX_RESTORE_FULL_AC_1024: IrisMemoryFloor =
+    IrisMemoryFloor::measured(MLX_RESTORE_FULL_AC_1024_PEAK, MLX_RESERVE_GIB);
 const CANDLE_RESTORE_FULL_256: IrisMemoryFloor =
     IrisMemoryFloor::measured(CANDLE_RESTORE_FULL_256_PEAK, CANDLE_RESERVE_GIB)
         .held_on(CAMPAIGN_CUDA_CARD.gib());
@@ -145,8 +156,9 @@ const CANDLE_RESTORE_FULL_AC_1024: IrisMemoryFloor =
 /// (`advanced.gradientCheckpointing`), on the lanes whose trainer implements it
 /// ([`super::iris_gradient_checkpointing_lanes`]).
 ///
-/// * MEASURED — the full fine-tune at 262 144 px on both lanes, at 65 536 px on Candle, and
-///   Candle's `full_ac` at 1 048 576 px: the `*_PEAK` constants above converted to GiB, plus the
+/// * MEASURED — the full fine-tune at 262 144 px on both lanes and at 65 536 px on Candle;
+///   `full_ac` at 1 048 576 px on both lanes and at 262 144 px on MLX: the `*_PEAK` constants above
+///   converted to GiB, plus the
 ///   lane's 2 GiB reserve, rounded up; a Candle row that ran without spilling never exceeds the
 ///   card that held its run.
 /// * MEASURED WITH SPILL — Candle's full fine-tune at 1 048 576 px without checkpointing: the
@@ -155,21 +167,16 @@ const CANDLE_RESTORE_FULL_AC_1024: IrisMemoryFloor =
 /// * LOWER BOUND — MLX's full fine-tune at 1 048 576 px: declared above the measured lower bound.
 /// * EXTRAPOLATED — the MLX full row at 65 536 px, bounded by the measured 262 144 px row (a
 ///   smaller crop never needs more; its earlier 92 was declared from an 87.5 GB process footprint,
-///   cache included); and Candle's `full_ac` rows under 1 048 576 px, each the lower of the plain
-///   row at that size and the measured AC 1024² row.
+///   cache included); and the `full_ac` rows with no run of their own, each the lower of the plain
+///   row at that size and the lane's next measured AC row up.
 /// * DECLARED — every adapter row: LoRA rank 8 at a 256² crop peaked at 25.2 GB on MLX (run
 ///   38140601912) and 29.3 GB of VRAM on CUDA (run 38137202298), padded (Candle adding the
 ///   reserve); adapter rows above 65 536 px scale the activation, LPIPS and critic terms
 ///   conservatively.
 ///
 /// A micro-batch above the last row is refused rather than admitted unbounded.
-const RESTORE_FLOORS_GIB: [(&str, &str, u64, IrisMemoryFloor); 15] = [
-    (
-        "mlx",
-        "full",
-        65_536,
-        IrisMemoryFloor::declared(92).bounded_by(MLX_RESTORE_FULL_512),
-    ),
+const RESTORE_FLOORS_GIB: [(&str, &str, u64, IrisMemoryFloor); 18] = [
+    ("mlx", "full", 65_536, MLX_RESTORE_FULL_256),
     ("mlx", "full", 262_144, MLX_RESTORE_FULL_512),
     (
         "mlx",
@@ -177,6 +184,14 @@ const RESTORE_FLOORS_GIB: [(&str, &str, u64, IrisMemoryFloor); 15] = [
         1_048_576,
         IrisMemoryFloor::above_lower_bound(MLX_RESTORE_FULL_1024_LOWER_BOUND, 128),
     ),
+    (
+        "mlx",
+        "full_ac",
+        65_536,
+        IrisMemoryFloor::bound_from(MLX_RESTORE_FULL_256).bounded_by(MLX_RESTORE_FULL_AC_512),
+    ),
+    ("mlx", "full_ac", 262_144, MLX_RESTORE_FULL_AC_512),
+    ("mlx", "full_ac", 1_048_576, MLX_RESTORE_FULL_AC_1024),
     ("mlx", "adapter", 65_536, IrisMemoryFloor::declared(28)),
     ("mlx", "adapter", 262_144, IrisMemoryFloor::declared(36)),
     ("mlx", "adapter", 1_048_576, IrisMemoryFloor::declared(56)),
@@ -802,7 +817,9 @@ mod tests {
                 ("mlx", "full", 65_536) => FloorProvenance::Extrapolated,
                 ("mlx", "full", 1_048_576) => FloorProvenance::LowerBound,
                 ("candle", "full", 1_048_576) => FloorProvenance::MeasuredSpill,
-                ("candle", "full_ac", 65_536 | 262_144) => FloorProvenance::Extrapolated,
+                (_, "full_ac", 65_536) | ("candle", "full_ac", 262_144) => {
+                    FloorProvenance::Extrapolated
+                }
                 _ => FloorProvenance::Measured,
             };
             assert_eq!(floor.provenance, expected, "{lane} {artifact} {pixels}");
@@ -866,7 +883,15 @@ mod tests {
         let checkpointed = restore_memory_floor("candle", &config).unwrap();
         assert_eq!(checkpointed, CANDLE_RESTORE_FULL_AC_1024);
         assert!(f64::from(checkpointed.gib) <= card, "{checkpointed:?}");
-        assert_eq!(restore_memory_floor("mlx", &config), Some(mlx_plain));
+        // MLX (inference #1243): the 1024² crop, only a lower bound without checkpointing, has a
+        // measured row with it — and that row fits a 128 GiB Mac after the OS reserve.
+        assert_eq!(mlx_plain.provenance, FloorProvenance::LowerBound);
+        assert_eq!(
+            restore_memory_floor("mlx", &config),
+            Some(MLX_RESTORE_FULL_AC_1024)
+        );
+        assert!(MLX_RESTORE_FULL_AC_1024.gib + 4 <= 128);
+        assert_eq!(restore_memory_floor("cpu", &config), None);
         config.advanced.insert("networkType".into(), json!("lora"));
         assert_eq!(
             restore_memory_floor("candle", &config).map(|floor| floor.provenance),
@@ -884,7 +909,10 @@ mod tests {
             }
         }
         let limits = &iris_restore_target().limits;
-        assert_eq!(limits["gradientCheckpointingLanes"], json!(["candle"]));
+        assert_eq!(
+            limits["gradientCheckpointingLanes"],
+            json!(["candle", "mlx"])
+        );
         assert!(limits.get("gradientCheckpointing").is_none());
     }
 

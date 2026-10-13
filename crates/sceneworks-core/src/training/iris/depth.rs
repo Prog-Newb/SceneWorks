@@ -136,6 +136,9 @@ const UNREAD_ADVANCED_KEYS: [&str; 7] = [
 // activation checkpointing (`gradientCheckpointing`, new at that pin) 1024² peaks at 70.56 GB.
 const MLX_DEPTH_512_PEAK: Peak = Peak::DecimalGb(53.60);
 const MLX_DEPTH_1024_PEAK: Peak = Peak::DecimalGb(92.58);
+// Under full activation checkpointing (`gradientCheckpointing`; MLX since inference #1243):
+// inference run 38405154244 on nax-macos-2 — active peak, cache off, six steps, steady.
+const MLX_DEPTH_AC_1024_PEAK: Peak = Peak::DecimalGb(63.01);
 const CANDLE_DEPTH_512_PEAK: Peak = Peak::DecimalGb(70.41);
 const CANDLE_DEPTH_1024_SPILL_PEAK: Peak = Peak::DecimalGb(116.77);
 const CANDLE_DEPTH_AC_1024_PEAK: Peak = Peak::DecimalGb(70.56);
@@ -162,6 +165,13 @@ const fn candle_depth_estimate_gib(pixels: f64) -> f64 {
 
 const MLX_DEPTH_512: IrisMemoryFloor =
     IrisMemoryFloor::measured(MLX_DEPTH_512_PEAK, MLX_RESERVE_GIB);
+const MLX_DEPTH_16K: IrisMemoryFloor = IrisMemoryFloor::declared(64).bounded_by(MLX_DEPTH_512);
+const MLX_DEPTH_307K: IrisMemoryFloor =
+    IrisMemoryFloor::extrapolated(mlx_depth_estimate_gib(307_200.0), MLX_RESERVE_GIB);
+const MLX_DEPTH_590K: IrisMemoryFloor =
+    IrisMemoryFloor::extrapolated(mlx_depth_estimate_gib(589_824.0), MLX_RESERVE_GIB);
+const MLX_DEPTH_AC_1024: IrisMemoryFloor =
+    IrisMemoryFloor::measured(MLX_DEPTH_AC_1024_PEAK, MLX_RESERVE_GIB);
 const CANDLE_DEPTH_512: IrisMemoryFloor =
     IrisMemoryFloor::measured(CANDLE_DEPTH_512_PEAK, CANDLE_RESERVE_GIB)
         .held_on(CAMPAIGN_CUDA_CARD.gib());
@@ -181,46 +191,57 @@ const CANDLE_DEPTH_AC_1024: IrisMemoryFloor =
 /// (`advanced.gradientCheckpointing`), on the lanes whose trainer implements it
 /// ([`super::iris_gradient_checkpointing_lanes`]); every other run reads `full`.
 ///
-/// * MEASURED — MLX and Candle at 262 144 px (512²), MLX at 1 048 576 px (1024²), Candle `full_ac`
-///   at 1 048 576 px: the peaks above converted to GiB, plus the lane's 2 GiB reserve, rounded up; a
+/// * MEASURED — MLX and Candle at 262 144 px (512²), MLX at 1 048 576 px (1024²), `full_ac` at
+///   1 048 576 px on both lanes: the peaks above converted to GiB, plus the lane's 2 GiB reserve,
+///   rounded up; a
 ///   Candle row that ran without spilling never exceeds the card that held its run.
 /// * MEASURED WITH SPILL — Candle 1 048 576 px without checkpointing: the measured need, which the
 ///   card met only by spilling to system memory; the row refuses that card.
 /// * EXTRAPOLATED — 307 200 / 589 824 px on both lanes (the lane's own chord, [`chord_gib`], + the
 ///   reserve); the 16 384 px rows, which the measured 512² row bounds (a smaller run never needs
 ///   more than a larger one; the MLX 64 was declared from a 59.0 GB process footprint at 128²,
-///   cache included); and the Candle `full_ac` rows under 1 048 576 px, each the lower of the plain
-///   row at that size and the measured AC 1024² row.
+///   cache included); and the `full_ac` rows under 1 048 576 px on both lanes, each the lower of
+///   the plain row at that size and the lane's measured AC 1024² row.
 /// * DECLARED — Candle 16 384 px where its declaration (68: a full fine-tune at 128×128 peaked at
 ///   64.6 GB of VRAM before the memory fix, padded) is not above the measured 512² row.
 ///
 /// A micro-batch above the last row is refused rather than admitted unbounded.
-const DEPTH_FLOORS_GIB: [(&str, &str, u64, IrisMemoryFloor); 15] = [
-    (
-        "mlx",
-        "full",
-        16_384,
-        IrisMemoryFloor::declared(64).bounded_by(MLX_DEPTH_512),
-    ),
+const DEPTH_FLOORS_GIB: [(&str, &str, u64, IrisMemoryFloor); 20] = [
+    ("mlx", "full", 16_384, MLX_DEPTH_16K),
     ("mlx", "full", 262_144, MLX_DEPTH_512),
-    (
-        "mlx",
-        "full",
-        307_200,
-        IrisMemoryFloor::extrapolated(mlx_depth_estimate_gib(307_200.0), MLX_RESERVE_GIB),
-    ),
-    (
-        "mlx",
-        "full",
-        589_824,
-        IrisMemoryFloor::extrapolated(mlx_depth_estimate_gib(589_824.0), MLX_RESERVE_GIB),
-    ),
+    ("mlx", "full", 307_200, MLX_DEPTH_307K),
+    ("mlx", "full", 589_824, MLX_DEPTH_590K),
     (
         "mlx",
         "full",
         1_048_576,
         IrisMemoryFloor::measured(MLX_DEPTH_1024_PEAK, MLX_RESERVE_GIB),
     ),
+    (
+        "mlx",
+        "full_ac",
+        16_384,
+        IrisMemoryFloor::bound_from(MLX_DEPTH_16K).bounded_by(MLX_DEPTH_AC_1024),
+    ),
+    (
+        "mlx",
+        "full_ac",
+        262_144,
+        IrisMemoryFloor::bound_from(MLX_DEPTH_512).bounded_by(MLX_DEPTH_AC_1024),
+    ),
+    (
+        "mlx",
+        "full_ac",
+        307_200,
+        IrisMemoryFloor::bound_from(MLX_DEPTH_307K).bounded_by(MLX_DEPTH_AC_1024),
+    ),
+    (
+        "mlx",
+        "full_ac",
+        589_824,
+        IrisMemoryFloor::bound_from(MLX_DEPTH_590K).bounded_by(MLX_DEPTH_AC_1024),
+    ),
+    ("mlx", "full_ac", 1_048_576, MLX_DEPTH_AC_1024),
     ("candle", "full", 16_384, CANDLE_DEPTH_16K),
     ("candle", "full", 262_144, CANDLE_DEPTH_512),
     ("candle", "full", 307_200, CANDLE_DEPTH_307K),
@@ -948,7 +969,11 @@ mod tests {
         assert_eq!(checkpointed, CANDLE_DEPTH_AC_1024);
         assert_eq!(checkpointed.provenance, FloorProvenance::Measured);
         assert!(f64::from(checkpointed.gib) <= card, "{checkpointed:?}");
-        assert_eq!(depth_memory_floor("mlx", &config), Some(mlx_plain));
+        // MLX (inference #1243): its own measured `full_ac` row, well under the plain one.
+        assert_eq!(depth_memory_floor("mlx", &config), Some(MLX_DEPTH_AC_1024));
+        assert!(MLX_DEPTH_AC_1024.gib < mlx_plain.gib);
+        // A lane with no `full_ac` rows keeps reading its plain ones.
+        assert_eq!(depth_memory_floor("cpu", &config), None);
         // Checkpointing never raises a floor, at any row.
         for (lane, artifact, pixels, floor) in DEPTH_FLOORS_GIB {
             if artifact == "full_ac" {
@@ -962,7 +987,10 @@ mod tests {
         }
         // The target publishes the lanes, and does not pin the toggle off.
         let limits = &iris_depth_target().limits;
-        assert_eq!(limits["gradientCheckpointingLanes"], json!(["candle"]));
+        assert_eq!(
+            limits["gradientCheckpointingLanes"],
+            json!(["candle", "mlx"])
+        );
         assert!(limits.get("gradientCheckpointing").is_none());
     }
 
@@ -1002,7 +1030,7 @@ mod tests {
         for (lane, artifact, pixels, floor) in DEPTH_FLOORS_GIB {
             let expected = match (lane, artifact, pixels) {
                 (_, "full", 262_144) | ("mlx", "full", 1_048_576) => FloorProvenance::Measured,
-                ("candle", "full_ac", 1_048_576) => FloorProvenance::Measured,
+                (_, "full_ac", 1_048_576) => FloorProvenance::Measured,
                 ("candle", "full", 1_048_576) => FloorProvenance::MeasuredSpill,
                 ("candle", _, 16_384) => FloorProvenance::Declared,
                 _ => FloorProvenance::Extrapolated,
@@ -1022,7 +1050,7 @@ mod tests {
         let basis = published["basis"].as_str().unwrap();
         assert!(!basis.contains("no measurement campaign"), "{basis}");
         assert!(
-            basis.contains("Measured at the row's own shape: mlx 262144; mlx 1048576; candle 262144; candle full_ac 1048576.")
+            basis.contains("Measured at the row's own shape: mlx 262144; mlx 1048576; mlx full_ac 1048576; candle 262144; candle full_ac 1048576.")
                 && basis.contains("completed only by spilling to system memory): candle 1048576.")
                 && basis.contains("ACTIVE peak with MLX's buffer cache disabled"),
             "{basis}"

@@ -188,6 +188,7 @@ training_set=(
   "iris_training_gpu_smoke::iris_training_gpu_smoke_lokr_cancel_resume 45 1200 $hub"
   "iris_training_gpu_smoke::iris_training_gpu_smoke_two_rank_ddp 80 1500 $hub"
   "iris_training_gpu_smoke::iris_training_gpu_smoke_depth 90 1200 $no_encoder"
+  "iris_training_gpu_smoke::iris_training_gpu_smoke_depth_checkpointed_cancel_resume 90 1500 $no_encoder"
   "iris_training_gpu_smoke::iris_training_gpu_smoke_restore 50 1500 $no_encoder"
 )
 # sc-25690: the FULL fine-tunes through the job path — the admission gate reads the full rows, a

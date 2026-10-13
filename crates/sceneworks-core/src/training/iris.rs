@@ -213,16 +213,16 @@ pub fn iris_objective_memory_floor(
 /// The engine publishes NO declaration of this — its trainer descriptor has no such flag, and a
 /// lane that has not wired the regions refuses in `Trainer::validate`, which needs the weights
 /// loaded. So this is an explicit table of what each lane's trainer accepts at the pinned inference
-/// revision (Candle since inference #1242; MLX refuses typed). The real-weight depth / restoration
+/// revision (Candle since inference #1242, MLX since #1243). The real-weight depth / restoration
 /// training smokes ask the lane's own trainer and FAIL when its answer differs from this table, so
-/// a lane that starts accepting it cannot go unnoticed.
+/// the table cannot drift from the engine unnoticed.
 ///
 /// Generation has none: its control is the richer `advanced.iris.activation_checkpointing` policy,
 /// and its trainer refuses the shared toggle on both lanes.
 pub fn iris_gradient_checkpointing_lanes(objective: IrisObjective) -> &'static [&'static str] {
     match objective {
         IrisObjective::Generation => &[],
-        IrisObjective::Depth | IrisObjective::Restoration => &["candle"],
+        IrisObjective::Depth | IrisObjective::Restoration => &["candle", "mlx"],
     }
 }
 
@@ -1157,14 +1157,18 @@ mod tests {
     }
 
     /// sc-25690: the shared gradient-checkpointing toggle is a depth / restoration control on the
-    /// lanes whose trainer implements it; elsewhere it is refused typed, naming where it works.
+    /// lanes whose trainer implements it — both native lanes at this pin; a lane outside the table
+    /// is refused typed, naming where it works.
     #[test]
     fn task_gradient_checkpointing_is_refused_on_a_lane_that_lacks_it() {
         let mut config = depth::iris_depth_target().defaults;
         for objective in [IrisObjective::Depth, IrisObjective::Restoration] {
-            assert_eq!(iris_gradient_checkpointing_lanes(objective), ["candle"]);
+            assert_eq!(
+                iris_gradient_checkpointing_lanes(objective),
+                ["candle", "mlx"]
+            );
             // Off: nothing to refuse on any lane.
-            for lane in ["mlx", "candle"] {
+            for lane in ["mlx", "candle", "cpu"] {
                 assert_eq!(
                     iris_gradient_checkpointing_refusal(objective, lane, &config),
                     None
@@ -1176,7 +1180,7 @@ mod tests {
             .insert("gradientCheckpointing".into(), json!(true));
         assert!(iris_gradient_checkpointing(&config));
         for objective in [IrisObjective::Depth, IrisObjective::Restoration] {
-            for lane in ["mlx", "candle"] {
+            for lane in ["mlx", "candle", "cpu"] {
                 let refusal = iris_gradient_checkpointing_refusal(objective, lane, &config);
                 assert_eq!(
                     refusal.is_none(),
@@ -1185,11 +1189,12 @@ mod tests {
                 );
             }
             let refusal =
-                iris_gradient_checkpointing_refusal(objective, "mlx", &config).expect("refused");
+                iris_gradient_checkpointing_refusal(objective, "cpu", &config).expect("refused");
             assert!(
                 refusal.contains(objective.task())
-                    && refusal.contains("Apple Silicon (MLX)")
-                    && refusal.contains("implemented on NVIDIA (Candle/CUDA)"),
+                    && refusal.contains("training on cpu")
+                    && refusal
+                        .contains("implemented on NVIDIA (Candle/CUDA) and Apple Silicon (MLX)"),
                 "{refusal}"
             );
         }

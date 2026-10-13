@@ -599,6 +599,303 @@ fn import_source(
     asset["id"].as_str().unwrap().to_owned()
 }
 
+/// Two aligned depth examples under `root`: an RGB gradient + a depth ramp (near at the bottom),
+/// one with a validity mask.
+fn write_depth_dataset(
+    root: &Path,
+    project_id: &str,
+    size: u32,
+) -> sceneworks_core::training::TrainingDataset {
+    std::fs::create_dir_all(root.join("images")).unwrap();
+    std::fs::create_dir_all(root.join("sidecars")).unwrap();
+    let items: Vec<Value> = (0..2u32)
+        .map(|index| {
+            image::RgbImage::from_fn(size, size, |x, y| {
+                image::Rgb([(x * 2) as u8, (255 - y * 2) as u8, (60 * index + 40) as u8])
+            })
+            .save(root.join(format!("images/i{index}.png")))
+            .unwrap();
+            write_npy_f32(
+                &root.join(format!("sidecars/i{index}.depth.npy")),
+                size,
+                size,
+                |y, _| 1.0 + 9.0 * (1.0 - y as f32 / (size - 1) as f32),
+            );
+            let mut depth =
+                json!({ "path": format!("sidecars/i{index}.depth.npy"), "maxDepth": 80.0 });
+            if index == 1 {
+                image::GrayImage::from_fn(size, size, |x, _| image::Luma([u8::from(x > 4) * 255]))
+                    .save(root.join("sidecars/i1.mask.png"))
+                    .unwrap();
+                depth["maskPath"] = json!("sidecars/i1.mask.png");
+            }
+            json!({
+                "id": format!("i{index}"), "path": format!("images/i{index}.png"),
+                "displayName": format!("i{index}.png"),
+                "caption": { "text": "", "source": "manual", "triggerWords": [] },
+                "addedAt": "2026-10-11T00:00:00Z", "irisDepth": depth
+            })
+        })
+        .collect();
+    serde_json::from_value(json!({
+        "schemaVersion": 1, "id": "ds_depth", "version": 1, "projectId": project_id,
+        "name": "depth", "modality": "image", "status": "ready",
+        "createdAt": "2026-10-11T00:00:00Z", "updatedAt": "2026-10-11T00:00:00Z", "items": items
+    }))
+    .unwrap()
+}
+
+/// The bounded depth config of a smoke: the real target's defaults (the paper recipe) at
+/// `size`², `steps` optimizer steps, a durable checkpoint every `save_every`.
+pub(crate) fn depth_smoke_config(
+    size: u32,
+    steps: u32,
+    save_every: u32,
+) -> sceneworks_core::training::TrainingConfig {
+    let mut config = task_target("iris_3b_depth").defaults;
+    config.steps = steps;
+    config.save_every = save_every;
+    config.gradient_accumulation = 1;
+    config.resolution = size;
+    config.learning_rate = sceneworks_core::contracts::ContractNumber::from_f64(1e-4).unwrap();
+    config.advanced.insert("sampleEvery".into(), json!(steps));
+    config.advanced["iris"]["depth_size"] = json!([size, size]);
+    config.advanced["iris"]["preview_items"] = json!(1);
+    config.advanced["iris"]["keep_last_checkpoints"] = json!(1);
+    config
+}
+
+/// A depth job that selects the trained model `model_id` by id (`irisModel`), exactly as the API
+/// hands a registered trained depth model over; the raw map must come back whole and finite.
+#[allow(clippy::too_many_arguments)]
+async fn depth_job_on_trained_model(
+    settings: &Settings,
+    posts: &ProgressPosts,
+    store: &ProjectStore,
+    project_id: &str,
+    project_path: &str,
+    temp: &Path,
+    model_id: &str,
+    depth_job_id: &str,
+) {
+    let source = import_source(
+        store,
+        project_id,
+        temp,
+        image::RgbImage::from_fn(256, 192, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+        }),
+    );
+    let mut snapshot = stub_job_snapshot(depth_job_id, "image_depth", project_id);
+    let mut trained_entry =
+        crate::training_jobs::builtin_model_manifest_entry("iris_3b_depth").unwrap();
+    trained_entry["id"] = json!(model_id);
+    snapshot["payload"] = json!({
+        "projectId": project_id,
+        "sourceAssetId": source,
+        "resolution": { "mode": "capped", "maxSide": 256 },
+        "irisModel": model_id,
+        // The API attaches the trained model's own entry (its engine's depth declaration
+        // overlaid) in place of the release entry.
+        "modelManifestEntries": [trained_entry],
+    });
+    let job: JobSnapshot = serde_json::from_value(snapshot).unwrap();
+    let api = ApiClient::new(settings);
+    crate::depth_jobs::run_image_depth_job(&api, settings, &job)
+        .await
+        .expect("the depth job runs on the trained model");
+    let fact = completed_result(posts, depth_job_id)["assetWrites"][0].clone();
+    assert_eq!(fact["model"], model_id, "{fact:#}");
+    assert_eq!(fact["depth"]["model"]["trainedModelId"], model_id);
+    let npy = std::fs::read(PathBuf::from(project_path).join(fact["mediaPath"].as_str().unwrap()))
+        .unwrap();
+    let map = sceneworks_core::depth_map::decode_npy_f32(&npy).unwrap();
+    assert_eq!((map.width, map.height), (256, 192));
+    assert!(map.values.iter().all(|v| v.is_finite()));
+}
+
+/// sc-25690: a depth full fine-tune UNDER gradient (activation) checkpointing, canceled through the
+/// job API after its first durable checkpoint and RESUMED to completion — on real weights. Resume
+/// materializes the lazily-loaded trainables inside the first resumed step's checkpointed region,
+/// which the engine proves on a miniature only; this is that path on the 3B model. The resumed
+/// job's own progress must continue one past the stop ([`resume_continuation`]), the resumed job's
+/// plan — as recorded on the job — must still carry the toggle, the lane's trainer must accept
+/// it, and the resumed export must drive a depth job.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "real-weight Iris DEPTH checkpointed cancel/resume smoke; needs the pinned speridlabs/iris-3b depth/ export under HF_HUB_CACHE and a GPU (~65 GB)"]
+async fn iris_training_gpu_smoke_depth_checkpointed_cancel_resume() {
+    use sceneworks_core::training::iris::{
+        iris_gradient_checkpointing, iris_gradient_checkpointing_lanes, IrisObjective,
+    };
+    const FIRST_JOB: &str = "iris-depth-ac";
+    const RESUME_JOB: &str = "iris-depth-ac-resume";
+    const SIZE: u32 = 128;
+    const STEPS: u32 = 8;
+    const SAVE_EVERY: u32 = 2;
+    const FILE: &str = "depth_ac.safetensors";
+    let lane = crate::iris_training::training_lane();
+    assert!(
+        iris_gradient_checkpointing_lanes(IrisObjective::Depth).contains(&lane),
+        "the {lane} depth trainer is not listed as implementing gradient checkpointing"
+    );
+    let cancel: CancelSwitch = Arc::default();
+    let temp = tempfile::tempdir().unwrap();
+    let (api_url, posts) = spawn_cancellable_api_stub(cancel.clone()).await;
+    let settings = smoke_settings(temp.path(), api_url, "iris-depth-ac-smoke");
+    let data_dir = settings.data_dir.clone();
+    let store = ProjectStore::new(data_dir.clone(), "iris-depth-ac-smoke");
+    let project = store
+        .create_project("Iris depth checkpointed cancel/resume smoke")
+        .unwrap();
+    let root = PathBuf::from(&project.path).join("training/datasets/ds_depth");
+    let dataset = write_depth_dataset(&root, &project.id, SIZE);
+    let target = task_target("iris_3b_depth");
+    let mut config = depth_smoke_config(SIZE, STEPS, SAVE_EVERY);
+    config
+        .advanced
+        .insert("gradientCheckpointing".into(), json!(true));
+    let gate = admitted_floor(&settings, "iris_3b_depth", &config).await;
+    let model_id = "finetune_depth_ac_smoke";
+    let output_dir = data_dir.join("models/finetunes").join(model_id);
+    let backbone = crate::model_jobs::huggingface_snapshot_dir(&data_dir, BACKBONE_REPO)
+        .expect("HF_HUB_CACHE holds the pinned speridlabs/iris-3b snapshot");
+    let build = |job_id: &str, config| {
+        sceneworks_core::training::build_training_plan(
+            sceneworks_core::training::BuildTrainingPlan {
+                job_id,
+                target: &target,
+                dataset: &dataset,
+                config,
+                preset: None,
+                lora_id: model_id,
+                base_model_path: backbone.display().to_string(),
+                dataset_root: &root,
+                output_dir: &output_dir,
+                file_name: FILE.to_owned(),
+                created_at: "2026-10-13T00:00:00Z".to_owned(),
+            },
+        )
+        .expect("the checkpointed depth plan builds from the real target")
+    };
+    let api = ApiClient::new(&settings);
+
+    // The lane's own trainer accepts the toggle (the answer the lane table is held to).
+    let answer =
+        engine_checkpointing_answer(&settings, &build("iris-depth-ac-probe", config.clone())).await;
+    checkpointing_table_verdict("depth", lane, true, &answer)
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    // 1. Run under checkpointing; cancel once the first durable checkpoint exists.
+    let checkpoint_root = crate::iris_checkpoint_root(&output_dir, FILE);
+    let watcher = {
+        let latest = checkpoint_root.join("latest");
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            while !latest.is_file() {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+    };
+    let plan = build(FIRST_JOB, config.clone());
+    let mut snapshot = stub_job_snapshot(FIRST_JOB, "lora_train", &project.id);
+    snapshot["payload"] = json!({ "dryRun": false, "plan": plan });
+    let job: JobSnapshot = serde_json::from_value(snapshot).unwrap();
+    let started = std::time::Instant::now();
+    let outcome = crate::training_jobs::run_training_execution(&api, &settings, &job, &plan).await;
+    let first_seconds = started.elapsed().as_secs_f64();
+    watcher.abort();
+    assert!(
+        matches!(outcome, Err(WorkerError::Canceled(_))),
+        "the canceled checkpointed depth run ends Canceled: {outcome:?}"
+    );
+    let canceled = posts
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(id, body)| id == FIRST_JOB && body["status"] == "canceled")
+        .map(|(_, body)| body.clone())
+        .expect("the run posted a terminal canceled update");
+    let stopped_at = canceled["result"]["stepsCompleted"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a durable cancel reports its step: {canceled:#}"));
+    assert!(
+        (u64::from(SAVE_EVERY)..u64::from(STEPS)).contains(&stopped_at),
+        "canceled after the first checkpoint and before the end: {canceled:#}"
+    );
+    assert!(checkpoint_root.join("latest").is_file());
+
+    // 2. Resume from that checkpoint — still under checkpointing — to the end.
+    cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+    let mut plan = build(RESUME_JOB, config);
+    apply_resume_translation(&mut plan.config, &checkpoint_root);
+    let mut snapshot = stub_job_snapshot(RESUME_JOB, "lora_train", &project.id);
+    snapshot["payload"] = json!({ "dryRun": false, "plan": plan });
+    let job: JobSnapshot = serde_json::from_value(snapshot).unwrap();
+    // The resumed job AS RECORDED still asks for checkpointing: the plan the worker executes.
+    let recorded: sceneworks_core::training::TrainingPlan =
+        serde_json::from_value(job.payload["plan"].clone()).expect("the recorded plan");
+    assert!(
+        iris_gradient_checkpointing(&recorded.config),
+        "the resumed job's recorded plan lost the gradient checkpointing toggle"
+    );
+    assert!(recorded.config.advanced["iris"]["resume_from"].is_string());
+    let started = std::time::Instant::now();
+    crate::training_jobs::run_training_execution(&api, &settings, &job, &plan)
+        .await
+        .unwrap_or_else(|error| panic!("the resumed checkpointed depth run completes: {error}"));
+    let resume_seconds = started.elapsed().as_secs_f64();
+    let result = completed_result(&posts, RESUME_JOB);
+    assert_eq!(result["stepsCompleted"], STEPS, "{result:#}");
+    let resumed_steps = posted_training_steps(&posts.lock().unwrap(), RESUME_JOB);
+    let resumed_executed = resume_continuation(&resumed_steps, stopped_at, u64::from(STEPS))
+        .unwrap_or_else(|error| panic!("{error}"));
+    for checkpoint in result["checkpoints"].as_array().unwrap() {
+        assert!(
+            checkpoint["step"].as_u64() > Some(stopped_at),
+            "a resumed checkpoint is past the stop at {stopped_at}: {result:#}"
+        );
+    }
+    let final_loss = result["finalLoss"].as_f64().expect("final loss");
+    assert!(final_loss.is_finite(), "final loss {final_loss}");
+
+    // 3. The resumed export is a depth model a depth job runs on.
+    let export = output_dir.join("depth_ac");
+    for file in [
+        "config.yaml",
+        "model.safetensors",
+        "empty_prompt.safetensors",
+    ] {
+        assert!(export.join(file).is_file(), "the depth export has {file}");
+    }
+    assert_eq!(
+        safetensors_metadata(&export.join("model.safetensors"))
+            .get("irisTask")
+            .and_then(Value::as_str),
+        Some("depth")
+    );
+    depth_job_on_trained_model(
+        &settings,
+        &posts,
+        &store,
+        &project.id,
+        &project.path,
+        temp.path(),
+        model_id,
+        "iris-depth-ac-trained-job",
+    )
+    .await;
+    eprintln!(
+        "RESULT status=pass trainer=iris_3b_depth checkpointing=on backend={lane} size={SIZE} {gate} \
+         engine_accepts=true recorded_plan_checkpointing=true canceled_at_step={stopped_at} \
+         first_checkpoint_step={SAVE_EVERY} resumed_first_step={} \
+         resumed_steps_executed={resumed_executed} resumed_to={STEPS} first_s={first_seconds:.1} \
+         resume_s={resume_seconds:.1} final_loss={final_loss:.4} depth_job_model={model_id}",
+        resumed_steps[0],
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real-weight Iris DEPTH training smoke; needs the pinned speridlabs/iris-3b depth/ export under HF_HUB_CACHE and a GPU (~65 GB)"]
 async fn iris_training_gpu_smoke_depth() {
@@ -612,57 +909,10 @@ async fn iris_training_gpu_smoke_depth() {
     let store = ProjectStore::new(data_dir.clone(), "iris-depth-train-smoke");
     let project = store.create_project("Iris depth training smoke").unwrap();
 
-    // Two aligned examples: an RGB gradient + a depth ramp (near at the bottom), one with a mask.
     let root = PathBuf::from(&project.path).join("training/datasets/ds_depth");
-    std::fs::create_dir_all(root.join("images")).unwrap();
-    std::fs::create_dir_all(root.join("sidecars")).unwrap();
-    let items: Vec<Value> = (0..2u32)
-        .map(|index| {
-            image::RgbImage::from_fn(SIZE, SIZE, |x, y| {
-                image::Rgb([(x * 2) as u8, (255 - y * 2) as u8, (60 * index + 40) as u8])
-            })
-            .save(root.join(format!("images/i{index}.png")))
-            .unwrap();
-            write_npy_f32(
-                &root.join(format!("sidecars/i{index}.depth.npy")),
-                SIZE,
-                SIZE,
-                |y, _| 1.0 + 9.0 * (1.0 - y as f32 / (SIZE - 1) as f32),
-            );
-            let mut depth =
-                json!({ "path": format!("sidecars/i{index}.depth.npy"), "maxDepth": 80.0 });
-            if index == 1 {
-                image::GrayImage::from_fn(SIZE, SIZE, |x, _| image::Luma([u8::from(x > 4) * 255]))
-                    .save(root.join("sidecars/i1.mask.png"))
-                    .unwrap();
-                depth["maskPath"] = json!("sidecars/i1.mask.png");
-            }
-            json!({
-                "id": format!("i{index}"), "path": format!("images/i{index}.png"),
-                "displayName": format!("i{index}.png"),
-                "caption": { "text": "", "source": "manual", "triggerWords": [] },
-                "addedAt": "2026-10-11T00:00:00Z", "irisDepth": depth
-            })
-        })
-        .collect();
-    let dataset: sceneworks_core::training::TrainingDataset = serde_json::from_value(json!({
-        "schemaVersion": 1, "id": "ds_depth", "version": 1, "projectId": project.id,
-        "name": "depth", "modality": "image", "status": "ready",
-        "createdAt": "2026-10-11T00:00:00Z", "updatedAt": "2026-10-11T00:00:00Z", "items": items
-    }))
-    .unwrap();
-
+    let dataset = write_depth_dataset(&root, &project.id, SIZE);
     let target = task_target("iris_3b_depth");
-    let mut config = target.defaults.clone();
-    config.steps = STEPS;
-    config.save_every = STEPS / 2;
-    config.gradient_accumulation = 1;
-    config.resolution = SIZE;
-    config.learning_rate = sceneworks_core::contracts::ContractNumber::from_f64(1e-4).unwrap();
-    config.advanced.insert("sampleEvery".into(), json!(STEPS));
-    config.advanced["iris"]["depth_size"] = json!([SIZE, SIZE]);
-    config.advanced["iris"]["preview_items"] = json!(1);
-    config.advanced["iris"]["keep_last_checkpoints"] = json!(1);
+    let config = depth_smoke_config(SIZE, STEPS, STEPS / 2);
     let base_config = config.clone();
     let model_id = "finetune_depth_smoke";
     let output_dir = data_dir.join("models/finetunes").join(model_id);
@@ -725,41 +975,17 @@ async fn iris_training_gpu_smoke_depth() {
         Some("depth")
     );
 
-    // The trained model, selected by id in a depth job.
-    let source = import_source(
+    depth_job_on_trained_model(
+        &settings,
+        &posts,
         &store,
         &project.id,
+        &project.path,
         temp.path(),
-        image::RgbImage::from_fn(256, 192, |x, y| {
-            image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
-        }),
-    );
-    let depth_job_id = "iris-depth-trained-job";
-    let mut snapshot = stub_job_snapshot(depth_job_id, "image_depth", &project.id);
-    let mut trained_entry =
-        crate::training_jobs::builtin_model_manifest_entry("iris_3b_depth").unwrap();
-    trained_entry["id"] = json!(model_id);
-    snapshot["payload"] = json!({
-        "projectId": project.id,
-        "sourceAssetId": source,
-        "resolution": { "mode": "capped", "maxSide": 256 },
-        "irisModel": model_id,
-        // The API attaches the trained model's own entry (its engine's depth declaration
-        // overlaid) in place of the release entry.
-        "modelManifestEntries": [trained_entry],
-    });
-    let job: JobSnapshot = serde_json::from_value(snapshot).unwrap();
-    crate::depth_jobs::run_image_depth_job(&api, &settings, &job)
-        .await
-        .expect("the depth job runs on the trained model");
-    let fact = completed_result(&posts, depth_job_id)["assetWrites"][0].clone();
-    assert_eq!(fact["model"], model_id, "{fact:#}");
-    assert_eq!(fact["depth"]["model"]["trainedModelId"], model_id);
-    let npy = std::fs::read(PathBuf::from(&project.path).join(fact["mediaPath"].as_str().unwrap()))
-        .unwrap();
-    let map = sceneworks_core::depth_map::decode_npy_f32(&npy).unwrap();
-    assert_eq!((map.width, map.height), (256, 192));
-    assert!(map.values.iter().all(|v| v.is_finite()));
+        model_id,
+        "iris-depth-trained-job",
+    )
+    .await;
     eprintln!(
         "RESULT status=pass trainer=iris_3b_depth backend={} steps={STEPS} size={SIZE} \
          {checkpointing} final_loss={} train_s={train_seconds:.1} export={} \

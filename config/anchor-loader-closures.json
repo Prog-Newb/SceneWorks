@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "c1f59420361c27b2a799745c3af81e9c67fbeb98",
+  "inferenceRevision": "6e402df8f4fddcb5affde6e6955e170c1d99bff9",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -7080,7 +7080,7 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/model.rs"
       ],
-      "digest": "928774c1c4d4763f7d53f2d888e94c13296c72df8abdf810ef5629536d104c63",
+      "digest": "86aff20381a0ea4b4000b80fc75c91d14815a538bc7af5a81c427785f9a3e1d8",
       "closureFileCount": 192,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -7567,7 +7567,7 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/depth.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs"
       ],
-      "digest": "4824f3844f47c8f5cf7492c2d374d6d4caad77332b33d980d8d9ac5ba00b7b6f",
+      "digest": "2cac1ba4d1eba7e9276b3da6b494f93058273c0c7e7922aa0eb2a65d0b17c131",
       "closureFileCount": 192,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -8054,7 +8054,7 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/restoration.rs"
       ],
-      "digest": "c3407e0be77b075b73e89c330170b8b54d5007d0ed333af1f34a455eb4421269",
+      "digest": "8733c5e9bd25baf4968c445cd921f34066408a7b7b96e6b074dd6cb16f7f0457",
       "closureFileCount": 192,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
