@@ -1,0 +1,379 @@
+{
+  "schemaVersion": 1,
+  "scope": "named-required",
+  "campaignId": "epic-25140-s9",
+  "projectId": "UNBOUND",
+  "sourceFreeze": {
+    "stage": "permanent-inference-main-pin",
+    "inferencePin": "UNBOUND",
+    "sceneworks": {
+      "root": "/UNBOUND/frozen-sceneworks",
+      "head": "UNBOUND"
+    },
+    "inference": {
+      "root": "/UNBOUND/frozen-inference",
+      "head": "UNBOUND"
+    },
+    "files": {
+      "config/manifests/builtin.models.jsonc": "UNBOUND",
+      "config/manifests/builtin.loras.jsonc": "UNBOUND",
+      "config/terminal-evidence/epic-25140-requirements.json": "UNBOUND",
+      "scripts/h3-veda-acceptance.mjs": "UNBOUND",
+      "scripts/h3-veda-metrics.mjs": "UNBOUND"
+    },
+    "artifactInventorySha256": "UNBOUND",
+    "resourceContract": {
+      "mlx": {
+        "physicalGpuId": "UNBOUND",
+        "canonicalLocks": [
+          "UNBOUND exact established combined gpu-local/nax-ci flock locks"
+        ]
+      },
+      "candle_cuda": {
+        "physicalGpuId": "UNBOUND",
+        "canonicalLocks": [
+          "UNBOUND exact established selected UUID exclusive OS lock"
+        ]
+      }
+    }
+  },
+  "artifactInventory": {
+    "path": "/UNBOUND/absolute/file",
+    "bytes": 0,
+    "sha256": "UNBOUND"
+  },
+  "artifacts": [
+    {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "id": "UNBOUND",
+      "repo": "UNBOUND",
+      "revision": "UNBOUND",
+      "file": "UNBOUND",
+      "coverage": [
+        {
+          "model": "minimax_h3",
+          "backend": "mlx",
+          "tier": "q4",
+          "component": "dit"
+        }
+      ]
+    }
+  ],
+  "turboArtifacts": {
+    "minimax_h3_turbo_4step_768p": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "repo": "UNBOUND",
+      "revision": "UNBOUND",
+      "file": "UNBOUND",
+      "modelIds": [
+        "minimax_h3"
+      ]
+    },
+    "minimax_h3_turbo_8step": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "repo": "UNBOUND",
+      "revision": "UNBOUND",
+      "file": "UNBOUND",
+      "modelIds": [
+        "minimax_h3"
+      ]
+    },
+    "minimax_h3_turbo_4step_v01": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "repo": "UNBOUND",
+      "revision": "UNBOUND",
+      "file": "UNBOUND",
+      "modelIds": [
+        "minimax_h3"
+      ]
+    },
+    "minimax_h3_ref2v_turbo_4step": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "repo": "UNBOUND",
+      "revision": "UNBOUND",
+      "file": "UNBOUND",
+      "modelIds": [
+        "minimax_h3_ref"
+      ]
+    }
+  },
+  "styles": [
+    {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "id": "rough-cartoon",
+      "source": {
+        "repo": "prithivMLmods/MiniMax-H3-Rough-2D-Cartoon-Illustration",
+        "revision": "fc40d010a2b44fd4caa4b750b6f503eca5d61577",
+        "file": "minimax-h3-rough-2d-cartoon-illustration-1200.safetensors"
+      },
+      "licenseEvidence": "UNBOUND original-author model card MiniMax H3 Community License receipt",
+      "compatibilityEvidence": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      },
+      "models": [
+        "minimax_h3",
+        "minimax_h3_ref"
+      ],
+      "weight": 1,
+      "trigger": "Rough 2D Cartoon Illustration"
+    }
+  ],
+  "assets": {
+    "first": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "last": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "image": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "clip": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "hasAudio": true,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "audio": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "hasAudio": true,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    }
+  },
+  "prompts": {
+    "t2va": "A cyclist rides along a coastal path at sunset. Gentle surf and a bicycle bell are audible. Keep the rider, bicycle and horizon stable.",
+    "fl2va_first": "A cyclist rides along a coastal path at sunset. Gentle surf and a bicycle bell are audible. Keep the rider, bicycle and horizon stable.",
+    "fl2va_last": "A cyclist rides along a coastal path at sunset. Gentle surf and a bicycle bell are audible. Keep the rider, bicycle and horizon stable.",
+    "fl2va_both": "A cyclist rides along a coastal path at sunset. Gentle surf and a bicycle bell are audible. Keep the rider, bicycle and horizon stable.",
+    "r2va_mixed": "A cyclist rides along a coastal path at sunset. Gentle surf and a bicycle bell are audible. Keep the rider, bicycle and horizon stable."
+  },
+  "bindings": {
+    "t2va": {
+      "seed": 2867295629
+    },
+    "fl2va_first": {
+      "seed": 2201526966,
+      "first": "first"
+    },
+    "fl2va_last": {
+      "seed": 507579340,
+      "last": "last"
+    },
+    "fl2va_both": {
+      "seed": 4041184709,
+      "first": "first",
+      "last": "last"
+    },
+    "r2va_mixed": {
+      "seed": 155630826,
+      "images": [
+        "image"
+      ],
+      "clips": [
+        "clip"
+      ],
+      "audio": [
+        "audio"
+      ]
+    }
+  },
+  "runners": {
+    "mlx": {
+      "apiUrl": "http://127.0.0.1:UNBOUND",
+      "requestedGpu": "UNBOUND",
+      "workerId": "UNBOUND",
+      "reportedBackend": "UNBOUND",
+      "kernel": "UNBOUND",
+      "physicalGpuId": "UNBOUND",
+      "leasePath": "/UNBOUND/shared-physical-gpu.lock",
+      "admissionPath": "/UNBOUND/fresh-admission.json",
+      "apiBinary": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      },
+      "workerBinary": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      },
+      "attestation": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      },
+      "physicalGuardAdapter": {
+        "path": "/UNBOUND/frozen-sceneworks/scripts/physical-guard-adapter.mjs",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "candle_cuda": {
+      "apiUrl": "http://127.0.0.1:UNBOUND",
+      "requestedGpu": "UNBOUND",
+      "workerId": "UNBOUND",
+      "reportedBackend": "UNBOUND",
+      "kernel": "UNBOUND",
+      "physicalGpuId": "UNBOUND",
+      "leasePath": "/UNBOUND/shared-physical-gpu.lock",
+      "admissionPath": "/UNBOUND/fresh-admission.json",
+      "apiBinary": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      },
+      "workerBinary": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      },
+      "attestation": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      },
+      "physicalGuardAdapter": {
+        "path": "/UNBOUND/frozen-sceneworks/scripts/physical-guard-adapter.mjs",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    }
+  },
+  "proofRoutes": {
+    "off_identity": {
+      "route": "product_job",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    },
+    "exact_frozen_masks": {
+      "route": "native_source_contract",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    },
+    "kernel_reference_not_dense": {
+      "route": "native_source_contract",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    },
+    "missing_predictor": {
+      "route": "product_job",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    },
+    "corrupt_predictor": {
+      "route": "product_job",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    },
+    "unsupported_kernel": {
+      "route": "product_job",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    },
+    "failed_self_test": {
+      "route": "product_job",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    },
+    "independent_budgets": {
+      "route": "product_job",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    },
+    "full_layer_step_controls": {
+      "route": "product_job",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    },
+    "global_reference_denominator": {
+      "route": "product_job",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    },
+    "persistence_replay": {
+      "route": "product_job",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    },
+    "managed_digest": {
+      "route": "product_job",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    },
+    "bounded_admission_peaks": {
+      "route": "product_job",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    },
+    "published_input_boundaries": {
+      "route": "product_job",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    },
+    "final_ci_refs_pin_tracker": {
+      "route": "integration_receipt",
+      "requirement": "See complete terminalProofCorpus in epic-25140-requirements.json",
+      "binding": "UNBOUND current-pin real product/native corpus evidence"
+    }
+  },
+  "productProofCases": [],
+  "limits": {
+    "maxJobs": 2,
+    "jobTimeoutMs": 1800000,
+    "maxMediaBytes": 2147483648
+  }
+}

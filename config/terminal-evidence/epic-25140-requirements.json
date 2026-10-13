@@ -1,0 +1,1469 @@
+{
+  "schemaVersion": 1,
+  "epic": 25140,
+  "status": "approved requirements snapshot; source harness only, no terminal acceptance",
+  "approvedPayloadSha256": "016e6c467244ed1cf6b51d19e360e5f391a71f9abca88a4688610740b3de37a9",
+  "epicDescription": "### Objective\n\nSceneWorks provides optional, predictor-driven Veda block-sparse MiniMax-H3 DiT attention through its native MLX and Candle/CUDA engines and normal product request path. T2VA, FL2VA and R2VA, every shipped H3 quant tier, Turbo and style LoRAs, all existing input carriers, and the complete frozen upstream control surface remain supported. Off preserves the current dense result. On executes the selected sparse kernel when supported and reports any dense fallback clearly. Managed predictor integrity, bounded memory admission, observed execution status, and Michael-reviewed fixed-seed dense/sparse quality evidence are part of delivery.\n\n### Requirements\n\n**E1 \u2014 Opt-in, default off.** Veda is disabled unless explicitly selected. With Veda off, a seeded render is bit-identical to the pre-feature dense path on both MLX and Candle/CUDA, using identical model artifacts, quant tier, adapters, conditioning, seed, schedule and geometry. Sparse initialization, predictor loading and workspace allocation must not run in the off path. Existing saved requests without Veda settings retain their behavior.\n\n**E2 \u2014 Same frozen selection everywhere.** Tiling, complete embedded tile-plan table, pooled-QK scorer and selection reproduce `veda-sparse/Veda-on-ComfyUI@60bfae688897dc41bc8685ca9f3130d7ed8f3b0c`. The selected block masks are backend-independent and exactly match frozen upstream fixtures on identical inputs. Preserve 128-token tile ordering, valid-row prefixes and padding masks; all twelve 50-layer \u00d7 56-head plans; nearest log-aspect including transpose, then nearest temporal length, then least-padding plan choice; masked mean/max/min TripPool; FP8 E4M3FN \u00d7 per-head scale decoded through BF16 projection storage before FP32 projection/logit arithmetic; residual mean addition and division by sqrt(head dimension); dense global queries/keys; separate reference/generated column budgets; equal-kernel-cost ratio `keep_ratio \u00d7 ceil(real_tokens/128)^2 / column_tiles`; Bresenham fractional allocation; forced diagonal consuming budget; and exclusion of empty keys. Fixtures include partial tiles, transposed/nearest plans, separate reference blocks, near ties and ties. Attention-output tolerance cannot substitute for exact selected-mask parity.\n\n**E3 \u2014 Full native surface.** T2VA, FL2VA and R2VA run through MLX and Candle/CUDA across every shipped H3 quant tier, including q4, q8 and bf16. Turbo and style LoRAs continue to stack through the existing runtime adapter mechanism. First/last images, R2VA image references, reference clips with their available soundtracks, standalone audio references, mixed reference carriers and supported batch shapes retain their existing semantics. A mode/device/dtype/kernel/layout that cannot execute sparse uses dense attention with a visible reason. No backend, tier, adapter regime, product canvas or supported mode is silently removed because a prototype is slow or unavailable. Backend implementation choices follow measured S0 evidence; no MLX scope reduction is authorized.\n\n**E4 \u2014 Kernel self-test.** Each selected sparse kernel passes an on-device check before first use against the same mask's dense reference, with a declared tolerance owned by that kernel. The check includes reference, generated, global and partial/padded rows and asserts the output is not unmasked dense attention. A failed self-test yields dense attention and a visible reason. There is one declared sparse kernel route per supported device path, with no silent sparse-kernel fallback chain. Cache validity is tied to the applicable device/kernel identity rather than an unrelated earlier test.\n\n**E5 \u2014 Complete user controls.** Expose independent generated sparsity and reference sparsity, each accepting a sparsity percentage or an absolute positive key-tile count; full-attention layer lists; and full-attention sampling-step lists. Lists are zero-based and validated against the applicable layer/step domain. The actual step index reaches every attention call, including both native backends. The frozen defaults are 90% video sparsity with empty dense layer/step lists when enabled; do not silently substitute upstream 0.3.1's newer fixed-32 default. Explicit reference 0% sparsity keeps its keys dense. Product persistence, request validation, raw settings and replay preserve the selected settings, and incompatible-model or malformed inputs are refused at the appropriate API/worker boundary.\n\n**E6 \u2014 Visible observed status.** Job results and telemetry identify the effective kernel, matched tile plan, nearest trained size when out of distribution, actual percentage of full attention computed, and any dense-fallback reasons. Requested settings remain separate from observed execution. Deliberate dense layers/steps and mandatory global attention contribute correctly to the denominator; requested 90% video sparsity must not be presented as the actual total-attention reduction. Observed facts come from inference after generation, rather than from worker settings assembled before generation. Studio results/replay expose these facts without silently implying that an enabled request ran sparse.\n\n**E7 \u2014 Managed exact predictor.** Both H3 catalog entries provision the predictor through the existing managed co-requisite download path. Frozen predictor: repository `Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview`, revision `9a1fd3a41b4a754a7886e64e82edbddf599fd1bd`, file `minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors`, 275,415,648 bytes, SHA256 `2a8d8845c5342756a2781e8e69563940e4bb573c9a40ebb534915ff8fd76573a`. The exact digest travels through schema, authoritative catalog payload, queued download, downloader/cache reuse and load-time integrity validation. A local cached file is not accepted solely because its filename or size matches. No ad-hoc fetch, unpinned main resolution, process-global predictor path or inference-side network fallback is allowed. Missing/corrupt predictor gives a visible dense fallback with a repair/install reason; off remains usable. A soft co-requisite and cache-only optional component staging prevent predictor absence from making the dense model unavailable. No newly discovered R2VA predictor is selected implicitly.\n\n**E8 \u2014 Correct sparse memory admission.** Sparse workspace is bounded by the actual problem, not expanded to consume free memory. Account for predictor host and device residency, pooled/scorer/selection intermediates, mask/index arrays, tile-order and gathered QKV copies, retained/final outputs, and kernel scratch in H3 memory estimation and admission on both backends. Bounds include any minimum batch exceeding an allowance; an inner score budget does not bound a gather already allocated. MLX batching combines heads sharing a tile shape and multiple independent query tiles, then materializes each bounded output chunk before allocating the next. Global query rows stay separate from sparse video batches. Sparse requests do not borrow dense-only memory evidence, and fallback is priced safely. Existing measured evidence remains useful; source/pin currency is advisory and does not authorize remeasurement per story or resurrect dismantled gates.\n\n**E9 \u2014 Full quality evidence.** Every shipped configuration in the mode \u00d7 published recipe steps \u00d7 product-size-bucket matrix receives a fixed-seed sparse/dense A/B with PSNR and a side-by-side reviewed by Michael. Include T2VA, first-image/last-image/both-image FL2VA, multimodal R2VA, all H3 tiers and both native backends, base 50-step and all published 4-/8-step Turbo recipes, and compatible Turbo-plus-style adapter stacks. The nine published canvases are `1536x672`, `672x1536`, `1344x768`, `768x1344`, `1024x768`, `768x1024`, `768x768`, `576x320`, `320x576`; each is a matrix bucket, not a reason to collapse distinct geometry to a trained example. Out-of-distribution 4-step, 50-step, R2VA and product-size configurations are explicit rows. A/B holds artifacts, input carriers, prompts, adapter weights, schedule, seed and geometry constant. PSNR is measured on decoded aligned output and retained with timing/peak-memory facts; synchronized audio is retained for review and compared separately. No PSNR threshold or visual-quality approval is invented. Michael's review is the quality acceptance decision. Local fixtures, random-mask timing and upstream samples do not constitute generated-media acceptance.\n\n### Epic acceptance\n\nThe single terminal story proves the integrated contract once:\n\n1. Frozen upstream exact selected-mask fixtures pass on both backends, and omitted/off Veda settings preserve seeded dense identity. The final native request/loader path, not a standalone toy selection function, reaches this proof.\n2. Every kernel's on-device sparse-reference and not-dense tests pass; forced missing-predictor, corrupt-predictor, unsupported-kernel and failed-self-test cases visibly execute the documented dense fallback. Full-attention layer/step controls and independent reference/generated budgets have their expected effects.\n3. The complete E9 case manifest drives native real-weight renders on both backends. Each cell retains request/artifact/driver/seed identity, active tier/adapters, effective status, step/whole-job time, peak host/device memory, PSNR, audio comparison and side-by-side media with Michael's review disposition. Failure/OOM/fallback cells are explicit outcomes to resolve, not silently skipped matrix entries. Performance is compared with SceneWorks' own current dense engines.\n4. Sparse predictor/workspace bytes agree with the admitted workload and observed peaks within the documented bound. Problem-size/OOD/long-duration and reference-heavy cases exercise admission; a free-memory-dependent work buffer cannot masquerade as a problem bound.\n5. Both repositories' integration heads and required/affected CI lanes are green. One feature-end adversarial review, limited to at most three review/fix cycles, completes. Inference lands in its `main` first; SceneWorks takes exactly one final pin to the verified inference `main` commit, refreshes required pin-derived artifacts using current procedures, completes the terminal acceptance campaign, then merges its completed feature to `main`. Final ref ancestry, pin, status checks, story/epic association and tracker state are read back. No release/promotion is implied.\n\n**Terminal case manifest.** Catalog source is authoritative and must be re-read before the campaign. Current defaults: 24 fps, 1344x768, 124 frames (5.1667 s), base 50 NFE. Frame lattice is 17n+5; published durations span 124\u2013345 frames. Published accelerator recipes, all in the `minimax-h3` family:\n\n| Adapter regime | NFE | Video shift | Audio shift |\n|---|---:|---:|---:|\n| Base, Turbo off | 50 | 12 | 3 |\n| `minimax_h3_turbo_4step_768p` | 4 | 6 | 3 |\n| `minimax_h3_turbo_8step` | 8 | 12 | 3 |\n| `minimax_h3_turbo_4step_v01` | 4 | 12 | 3 |\n| `minimax_h3_ref2v_turbo_4step` | 4 | 12 | 3 |\n\nCross these published regimes with every E9 mode, all nine canvas buckets, both backends and all shipped tiers, plus compatible style-adapter coverage. Derive actual adapter compatibility from the catalog/runtime contract; do not infer that an adapter's name restricts its family-wide advertised eligibility. Explicit user step overrides continue to work; 4 and 50 NFE stay explicit OOD proof points even though the predictor was trained under Turbo 8 NFE. Duration coverage additionally includes short/default 124 frames, middle 243 frames, long 345 frames, and a nearest-plan nonexact temporal point such as 141 frames, with case identities retained. All published duration choices and input caps have source-backed boundary checks. Matrix execution may be batched/resumed, but required cells are never dropped to meet a resource/time estimate.\n\n**S0 evidence and pending decisions.** Frozen source and native source inspection are complete. Correctly batched MLX gather+SDPA S0 was measured on Apple M5 Max with 128 GiB unified memory from clean inference `fd146a276545b2a8168939ec34e3862911b425fe`, binary SHA256 `c78f899a8ae95c61fe20786cc10e646eb7c9d2c302ae0408ec8ed94ff419792e`. Same random BF16 QKV/key plan, warmup plus three measured runs:\n\n| Canvas | Tokens | Dense layer median | Sparse layer median | Dense/sparse | Dense peak | Sparse peak |\n|---|---:|---:|---:|---:|---:|---:|\n| 576x320 | 7,586 | 0.038734 s | 0.064262 s | 0.603x | 435,027,968 B | 689,553,408 B |\n| 1344x768 | 38,222 | 2.522392 s | 0.727180 s | 3.469x | 2,191,851,520 B | 2,739,814,400 B |\n\nThe small BF16 masked-reference oracle error was 0.0 against a declared prototype tolerance 0.025, with not-dense and padding assertions. Device gathers/index/mask/SDPA/concatenation/evaluation are timed; host random-plan preparation and learned predictor scoring are excluded. This establishes native batching feasibility, not frozen predictor parity or generated-media speed/quality. Sparse peaks are higher and must be priced. The earlier head-by-query-tile evaluation loop is not a fair upstream batching comparison.\n\nActual q4 DiT profiling from source `e47218ea1505fd07bf53f6f2b02ca9f3c3bc94d4`, binary `9c17b32378e666c46a3baacb39afa015e28215ffb4a35f46a554ce7f83bce568`, exercised 50 attention calls in one measured forward: profiled attention share was 22.508% at 576x320 and 61.197% at 1344x768. Synchronization perturbed the full forward by -2.710% and +9.339%, respectively. Do not combine these instrumented shares with the random-layer ratio to claim full-render speedup.\n\nVerified evidence resides at `/Users/michael/Documents/Codex/2026-10-10/epic-25140/s0-results.md` and `verified-s0-summary.json`, with exact source/binary/exit receipts and JSONL logs. **PENDING S0 APPENDIX: native direct sparse Metal comparison and CUDA numerical/timing/real-DiT evidence.** The coordinator will attach verified final receipts/conclusions before presenting a final implementation recommendation. Pending evidence does not remove either backend or any product mode. Choose the declared MLX/CUDA kernel implementations from fair native comparisons; preserve the requirement surface regardless of a slower small-canvas result.\n\nUpstream-reported numbers are separate historical evidence: Veda-on-ComfyUI reported RTX 5070 8-NFE T2VA attention 4.41 s/step against ComfyUI default 31.1 s and SageAttention 15.2 s; its M3 Pro gather result 3.52 s was compared with PyTorch MPS SDPA 9.29 s. None is a SceneWorks native acceptance result. The frozen checkpoint has twelve plans, while training used T2VA conditioning on the FL2VA backbone under Turbo 8 NFE. Transfer claims for arbitrary modalities/steps/adapters require the E9 native quality campaign.\n\n### Slice plan\n\nUse mirrored `feature/sc-25140-minimax-h3-veda` integration branches, with story branches targeting the owning feature branch. SceneWorks source baseline for this proposal is `bedcd85a969b39c8357c971ea93f185b46d7c22b`; current inference pin is `25bd55cdb6a56c78b07584a12150c9f5d46be439`. Re-query refs, resource ownership, story applicability and live CI protections before execution.\n\n1. **S1 \u2014 Native MLX H3 predictor-driven walking path:** one genuine native generation path establishes request/component/control/report contracts and default-off behavior, locally proven with bounded fixtures/device smoke.\n2. **S2 \u2014 Complete frozen selector, plans and reference tiling:** fills the backend-independent numerical/selection surface and exact fixtures; depends on S1.\n3. **S3 \u2014 Native CUDA sparse kernel and self-test:** one declared native kernel executes selected blocks with the frozen arithmetic and explicit failure behavior; depends on S1.\n4. **S4 \u2014 Full native H3 modes, tiers, adapters and attention controls:** carries all existing generation/conditioning/regime choices and step/layer controls through both engines; depends on S1.\n5. **S5 \u2014 Managed predictor exact digest and offline component staging:** catalog-to-download-to-load integrity with repairable missing/corrupt fallback; depends on S1.\n6. **S6 \u2014 SceneWorks opt-in controls and native request/replay plumbing:** exposes the complete control surface through product/API/worker and preserves Turbo/style/tier routing; depends on S4 and S5.\n7. **S7 \u2014 Observed sparse outcome results and telemetry:** records actual kernel/plan/attention/fallback facts and exposes them in results; depends on S1.\n8. **S8 \u2014 Problem-bounded sparse residency and admission:** prices complete predictor/workspace lifetimes and preserves conservative fallback admission; depends on S1.\n9. **S9 \u2014 Terminal acceptance, review and paired-main integration:** converges S1\u2013S8, owns the full real-weight campaign, Michael review, final review, single pin and tracker readback; depends on S2\u2013S8.\n\nS2/S3/S4/S5/S7/S8 are independent wideners after S1; they share interfaces and reconcile overlapping changes through their feature branches. S4's local tests exercise typed routes and explicit unavailable-kernel behavior; S2/S3 supply complete kernels/selection before terminal acceptance. Ordinary story AC do not own the full real-weight matrix. Review is consolidated at terminal acceptance, at most three review/fix cycles, under the coordinator's current execution instructions.\n\n### Out of scope\n\nTraining new predictors, choosing the newer released R2VA predictor without a separate approved change, extending Veda to unrelated model families, TMA/cluster CUDA variants, release publication or feature promotion into `release/next`, and ad-hoc weight fetching are outside this epic. None of these boundaries excludes existing H3 modes, tiers, LoRAs, controls, native backends or approved acceptance requirements. Reuse applicable fused-kernel work from epic 23989 only when source-ready; do not make a dependency on the entire unrelated epic. Disabled verification gates remain disabled.\n",
+  "stories": [
+    {
+      "key": "S1",
+      "name": "Native MLX H3 predictor-driven walking path",
+      "type": "feature",
+      "description": "Repository/surface: `SceneWorks/inference`; MLX native H3 request-to-generation path.\n\nResource lane: `gpu-local`. CPU implementation may overlap; device checks require the coordinator's corresponding exclusive token. Any additional platform check is explicitly queued under its own physical-resource token.\n\nImplement one real native H3 T2VA sparse path at the canonical geometry using the frozen predictor component, opt-in request setting, batched gather+SDPA or the measured approved MLX kernel choice, and observed outcome contract. The same native generator entrypoint that handles installed H3 weights must reach this path; the implementation must not be a disconnected benchmark/example. Introduce only the shared carriers needed by this vertical path, retaining established dense defaults.\n\nAcceptance (story-local):\n- The native generator entrypoint reaches predictor scoring, selected sparse attention and output assembly when enabled, using bounded fixture weights/input at the canonical path; it does not execute a random-mask replacement for the learned scorer.\n- Omitted/off settings execute the existing dense path without predictor/component/workspace initialization and preserve the same local seeded output.\n- Device numerical smoke passes the selected kernel's declared masked-reference tolerance and not-dense assertion; forced missing-component/self-test failure yields dense execution with an observed reason.\n\nInherits epic requirements: E1, E2, E3, E4, E6, E7, E8.\n\nValidation: Native generator integration fixture plus small on-device attention smoke, including padding/global rows and forced failure. The code supports installed real H3 generation, but this ordinary story does not require a real-weight media campaign. S0 fixtures are reusable only when they exercise the production entrypoint and learned scorer. No full calibration/matrix/media campaign here.\n\nDepends on: none.",
+      "depends_on": []
+    },
+    {
+      "key": "S2",
+      "name": "Complete frozen selector, plans and reference tiling",
+      "type": "chore",
+      "description": "Repository/surface: `SceneWorks/inference`; shared backend-independent H3 sparse core and fixtures.\n\nResource lane: `gpu-local`. CPU implementation may overlap; device checks require the coordinator's corresponding exclusive token. Any additional platform check is explicitly queued under its own physical-resource token.\n\nComplete the frozen tiling, all embedded plans, strict predictor parsing/dequantization, scoring and selection contract beyond the initial path. Reference/generated segments and global rows derive from existing native PackedLayout/JointGeometry. Treat captured frozen-source fixtures as the numerical authority; one backend cannot quietly alter the chosen blocks.\n\nAcceptance (story-local):\n- Identical captured inputs produce exactly the frozen upstream selected masks, including reference/generated budgets, partial/empty tiles, forced diagonal, fractional allocation and tied/near-tied cases.\n- The complete embedded plan table and exact/nearest/transposed choice are preserved; malformed tensor/scale/plan metadata is rejected rather than partially loaded.\n- Native MLX and Candle callers consume one shared selector/layout contract and identical fixture masks; output-kernel tolerance does not weaken mask equality.\n\nInherits epic requirements: E2, E3, E5.\n\nValidation: CPU/local fixture suite against frozen source and numeric device smoke where execution is needed for cross-device selected-mask comparison. Fixture provenance records upstream revision and input/output dtypes. No media campaign or new weight download.\n\nDepends on: S1.",
+      "depends_on": [
+        "S1"
+      ]
+    },
+    {
+      "key": "S3",
+      "name": "Native CUDA sparse kernel and self-test",
+      "type": "feature",
+      "description": "Repository/surface: `SceneWorks/inference`; Candle/CUDA H3 attention.\n\nResource lane: `cuda-ci`. CPU implementation may overlap; device checks require the coordinator's corresponding exclusive token. Any additional platform check is explicitly queued under its own physical-resource token.\n\nImplement the selected native CUDA block-sparse kernel using the frozen upstream Sage-derived INT8 arithmetic, with direct retained-key traversal and proper global/partial-row masks. Reuse applicable source-ready kernel primitives instead of importing a ComfyUI/Python runtime. One declared route is self-tested on its actual device before first use, and exposes explicit dense-fallback reasons.\n\nAcceptance (story-local):\n- The Candle H3 attention path executes only the selected sparse key blocks, preserves global/partial-row validity, and agrees with its masked reference within the kernel's declared tolerance.\n- First use runs the actual-device self-test and not-dense assertion; forced failure or unsupported device/dtype produces dense execution with an observed reason, without choosing another sparse kernel.\n- Omitted/off sparse settings leave the native Candle dense numerical path unchanged in seeded fixture tests.\n\nInherits epic requirements: E1, E3, E4, E6, E8.\n\nValidation: Native CUDA build/local tests and small device numerical smoke on an exclusively admitted device. Dense-reference fixtures and unsupported/failure tests run locally. Full real-weight rendering/performance/quality is S9. Do not use historical ComfyUI timings as this story's measured result.\n\nDepends on: S1.",
+      "depends_on": [
+        "S1"
+      ]
+    },
+    {
+      "key": "S4",
+      "name": "Full native H3 modes, tiers, adapters and attention controls",
+      "type": "feature",
+      "description": "Repository/surface: `SceneWorks/inference`; MLX and Candle H3 denoising/conditioning/request plumbing.\n\nResource lane: `cuda-ci`. CPU implementation may overlap; device checks require the coordinator's corresponding exclusive token. Any additional platform check is explicitly queued under its own physical-resource token.\n\nCarry sparse settings through both native H3 generation paths, every applicable quant tier and adapter stack without rewriting existing conditioning or scheduler semantics. Expose the actual layer and sampling-step index to attention. Add generated/reference percentage-or-count budgets and complete dense layer/step exceptions through one typed control contract; retain every existing media carrier and supported batch shape.\n\nAcceptance (story-local):\n- Native request fixtures for text, first/last frames and multimodal references retain their existing carrier order/shapes, quant choice and Turbo/style adapter stack when sparse is selected; no route drops a requested field or adapter.\n- Captured attention calls receive the actual zero-based layer/step and independent budgets; dense layer/step lists select the corresponding dense calls, including base and published Turbo schedules.\n- Invalid controls are rejected consistently, and unavailable sparse execution follows the observed dense-fallback contract for every native route rather than changing the requested task/tier.\n\nInherits epic requirements: E1, E3, E5.\n\nValidation: Native request/denoising integration fixtures, a capturing attention seam and small numerical smoke. Tests cover carrier mechanisms and published recipe discriminators locally; the cross-product of real models/tiers/media belongs to S9.\n\nDepends on: S1.",
+      "depends_on": [
+        "S1"
+      ]
+    },
+    {
+      "key": "S5",
+      "name": "Managed predictor exact digest and offline component staging",
+      "type": "feature",
+      "description": "Repository/surface: `SceneWorks`; manifest schema, Model Manager/API queue, downloader/cache and H3 component staging.\n\nResource lane: `macos-hosted`. CPU implementation may overlap; device checks require the coordinator's corresponding exclusive token. Any additional platform check is explicitly queued under its own physical-resource token.\n\nAdd the frozen predictor as a soft managed co-requisite for both H3 catalog entries on all shipped native platforms. The exact artifact identity is authoritative through schema, queued job and download/reuse/load verification. Extend the existing optional cache-only component seam; missing/corrupt predictor remains repairable without changing the availability of dense H3.\n\nAcceptance (story-local):\n- Schema-valid H3 catalog rows declare the exact E7 revision/file/byte count/SHA256, and generated download jobs retain that identity without client override.\n- Download/cache/load fixture tests accept matching bytes and reject a wrong digest even when the file size/name matches; queued metadata conflicts cannot silently replace the declared digest.\n- Enabled H3 resolves the exact optional component offline or reports a repairable dense fallback; absent/off settings do not require the predictor, and generation performs no ad-hoc fetch.\n\nInherits epic requirements: E1, E3, E7.\n\nValidation: Manifest audit, schema/queue tests, small local download/cache fixtures and offline worker tests. No new weight download or external approval step is required for this local slice.\n\nDepends on: S1.",
+      "depends_on": [
+        "S1"
+      ]
+    },
+    {
+      "key": "S6",
+      "name": "SceneWorks opt-in controls and native request/replay plumbing",
+      "type": "feature",
+      "description": "Repository/surface: `SceneWorks`; Video Studio, API validation, shared VideoRequest and both worker H3 constructors.\n\nResource lane: `macos-hosted`. CPU implementation may overlap; device checks require the coordinator's corresponding exclusive token. Any additional platform check is explicitly queued under its own physical-resource token.\n\nExpose default-off Veda controls on H3 and route the validated settings to the native contracts. Preserve Studio saved state, raw settings and replay, independent generated/reference budget modes and dense lists, and existing tier/Turbo/style selection. Keep old jobs and unrelated model forms unchanged by absent settings.\n\nAcceptance (story-local):\n- H3 Studio controls serialize, persist and replay independent percentage/count budgets and dense layer/step lists exactly; a fresh form and old saved jobs are off by default.\n- API/worker capture tests show the same validated settings reaching MLX and Candle H3 with existing conditioning/tier/Turbo/style choices intact; incompatible-model and malformed requests are refused.\n- Off requests retain the existing payload/native dense behavior, while enabled requests stage the managed optional predictor rather than introducing another download or provider route.\n\nInherits epic requirements: E1, E3, E5, E7.\n\nValidation: Focused web request/form/replay tests, API worker capture tests and local H3 request fixtures. Run affected web and Rust checks before first PR push; the real-weight matrix is S9.\n\nDepends on: S4, S5.",
+      "depends_on": [
+        "S4",
+        "S5"
+      ]
+    },
+    {
+      "key": "S7",
+      "name": "Observed sparse outcome results and telemetry",
+      "type": "feature",
+      "description": "Repository/surface: `SceneWorks/inference` observed-outcome API and `SceneWorks` result/telemetry/replay UI.\n\nResource lane: `gpu-local`. CPU implementation may overlap; device checks require the coordinator's corresponding exclusive token. Any additional platform check is explicitly queued under its own physical-resource token.\n\nCollect effective execution facts from the native generator after generation and fold them into the existing H3 result carrier. Expose kernel, plan/exact-or-nearest size, computed full-attention percentage and fallback reasons. Keep requested controls distinct from device outcomes and preserve lifecycle isolation between jobs.\n\nAcceptance (story-local):\n- Provider outcome fixtures survive worker output conversion and result persistence with actual kernel, matched/nearest plan, total-attention fraction and fallback reason; no field is guessed from the request.\n- Global/reference dense work and dense layer/step exceptions affect the total denominator correctly, and a forced failed-self-test/missing-predictor run is displayed as effective dense execution.\n- A later job cannot inherit an earlier job's sparse status; result/replay UI shows the persisted observed facts alongside the request controls.\n\nInherits epic requirements: E3, E4, E6.\n\nValidation: Provider/worker result-carrier fixtures, failure counters, persistence/replay and focused UI tests; small device smoke verifies one observed sparse and one forced dense outcome. No whole-epic media sweep.\n\nDepends on: S1.",
+      "depends_on": [
+        "S1"
+      ]
+    },
+    {
+      "key": "S8",
+      "name": "Problem-bounded sparse residency and admission",
+      "type": "chore",
+      "description": "Repository/surface: `SceneWorks/inference` workspace/residency contract and `SceneWorks` MLX/Candle H3 memory admission.\n\nResource lane: `gpu-local`. CPU implementation may overlap; device checks require the coordinator's corresponding exclusive token. Any additional platform check is explicitly queued under its own physical-resource token.\n\nDeclare and enforce complete sparse resource lifetimes, including predictor host/device state, scorer/selector/index/mask buffers, gathers and retained/final outputs. Extend both H3 admission paths without borrowing dense-only evidence or overstating a per-chunk allowance as a whole-layer cap. Unsupported/failed sparse fallback is admitted conservatively.\n\nAcceptance (story-local):\n- Pure bound tests include every owned sparse/predictor buffer and identify the request/kernel/plan that the estimate prices; increasing free memory cannot enlarge the problem-bound workspace.\n- Tiny-limit, long/nearest-plan and reference-heavy fixtures reduce batching or refuse/fallback before allocating an oversized gather, including the minimum one-row case and dense-fallback pricing.\n- Both H3 admission paths consume the sparse contract and preserve off estimates; local lifetime/device-smoke accounting stays within the documented total bound rather than only a chunk reservation.\n\nInherits epic requirements: E1, E3, E8.\n\nValidation: CPU bound/admission fixtures plus small allocator/device lifetime smoke; measured real-weight peak reconciliation occurs once in S9. No per-story calibration refresh, capability campaign or restored pin-keyed gate.\n\nDepends on: S1.",
+      "depends_on": [
+        "S1"
+      ]
+    },
+    {
+      "key": "S9",
+      "name": "Terminal acceptance, review and paired-main integration",
+      "type": "chore",
+      "description": "Repository/surface: `SceneWorks` + `SceneWorks/inference`; integrated native acceptance, final CI/pin/main/tracker closeout.\n\nResource lane: `gpu-local`. CPU implementation may overlap; device checks require the coordinator's corresponding exclusive token. Any additional platform check is explicitly queued under its own physical-resource token.\n\nProve the complete E1\u2013E9 implementation through the finished native product path using the terminal case manifest and exact final identities. Own the full real-weight fixed-seed campaign, Michael's side-by-side review, consolidated feature-end review, one final pin and both main integrations. Local story evidence is reused; missing quality/runtime evidence is not relabeled as completed acceptance.\n\nAcceptance (story-local):\n- The epic acceptance corpus contains passing off-identity/exact-mask/device-not-dense/forced-failure/control checks and complete native dense/sparse E9 matrix outcomes with time, memory, PSNR, synchronized media and Michael's review; failures and missing cells are resolved explicitly.\n- One terminal adversarial review finishes within at most three review/fix cycles, and affected/required CI is green at the verified final paired heads with no disabled gates re-enabled or duplicated terminal campaign.\n- Inference's completed feature is reachable from inference main before SceneWorks' single final pin; completed SceneWorks feature/main refs, pin-derived artifacts, CI and Shortcut stories/epic state are read back and agree with the acceptance evidence.\n\nInherits epic requirements: E1, E2, E3, E4, E5, E6, E7, E8, E9.\n\nValidation: The exact epic acceptance manifest, current source/artifact/device identities, strict run receipts, persisted results, media review dispositions and final live CI/ref/tracker read-backs. Long jobs retain command/case/commit/binary/model/seed identity, owner, deadline and next authorized action. Resume from completed cells without rerunning accepted cells unless inputs changed. One resource ledger serializes local Metal and each physical CUDA device; multiple runner listeners on one host are not independent capacity. Reuse a supported completion return or one task-attached quiet monitor at 10\u201315 minute cadence if needed; no status-only stories or minute-by-minute polling. No release action.\n\nDepends on: S2, S3, S4, S5, S6, S7, S8.",
+      "depends_on": [
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6",
+        "S7",
+        "S8"
+      ]
+    }
+  ],
+  "literalAuthority": {
+    "E9": "**E9 \u2014 Full quality evidence.** Every shipped configuration in the mode \u00d7 published recipe steps \u00d7 product-size-bucket matrix receives a fixed-seed sparse/dense A/B with PSNR and a side-by-side reviewed by Michael. Include T2VA, first-image/last-image/both-image FL2VA, multimodal R2VA, all H3 tiers and both native backends, base 50-step and all published 4-/8-step Turbo recipes, and compatible Turbo-plus-style adapter stacks. The nine published canvases are `1536x672`, `672x1536`, `1344x768`, `768x1344`, `1024x768`, `768x1024`, `768x768`, `576x320`, `320x576`; each is a matrix bucket, not a reason to collapse distinct geometry to a trained example. Out-of-distribution 4-step, 50-step, R2VA and product-size configurations are explicit rows. A/B holds artifacts, input carriers, prompts, adapter weights, schedule, seed and geometry constant. PSNR is measured on decoded aligned output and retained with timing/peak-memory facts; synchronized audio is retained for review and compared separately. No PSNR threshold or visual-quality approval is invented. Michael's review is the quality acceptance decision. Local fixtures, random-mask timing and upstream samples do not constitute generated-media acceptance.",
+    "terminal_case_manifest": "**Terminal case manifest.** Catalog source is authoritative and must be re-read before the campaign. Current defaults: 24 fps, 1344x768, 124 frames (5.1667 s), base 50 NFE. Frame lattice is 17n+5; published durations span 124\u2013345 frames. Published accelerator recipes, all in the `minimax-h3` family:\n\n| Adapter regime | NFE | Video shift | Audio shift |\n|---|---:|---:|---:|\n| Base, Turbo off | 50 | 12 | 3 |\n| `minimax_h3_turbo_4step_768p` | 4 | 6 | 3 |\n| `minimax_h3_turbo_8step` | 8 | 12 | 3 |\n| `minimax_h3_turbo_4step_v01` | 4 | 12 | 3 |\n| `minimax_h3_ref2v_turbo_4step` | 4 | 12 | 3 |\n\nCross these published regimes with every E9 mode, all nine canvas buckets, both backends and all shipped tiers, plus compatible style-adapter coverage. Derive actual adapter compatibility from the catalog/runtime contract; do not infer that an adapter's name restricts its family-wide advertised eligibility. Explicit user step overrides continue to work; 4 and 50 NFE stay explicit OOD proof points even though the predictor was trained under Turbo 8 NFE. Duration coverage additionally includes short/default 124 frames, middle 243 frames, long 345 frames, and a nearest-plan nonexact temporal point such as 141 frames, with case identities retained. All published duration choices and input caps have source-backed boundary checks. Matrix execution may be batched/resumed, but required cells are never dropped to meet a resource/time estimate.",
+    "interpretation_status": "Coordinator reconciles exact shipped quality matrix and unsupported requests before terminal execution. This preparation does not reopen approved plan, widen catalog eligibility or make quality acceptance decisions."
+  },
+  "terminalProofCorpus": [
+    {
+      "id": "off_identity",
+      "requirements": [
+        "E1"
+      ],
+      "route": "API/worker -> managed loader -> real Generator::generate",
+      "expected": "Omitted/off retain pre-feature seeded dense identity with same artifacts and numerical path; no predictor load/workspace. Record pre-feature source lineage.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "exact_mask_all_frozen_sections",
+      "requirements": [
+        "E2"
+      ],
+      "route": "product layout -> native QKV/scorer/selector captures -> frozen.json",
+      "expected": "All12 plans and exact/nearest/transposed/least-padding choices; partial/empty/global/reference rows; fractional/diagonal budgets; ties/near-ties; FP8 through BF16 to FP32. Exact selected-mask parity, no output-tolerance substitution. Committed CPU fixtures auxiliary; both backend production callers required.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "kernel_reference_not_dense",
+      "requirements": [
+        "E4"
+      ],
+      "route": "real native first-use selected kernel attention",
+      "expected": "Actual device/kernel/dtype identity; selected-mask dense oracle tolerance belongs to kernel; not-unmasked-dense; reference/generated/global/partial/padded rows and cache validity.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "missing_predictor",
+      "requirements": [
+        "E3",
+        "E4",
+        "E6",
+        "E7"
+      ],
+      "route": "managed component + real Generator attention -> persisted result/replay",
+      "expected": "Actually dense, visible specific reason/repair; no sparse fallback chain/network fetch; off usable. Tests-only fixture replacement alone is insufficient.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "corrupt_same_size_predictor",
+      "requirements": [
+        "E3",
+        "E4",
+        "E6",
+        "E7"
+      ],
+      "route": "managed component + real Generator attention -> persisted result/replay",
+      "expected": "Actually dense, visible specific reason/repair; no sparse fallback chain/network fetch; off usable. Tests-only fixture replacement alone is insufficient.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "unsupported_device_dtype_layout",
+      "requirements": [
+        "E3",
+        "E4",
+        "E6",
+        "E7"
+      ],
+      "route": "managed component + real Generator attention -> persisted result/replay",
+      "expected": "Actually dense, visible specific reason/repair; no sparse fallback chain/network fetch; off usable. Tests-only fixture replacement alone is insufficient.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "forced_failed_self_test",
+      "requirements": [
+        "E3",
+        "E4",
+        "E6",
+        "E7"
+      ],
+      "route": "managed component + real Generator attention -> persisted result/replay",
+      "expected": "Actually dense, visible specific reason/repair; no sparse fallback chain/network fetch; off usable. Tests-only fixture replacement alone is insufficient.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "percent_percent",
+      "requirements": [
+        "E5",
+        "E6"
+      ],
+      "route": "saved/raw/API/worker -> native actual layer/step attention -> result/replay",
+      "expected": "Independent budgets/zero-based domain and exceptions preserved; global/reference work counted; requested separate from observed; invalid rejected; no later-job status leakage.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "count_count",
+      "requirements": [
+        "E5",
+        "E6"
+      ],
+      "route": "saved/raw/API/worker -> native actual layer/step attention -> result/replay",
+      "expected": "Independent budgets/zero-based domain and exceptions preserved; global/reference work counted; requested separate from observed; invalid rejected; no later-job status leakage.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "percent_count",
+      "requirements": [
+        "E5",
+        "E6"
+      ],
+      "route": "saved/raw/API/worker -> native actual layer/step attention -> result/replay",
+      "expected": "Independent budgets/zero-based domain and exceptions preserved; global/reference work counted; requested separate from observed; invalid rejected; no later-job status leakage.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "count_percent",
+      "requirements": [
+        "E5",
+        "E6"
+      ],
+      "route": "saved/raw/API/worker -> native actual layer/step attention -> result/replay",
+      "expected": "Independent budgets/zero-based domain and exceptions preserved; global/reference work counted; requested separate from observed; invalid rejected; no later-job status leakage.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "reference_zero_percent_dense",
+      "requirements": [
+        "E5",
+        "E6"
+      ],
+      "route": "saved/raw/API/worker -> native actual layer/step attention -> result/replay",
+      "expected": "Independent budgets/zero-based domain and exceptions preserved; global/reference work counted; requested separate from observed; invalid rejected; no later-job status leakage.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "full_layers_0_49",
+      "requirements": [
+        "E5",
+        "E6"
+      ],
+      "route": "saved/raw/API/worker -> native actual layer/step attention -> result/replay",
+      "expected": "Independent budgets/zero-based domain and exceptions preserved; global/reference work counted; requested separate from observed; invalid rejected; no later-job status leakage.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "full_steps_first_last_for_4_8_50",
+      "requirements": [
+        "E5",
+        "E6"
+      ],
+      "route": "saved/raw/API/worker -> native actual layer/step attention -> result/replay",
+      "expected": "Independent budgets/zero-based domain and exceptions preserved; global/reference work counted; requested separate from observed; invalid rejected; no later-job status leakage.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "global_dense_denominator",
+      "requirements": [
+        "E5",
+        "E6"
+      ],
+      "route": "saved/raw/API/worker -> native actual layer/step attention -> result/replay",
+      "expected": "Independent budgets/zero-based domain and exceptions preserved; global/reference work counted; requested separate from observed; invalid rejected; no later-job status leakage.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "malformed_controls",
+      "requirements": [
+        "E5",
+        "E6"
+      ],
+      "route": "saved/raw/API/worker -> native actual layer/step attention -> result/replay",
+      "expected": "Independent budgets/zero-based domain and exceptions preserved; global/reference work counted; requested separate from observed; invalid rejected; no later-job status leakage.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "incompatible_model_controls",
+      "requirements": [
+        "E5",
+        "E6"
+      ],
+      "route": "saved/raw/API/worker -> native actual layer/step attention -> result/replay",
+      "expected": "Independent budgets/zero-based domain and exceptions preserved; global/reference work counted; requested separate from observed; invalid rejected; no later-job status leakage.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "lifecycle_reset",
+      "requirements": [
+        "E5",
+        "E6"
+      ],
+      "route": "saved/raw/API/worker -> native actual layer/step attention -> result/replay",
+      "expected": "Independent budgets/zero-based domain and exceptions preserved; global/reference work counted; requested separate from observed; invalid rejected; no later-job status leakage.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "managed_digest",
+      "requirements": [
+        "E7"
+      ],
+      "route": "catalog -> queue -> download/cache reuse -> offline loader",
+      "expected": "E7 pinned digest/bytes travels authoritatively; same-name/size wrong digest and queue conflict refused; soft optional absence keeps dense available.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "admission_peaks",
+      "requirements": [
+        "E8"
+      ],
+      "route": "real campaign + admission/allocator lifetime capture",
+      "expected": "Predictor host/device, scorer/selector/masks/index/order/gatheredQKV/retained outputs/scratch all priced; problem bound vs observed peaks. Tiny/minimum chunk, long/nearest/reference-heavy/fallback explicit; free memory cannot enlarge bound.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "media_AB",
+      "requirements": [
+        "E9"
+      ],
+      "route": "complete manifest -> native product job -> decoded/muxed generated media",
+      "expected": "Matched invariant pair; PSNR, time, peaks, synchronized audio, side-by-side, actual status and Michael disposition. OOM/failure/fallback retained unresolved.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    },
+    {
+      "id": "paired_closeout",
+      "requirements": [
+        "E1",
+        "E2",
+        "E3",
+        "E4",
+        "E5",
+        "E6",
+        "E7",
+        "E8",
+        "E9"
+      ],
+      "route": "coordinator final CI/feature review/inference main/single SceneWorks pin/main/tracker",
+      "expected": "At most3 final review/fix cycles, green final heads, pin-derived artifacts/ref ancestry and tracker readback. Disabled gates remain disabled.",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted",
+      "strict_receipt_required": true
+    }
+  ],
+  "publishedBoundaryCorpus": [
+    {
+      "id": "published_duration_124",
+      "input": {
+        "duration": 5.1667,
+        "fps": 24
+      },
+      "expected": "admitted with resolved frames=124",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "published_duration_141",
+      "input": {
+        "duration": 5.875,
+        "fps": 24
+      },
+      "expected": "admitted with resolved frames=141",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "published_duration_158",
+      "input": {
+        "duration": 6.5833,
+        "fps": 24
+      },
+      "expected": "admitted with resolved frames=158",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "published_duration_175",
+      "input": {
+        "duration": 7.2917,
+        "fps": 24
+      },
+      "expected": "admitted with resolved frames=175",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "published_duration_192",
+      "input": {
+        "duration": 8.0,
+        "fps": 24
+      },
+      "expected": "admitted with resolved frames=192",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "published_duration_209",
+      "input": {
+        "duration": 8.7083,
+        "fps": 24
+      },
+      "expected": "admitted with resolved frames=209",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "published_duration_226",
+      "input": {
+        "duration": 9.4167,
+        "fps": 24
+      },
+      "expected": "admitted with resolved frames=226",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "published_duration_243",
+      "input": {
+        "duration": 10.125,
+        "fps": 24
+      },
+      "expected": "admitted with resolved frames=243",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "published_duration_260",
+      "input": {
+        "duration": 10.8333,
+        "fps": 24
+      },
+      "expected": "admitted with resolved frames=260",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "published_duration_277",
+      "input": {
+        "duration": 11.5417,
+        "fps": 24
+      },
+      "expected": "admitted with resolved frames=277",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "published_duration_294",
+      "input": {
+        "duration": 12.25,
+        "fps": 24
+      },
+      "expected": "admitted with resolved frames=294",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "published_duration_311",
+      "input": {
+        "duration": 12.9583,
+        "fps": 24
+      },
+      "expected": "admitted with resolved frames=311",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "published_duration_328",
+      "input": {
+        "duration": 13.6667,
+        "fps": 24
+      },
+      "expected": "admitted with resolved frames=328",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "published_duration_345",
+      "input": {
+        "duration": 14.375,
+        "fps": 24
+      },
+      "expected": "admitted with resolved frames=345",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "duration_refuse_5.0",
+      "input": {
+        "duration": 5.0
+      },
+      "expected": "refused outside source duration window, no clamp",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "duration_refuse_15.0",
+      "input": {
+        "duration": 15.0
+      },
+      "expected": "refused outside source duration window, no clamp",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "duration_refuse_0",
+      "input": {
+        "duration": 0
+      },
+      "expected": "refused outside source duration window, no clamp",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "duration_refuse_-1",
+      "input": {
+        "duration": -1
+      },
+      "expected": "refused outside source duration window, no clamp",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "in_window_duration_snap",
+      "input": {
+        "duration": 6.0,
+        "fps": 24
+      },
+      "expected": "API range admits then lattice ceil =>158. Published UI fixed-menu versus source API snapping distinction must be retained.",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "native_frame_refuse_123",
+      "input": {
+        "num_frames": 123
+      },
+      "expected": "native refuses lattice/window",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "native_frame_refuse_125",
+      "input": {
+        "num_frames": 125
+      },
+      "expected": "native refuses lattice/window",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "native_frame_refuse_346",
+      "input": {
+        "num_frames": 346
+      },
+      "expected": "native refuses lattice/window",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "fps_refuse_23",
+      "input": {
+        "fps": 23
+      },
+      "expected": "product rejects unsupported fps",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "fps_refuse_25",
+      "input": {
+        "fps": 25
+      },
+      "expected": "product rejects unsupported fps",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "images_at_cap",
+      "input": {
+        "images": 9,
+        "clips": 0,
+        "standalone_audio": 0
+      },
+      "expected": "admit",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "clips_at_cap",
+      "input": {
+        "images": 0,
+        "clips": 3,
+        "standalone_audio": 0
+      },
+      "expected": "admit",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "audio_at_cap_with_visual",
+      "input": {
+        "images": 1,
+        "clips": 0,
+        "standalone_audio": 3
+      },
+      "expected": "admit",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "combined_at_cap",
+      "input": {
+        "images": 6,
+        "clips": 3,
+        "standalone_audio": 3
+      },
+      "expected": "admit",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "images_over",
+      "input": {
+        "images": 10,
+        "clips": 0,
+        "standalone_audio": 0
+      },
+      "expected": "refuse",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "clips_over",
+      "input": {
+        "images": 0,
+        "clips": 4,
+        "standalone_audio": 0
+      },
+      "expected": "refuse",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "audio_over",
+      "input": {
+        "images": 1,
+        "clips": 0,
+        "standalone_audio": 4
+      },
+      "expected": "refuse",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "combined_over",
+      "input": {
+        "images": 7,
+        "clips": 3,
+        "standalone_audio": 3
+      },
+      "expected": "refuse",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "audio_only",
+      "input": {
+        "images": 0,
+        "clips": 0,
+        "standalone_audio": 1
+      },
+      "expected": "refuse",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "empty_refs",
+      "input": {
+        "images": 0,
+        "clips": 0,
+        "standalone_audio": 0
+      },
+      "expected": "refuse",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "clip_frames_12",
+      "input": {
+        "normalized_fps": 24,
+        "frames": 12
+      },
+      "expected": "refuse",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "clip_frames_13",
+      "input": {
+        "normalized_fps": 24,
+        "frames": 13
+      },
+      "expected": "admit",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "carrier_aspect_0.2499",
+      "input": {
+        "aspect": 0.2499
+      },
+      "expected": "refuse",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "carrier_aspect_0.25",
+      "input": {
+        "aspect": 0.25
+      },
+      "expected": "admit",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "carrier_aspect_4.0",
+      "input": {
+        "aspect": 4.0
+      },
+      "expected": "admit",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "carrier_aspect_4.0001",
+      "input": {
+        "aspect": 4.0001
+      },
+      "expected": "refuse",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "ref_image_short_edge_1023",
+      "input": {
+        "referenceImageShortEdge": 1023
+      },
+      "expected": "refuse",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "ref_image_short_edge_1024",
+      "input": {
+        "referenceImageShortEdge": 1024
+      },
+      "expected": "admit",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "ref_image_short_edge_2048",
+      "input": {
+        "referenceImageShortEdge": 2048
+      },
+      "expected": "admit",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "ref_image_short_edge_2049",
+      "input": {
+        "referenceImageShortEdge": 2049
+      },
+      "expected": "refuse",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "native_audio_32000_2",
+      "input": {
+        "sample_rate": 32000,
+        "channels": 2
+      },
+      "expected": "native admit",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "native_audio_44100_2",
+      "input": {
+        "sample_rate": 44100,
+        "channels": 2
+      },
+      "expected": "native refuse; product extraction normalizes to32k/stereo",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "native_audio_32000_1",
+      "input": {
+        "sample_rate": 32000,
+        "channels": 1
+      },
+      "expected": "native refuse; product extraction normalizes to32k/stereo",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "steps_0",
+      "input": {
+        "advanced.steps": 0
+      },
+      "expected": "product floor2 or native ceiling200 refuse; native minimum1 differs from product",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "steps_1",
+      "input": {
+        "advanced.steps": 1
+      },
+      "expected": "product floor2 or native ceiling200 refuse; native minimum1 differs from product",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "steps_2",
+      "input": {
+        "advanced.steps": 2
+      },
+      "expected": "product/native admit",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "steps_200",
+      "input": {
+        "advanced.steps": 200
+      },
+      "expected": "product/native admit",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "steps_201",
+      "input": {
+        "advanced.steps": 201
+      },
+      "expected": "product floor2 or native ceiling200 refuse; native minimum1 differs from product",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "count_1",
+      "input": {
+        "count": 1
+      },
+      "expected": "admit",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "count_2",
+      "input": {
+        "count": 2
+      },
+      "expected": "native max_count1 refuse",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "bad_geometry_1536x1536",
+      "input": {
+        "canvas": "1536x1536"
+      },
+      "expected": "area/alignment refuse",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "bad_geometry_577x320",
+      "input": {
+        "canvas": "577x320"
+      },
+      "expected": "area/alignment refuse",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "mixed_tasks",
+      "input": {
+        "keyframes": [
+          "first"
+        ],
+        "images": 1
+      },
+      "expected": "refuse keyframe+references",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "wrong_base_partition",
+      "input": {
+        "model": "minimax_h3",
+        "images": 1
+      },
+      "expected": "refuse reference carrier on base",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "soundtrack_slot_accounting",
+      "input": {
+        "images": 6,
+        "clips_with_soundtrack": 3,
+        "standalone_audio": 3
+      },
+      "expected": "12 assets admit;6 audio labels are not6 standalone slots",
+      "route": "product API/worker and native provider boundary",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "veda_percent_negative",
+      "input": {
+        "generated": "-1%"
+      },
+      "expected": "refuse",
+      "route": "raw/saved product API/worker and both native provider controls",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "veda_percent_100",
+      "input": {
+        "generated": "100%"
+      },
+      "expected": "refuse",
+      "route": "raw/saved product API/worker and both native provider controls",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "veda_nan_inf",
+      "input": {
+        "reference": "nonfinite"
+      },
+      "expected": "refuse",
+      "route": "raw/saved product API/worker and both native provider controls",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "veda_count_zero",
+      "input": {
+        "generated": 0
+      },
+      "expected": "refuse",
+      "route": "raw/saved product API/worker and both native provider controls",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "veda_layer_50",
+      "input": {
+        "full_attention_layers": [
+          50
+        ]
+      },
+      "expected": "refuse layer beyond0..49",
+      "route": "raw/saved product API/worker and both native provider controls",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "veda_layer_negative",
+      "input": {
+        "full_attention_layers": [
+          -1
+        ]
+      },
+      "expected": "refuse",
+      "route": "raw/saved product API/worker and both native provider controls",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "veda_step_at_domain_end",
+      "input": {
+        "steps": 4,
+        "full_attention_steps": [
+          4
+        ]
+      },
+      "expected": "refuse; repeat at8 and50 NFE",
+      "route": "raw/saved product API/worker and both native provider controls",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "full_attention_all_layers",
+      "input": {
+        "full_attention_layers": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49
+        ]
+      },
+      "expected": "effective dense deliberate full-layer policy with correct denominator; no false sparse report",
+      "route": "raw/saved product API/worker and both native provider controls",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "full_attention_all_steps",
+      "input": {
+        "steps": 4,
+        "full_attention_steps": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      "expected": "effective dense deliberate full-step policy; repeat at8 and50 NFE",
+      "route": "raw/saved product API/worker and both native provider controls",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    },
+    {
+      "id": "reference_zero_percent",
+      "input": {
+        "reference": "0%",
+        "generated": "90%"
+      },
+      "expected": "reference keys dense; generated sparse; globals dense denominator correct",
+      "route": "raw/saved product API/worker and both native provider controls",
+      "backends": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "status": "planned_unexecuted"
+    }
+  ],
+  "catalogModelIdsAuthority": {
+    "schema_ref": "bc76391e355e657bac72597cb91e27fc7d028c99",
+    "schema_path": "packages/schemas/lora-manifest.schema.json",
+    "modelIds_schema": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "The exact model ids this adapter may attach to (sc-19563). OPTIONAL, and absent means family gating alone \u2014 so this never tightens an existing entry. When present, validate_lora_specs_for_model refuses the LoRA on any model id outside this list, EVEN WITHIN THE SAME FAMILY. That is the case `family` cannot express: MiniMax-H3 publishes `minimax_h3` (t2va/fl2va) and `minimax_h3_ref` (ref2va) as one DiT architecture with one geometry, so both declare `family: minimax-h3` and both accept `minimax-h3` LoRAs \u2014 yet lightx2v distils the fl2v and ref2v turbo adapters for one partition each. Cross-selecting is shape-valid and folds cleanly, which is what made it a quality mismatch rather than a failure. Deliberately a LIST, not the singular `baseModel` the Wan gate reads: `baseModel` is a value a trained or imported adapter RECORDS about itself, while this is a catalog author DECLARING which partitions an adapter is for, and one adapter can legitimately serve several."
+    },
+    "runtime_path": "crates/sceneworks-core/src/lora_family.rs",
+    "runtime_lines": "2659-2685",
+    "runtime_literal": "/// that differs from `model_id`. A LoRA that declares no family is skipped (the\n/// user vouches for it). Returns the user-facing message as `Err`.\npub fn validate_lora_compatibility(\n    loras: &[Value],\n    model_family: Option<&str>,\n    adapter_id: &str,\n    model_id: Option<&str>,\n) -> Result<(), String> {\n    let normalized_model_family = model_family.map(normalize_model_family).unwrap_or_default();\n    let accepted = model_family.map(accepted_lora_families).unwrap_or_default();\n    if loras.is_empty() {\n        return Ok(());\n    }\n    for (index, lora) in loras.iter().enumerate() {\n        let lora_id = lora_display_id(lora, index);\n        let declared_model_ids = lora_declared_model_ids(lora);\n        if let Some(model_id) = model_id {\n            if !declared_model_ids.is_empty() && !declared_model_ids.contains(&model_id) {\n                return Err(format!(\n                    \"LoRA {lora_id} is declared for model {}, not {model_id}.\",\n                    declared_model_ids.join(\" or \")\n                ));\n            }\n        }\n        let families = lora_declared_families(lora);\n        if families.is_empty() || accepted.is_empty() {\n            continue;",
+    "decision": "Declared exact eligibility is evidence; no name restriction invented. Unsupported requests remain explicit refusal cases pending coordinator terminal reconciliation."
+  },
+  "interpretation": "Preserve all named configurations and explicit refusal evidence. Coordinator reconciles unsupported requests against E9 before execution; refusals are never generated-quality passes. Optional expanded stress is separate."
+}
