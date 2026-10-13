@@ -78,26 +78,45 @@ mod tests {
     }
 
     fn stage(root: &Path, repo: &str, revision: &str, file: &str) {
+        stage_bytes(root, repo, revision, file, b"x");
+    }
+
+    fn stage_bytes(root: &Path, repo: &str, revision: &str, file: &str, bytes: &[u8]) {
         let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(root, repo)
             .expect("repo cache path resolves")
             .join("snapshots")
             .join(revision);
         let path = snapshot.join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, b"x").unwrap();
+        std::fs::write(path, bytes).unwrap();
     }
 
+    /// The text encoder as a snapshot both engines can PRICE (sc-25690): the memory-strategy
+    /// contract reads the tower config and every indexed shard's header before any load, so the
+    /// arm's pre-load admission needs real headers, not placeholder bytes.
     fn stage_text_encoder(root: &Path) {
-        for file in [
-            "config.json",
-            "generation_config.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "model.safetensors.index.json",
-            "model-00001-of-00002.safetensors",
-        ] {
-            stage(root, TE_REPO, TE_REVISION, file);
+        for (file, bytes) in crate::iris_test_weights::priceable_text_encoder_files() {
+            stage_bytes(root, TE_REPO, TE_REVISION, file, &bytes);
         }
+    }
+
+    /// The generation backbone as a root both engines can PRICE: the release `config.yaml` and a
+    /// header-valid `model.safetensors`.
+    fn stage_backbone(root: &Path) {
+        stage_bytes(
+            root,
+            BACKBONE_REPO,
+            BACKBONE_REVISION,
+            "config.yaml",
+            crate::iris_test_weights::RELEASE_CONFIG_YAML.as_bytes(),
+        );
+        stage_bytes(
+            root,
+            BACKBONE_REPO,
+            BACKBONE_REVISION,
+            "model.safetensors",
+            &crate::iris_test_weights::priceable_backbone_weights(),
+        );
     }
 
     #[test]
@@ -340,6 +359,63 @@ mod tests {
         /// step, report a second step (the post the preview rides), then complete with an image and
         /// a `caption_truncated` warning through `generate_with_report`.
         Completes,
+        /// [`Self::Completes`], but the engine's request scope admits ONE IMAGE FEWER than the
+        /// geometry the worker admitted — the engine refusing a request wider than its admission.
+        UnderAdmits,
+    }
+
+    /// The request scope the stub engine opens: the Iris engines' own rule and nothing else. Both
+    /// `candle-gen-iris` and `mlx-gen-iris` bound a request's images (`prompts × count`) by the
+    /// admitted `MemoryGeometry::batch` in `configure_request`, because a prompt batch denoises its
+    /// rows together.
+    struct ProbeScope {
+        admitted_images: u32,
+    }
+
+    impl gen_core::MemoryRequestScope for ProbeScope {
+        fn configure_request(&mut self, request: &mut GenerationRequest) -> gen_core::Result<()> {
+            let images = request.prompt_batch.len().max(1) as u64 * u64::from(request.count);
+            if images > u64::from(self.admitted_images) {
+                return Err(gen_core::Error::Unsupported(format!(
+                    "iris_3b: the request renders {images} images but was admitted for {}",
+                    self.admitted_images
+                )));
+            }
+            Ok(())
+        }
+
+        fn enter_phase(&mut self, _phase: gen_core::MemoryPhase) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn leave_phase(&mut self, _phase: gen_core::MemoryPhase) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn configure_decode(
+            &mut self,
+            _edge: u32,
+            _overlap: u32,
+            _geometry: gen_core::MemoryGeometry,
+        ) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn configure_attention(&mut self, _chunk_size: u32) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn materialize_transformer_window(
+            &mut self,
+            _first_block: u32,
+            _block_count: u32,
+        ) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn finish(&mut self, _outcome: gen_core::MemoryRunOutcome) -> gen_core::Result<()> {
+            Ok(())
+        }
     }
 
     /// What the engine was handed: every request field the Iris controls map onto.
@@ -394,6 +470,8 @@ mod tests {
         stopped_on_cancel: Arc<Mutex<bool>>,
         /// The adapters the loader handed this engine (`LoadSpec::adapters`).
         adapters: Vec<gen_core::AdapterSpec>,
+        /// Every memory-strategy context the arm opened a request scope under, in order.
+        contexts: Arc<Mutex<Vec<gen_core::MemoryRunContext>>>,
     }
 
     impl Generator for IrisArmProbe {
@@ -423,9 +501,14 @@ mod tests {
 
         fn begin_memory_strategy_request(
             &self,
-            _context: &gen_core::MemoryRunContext,
+            context: &gen_core::MemoryRunContext,
         ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
-            Ok(None)
+            self.contexts.lock().unwrap().push(context.clone());
+            let admitted_images = match self.behavior {
+                ArmBehavior::UnderAdmits => context.geometry.batch.saturating_sub(1),
+                _ => context.geometry.batch,
+            };
+            Ok(Some(Box::new(ProbeScope { admitted_images })))
         }
 
         fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
@@ -462,7 +545,7 @@ mod tests {
                 ArmBehavior::Fails => Err(gen_core::Error::Unsupported(
                     "iris fixture engine failure".to_owned(),
                 )),
-                ArmBehavior::Completes => {
+                ArmBehavior::Completes | ArmBehavior::UnderAdmits => {
                     req.preview.emit(gen_core::PreviewFrame {
                         current: 1,
                         total: 100,
@@ -574,7 +657,12 @@ mod tests {
         /// Candle-only staged-admission test.
         #[cfg_attr(target_os = "macos", allow(dead_code))]
         loaded_offload: Option<gen_core::OffloadPolicy>,
+        /// The materialization shape the loader was handed (`LoadSpec::load_shape`).
+        loaded_shape: Option<gen_core::LoadShape>,
         stopped_on_cancel: bool,
+        /// Every memory-strategy context the arm opened an engine request scope under.
+        #[cfg_attr(target_os = "macos", allow(dead_code))]
+        memory_contexts: Vec<gen_core::MemoryRunContext>,
         project_files: Vec<std::path::PathBuf>,
         /// The task switch around the job (sc-25684), recorded only by [`run_iris_task_switch`].
         switch: Option<TaskSwitch>,
@@ -699,10 +787,9 @@ mod tests {
         ]);
         let data = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        // A weightless but complete install: the pinned backbone and its text encoder.
-        for file in ["config.yaml", "model.safetensors"] {
-            stage(data.path(), BACKBONE_REPO, BACKBONE_REVISION, file);
-        }
+        // A weightless but complete AND priceable install: the pinned backbone and its text
+        // encoder, with the config and tensor headers the pre-load memory contract reads.
+        stage_backbone(data.path());
         stage_text_encoder(data.path());
         for (repo, revision) in [(BACKBONE_REPO, BACKBONE_REVISION), (TE_REPO, TE_REVISION)] {
             let refs = sceneworks_core::hf_home::huggingface_repo_cache_path(data.path(), repo)
@@ -728,7 +815,9 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let loaded_adapters = Arc::new(Mutex::new(Vec::new()));
         let loaded_offload = Arc::new(Mutex::new(None));
+        let loaded_shape = Arc::new(Mutex::new(None));
         let stopped_on_cancel = Arc::new(Mutex::new(false));
+        let memory_contexts = Arc::new(Mutex::new(Vec::new()));
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -780,11 +869,14 @@ mod tests {
                 let loader_loads = Arc::clone(&loads);
                 let loader_seen = Arc::clone(&seen);
                 let loader_stopped = Arc::clone(&stopped_on_cancel);
+                let loader_contexts = Arc::clone(&memory_contexts);
                 let loader_adapters = Arc::clone(&loaded_adapters);
                 let loader_offload = Arc::clone(&loaded_offload);
+                let loader_shape = Arc::clone(&loaded_shape);
                 let loader = move |_engine: &str, spec: &LoadSpec| {
                     *loader_loads.lock().unwrap() += 1;
                     *loader_offload.lock().unwrap() = Some(spec.offload_policy);
+                    *loader_shape.lock().unwrap() = Some(spec.load_shape);
                     *loader_adapters.lock().unwrap() = spec.adapters.clone();
                     Ok(Box::new(IrisArmProbe {
                         descriptor,
@@ -792,6 +884,7 @@ mod tests {
                         generate_calls: loader_calls,
                         seen: loader_seen,
                         stopped_on_cancel: loader_stopped,
+                        contexts: Arc::clone(&loader_contexts),
                         adapters: spec.adapters.clone(),
                     }) as Box<dyn Generator>)
                 };
@@ -853,6 +946,8 @@ mod tests {
         let seen = seen.lock().unwrap().clone();
         let loaded_adapters = loaded_adapters.lock().unwrap().clone();
         let loaded_offload = *loaded_offload.lock().unwrap();
+        let loaded_shape = *loaded_shape.lock().unwrap();
+        let memory_contexts = memory_contexts.lock().unwrap().clone();
         let stopped_on_cancel = *stopped_on_cancel.lock().unwrap();
         let load_calls = *loads.lock().unwrap();
         ArmRun {
@@ -864,7 +959,9 @@ mod tests {
             seen,
             loaded_adapters,
             loaded_offload,
+            loaded_shape,
             stopped_on_cancel,
+            memory_contexts,
             project_files: files_under(project.path()),
             switch,
         }
@@ -1599,5 +1696,292 @@ mod tests {
             assert!(run.asset_writes.is_empty(), "{:?}", run.asset_writes);
             assert!(run.project_files.is_empty(), "{:?}", run.project_files);
         }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // sc-25690 — the engines' memory-strategy contract through the real arm.
+    // ---------------------------------------------------------------------------------------
+
+    /// An engine that refuses a request wider than its admission (`prompts × count` over the
+    /// admitted `MemoryGeometry::batch`, the rule both Iris engines enforce in their request scope)
+    /// ends the job with that refusal: a typed failure naming it, no asset and no file — never a
+    /// partial batch, and never swallowed.
+    ///
+    /// *Mutation that reds this:* ignore the `configure_request` error in
+    /// `memory_strategy::run_with_scope` (the batch then renders and four assets are written).
+    #[test]
+    fn an_engine_refusal_of_an_over_wide_batch_fails_the_job_with_no_asset() {
+        let run = run_iris_arm_with_memory_cap(
+            ArmBehavior::UnderAdmits,
+            false,
+            batch_payload(&["a red fox", "a blue whale"], 2),
+            OPTIMIZED_BATCH_CAP_GB,
+        );
+        match &run.outcome {
+            Err(crate::error::WorkerError::Engine(message)) => assert!(
+                message.contains("renders 4 images but was admitted for 3"),
+                "the engine's refusal survives: {message}"
+            ),
+            other => panic!("an over-wide batch must fail the job, got {other:?}"),
+        }
+        assert_eq!(run.generate_calls, 0, "refused before the engine rendered");
+        assert!(run.asset_writes.is_empty(), "{:?}", run.asset_writes);
+        assert!(run.project_files.is_empty(), "{:?}", run.project_files);
+    }
+
+    /// Every Iris loader now FAILS on `LoadShape::DeferredMaterialization` (no Iris route has a
+    /// block-streaming loader), so no worker path may hand one a deferred spec. Deferral has
+    /// exactly two sources in the worker — a `memory_route_registry` rule and the legacy shaper
+    /// that reads those rules — and every Iris load spec starts from gen-core's eager default:
+    /// the generation arm (fresh and cached loads share one spec), the depth job, the restoration
+    /// transform, and the trainers' base load (which the training-export render reuses).
+    ///
+    /// *Mutation that reds this:* add a `legacy_shaping` rule for `iris_3b` to
+    /// `memory_route_registry::RULES` (the witness list and the shaper both name it, and the arm
+    /// hands its loader a deferred spec).
+    #[test]
+    fn no_worker_path_hands_an_iris_route_a_deferred_load_shape() {
+        use crate::memory_route_registry::{
+            apply_registered_load_shape, deferred_route_witnesses, MemoryRouteBackend,
+            MemoryRouteMode,
+        };
+        let eager = gen_core::LoadShape::EagerMaterialization;
+        let ids = [
+            "iris_3b",
+            gen_core::iris::DEPTH_MODEL_ID,
+            crate::iris_restore::IRIS_RESTORE_MODEL_ID,
+        ];
+        for witness in deferred_route_witnesses() {
+            assert!(
+                !ids.contains(&witness.provider),
+                "no route rule may name an Iris provider: {witness:?}"
+            );
+        }
+        for backend in [MemoryRouteBackend::Mlx, MemoryRouteBackend::Candle] {
+            for id in ids {
+                for mode in MemoryRouteMode::ALL {
+                    for sequential in [false, true] {
+                        let shaped = apply_registered_load_shape(
+                            backend,
+                            id,
+                            mode,
+                            LoadSpec::new(WeightsSource::Dir("iris".into())),
+                            sequential,
+                        );
+                        assert_eq!(
+                            shaped.load_shape, eager,
+                            "{backend:?} {id} {mode:?} sequential={sequential}"
+                        );
+                    }
+                }
+            }
+        }
+        // What each route actually builds.
+        assert_eq!(
+            crate::depth_jobs::depth_load_spec(Path::new("depth")).load_shape,
+            eager
+        );
+        for id in ids {
+            let trainer = crate::training_jobs::TrainerLoadInputs::from_task(
+                id,
+                std::path::PathBuf::from("iris"),
+                std::collections::BTreeMap::new(),
+            )
+            .load_spec(id, "bf16");
+            assert_eq!(trainer.load_shape, eager, "{id} trainer base load");
+        }
+        // The generation arm, resident and — on the lane where a small card stages — staged.
+        let resident = run_iris_arm(ArmBehavior::Fails, false, json!({}));
+        assert_eq!(resident.load_calls, 1, "{:?}", resident.outcome);
+        assert_eq!(resident.loaded_shape, Some(eager));
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        {
+            let staged = run_iris_arm_with_memory_cap(
+                ArmBehavior::Fails,
+                false,
+                json!({ "width": 1024, "height": 1024 }),
+                "16",
+            );
+            assert_eq!(
+                staged.loaded_offload,
+                Some(gen_core::OffloadPolicy::Sequential)
+            );
+            assert_eq!(staged.loaded_shape, Some(eager));
+        }
+    }
+
+    /// The Iris engines' `validate` refuses a request memory block that tiles a decode or streams
+    /// transformer blocks (neither exists on any Iris route), and bounded attention with no chunk
+    /// size (MLX refuses bounded attention outright). The worker builds that block in exactly one
+    /// place — `MemoryProviderContract::generation_memory` over the selected rung — so for every
+    /// rung of every Iris route, on the contract THIS lane's engine publishes, the block the worker
+    /// would send is one the engine honours. Also pins what the ladder is expected to reach:
+    /// staged residency on both lanes, bounded attention (with its one published chunk size) on
+    /// Candle alone.
+    ///
+    /// *Mutation that reds this:* none in the worker — it holds the engine's declaration. It reds
+    /// if a pin bump makes an Iris contract engage a rung the engine's `validate` refuses.
+    #[test]
+    fn no_selectable_iris_rung_emits_a_request_memory_block_the_engine_refuses() {
+        use gen_core::MemoryStrategy;
+        let registry = crate::inference_runtime::media();
+        let spec = LoadSpec::new(WeightsSource::Dir("iris-weights-free".into()));
+        let candle = cfg!(not(target_os = "macos"));
+        let mut generation_rungs = Vec::new();
+        for id in [
+            "iris_3b",
+            gen_core::iris::DEPTH_MODEL_ID,
+            crate::iris_restore::IRIS_RESTORE_MODEL_ID,
+        ] {
+            let fixture = registry
+                .memory_contract_fixture_registrations()
+                .find(|fixture| fixture.provider_id == id)
+                .unwrap_or_else(|| panic!("{id} publishes a weights-free memory contract"));
+            let contract = (fixture.contract)(&spec).expect("weights-free contract");
+            assert_eq!(contract.provider_id, id);
+            assert_eq!(
+                contract.load_shape,
+                gen_core::LoadShape::EagerMaterialization
+            );
+            for strategy in MemoryStrategy::ALL {
+                let implemented = matches!(
+                    contract.capability(strategy).map(|cap| &cap.support),
+                    Some(gen_core::MemoryStrategySupport::Implemented)
+                );
+                if !implemented {
+                    continue;
+                }
+                let tier = gen_core::MemoryNumericTier {
+                    precision: gen_core::Precision::Bf16,
+                    quant: None,
+                    component_precision_floors: &[],
+                };
+                let selection = contract
+                    .representative_selection(strategy, tier, false)
+                    .expect("an implemented rung has a representative selection");
+                contract
+                    .validate_selection(&selection)
+                    .unwrap_or_else(|error| panic!("{id} {strategy:?}: {error}"));
+                if id == "iris_3b" {
+                    generation_rungs.push(strategy);
+                }
+                let Some(memory) = contract.generation_memory(&selection) else {
+                    assert_eq!(strategy, MemoryStrategy::Resident, "{id}");
+                    continue;
+                };
+                assert!(!memory.tile_vae_decode, "{id} {strategy:?}: {memory:?}");
+                assert!(
+                    !memory.stream_transformer_blocks,
+                    "{id} {strategy:?}: {memory:?}"
+                );
+                assert_eq!(memory.decode_tile_edge, None, "{id} {strategy:?}");
+                assert_eq!(memory.transformer_window_size, None, "{id} {strategy:?}");
+                if candle {
+                    assert_eq!(
+                        memory.chunk_attention,
+                        memory.attention_chunk_size.is_some(),
+                        "{id} {strategy:?}: a chunked request names its budget"
+                    );
+                } else {
+                    assert!(!memory.chunk_attention, "{id} {strategy:?}: {memory:?}");
+                }
+            }
+        }
+        let mut expected = vec![MemoryStrategy::Resident, MemoryStrategy::StagedResidency];
+        if candle {
+            expected.push(MemoryStrategy::BoundedAttention);
+        }
+        assert_eq!(generation_rungs, expected, "the generation ladder's rungs");
+    }
+
+    /// A budget on which a 2 × 2 native batch runs under an OPTIMIZED rung on the Candle lane: the
+    /// batch adds 18 GB of declared activations to both floors, so the 24 GB resident floor (42 GB)
+    /// does not fit and the staged one does. Roomy on MLX, where the test only needs a request
+    /// scope to be opened.
+    #[cfg(target_os = "macos")]
+    const OPTIMIZED_BATCH_CAP_GB: &str = "128";
+    #[cfg(not(target_os = "macos"))]
+    const OPTIMIZED_BATCH_CAP_GB: &str = "36";
+
+    /// The Candle arm admits a native prompt batch at its IMAGE COUNT when the shared ladder
+    /// selects an optimized rung, so the engine's request scope — which refuses
+    /// `prompts × count > MemoryGeometry::batch` — renders it; and the batch is charged exactly
+    /// once: the admitted peak is the single-image staged peak plus the declared activation
+    /// overlay, not that overlay AND a batch-scaled derivation.
+    ///
+    /// *Mutations that red this:* the shared geometry's `batch` back to a constant 1 (the scope
+    /// refuses the 4-image request and the job fails) / `candle_memory_strategy::law_geometry`
+    /// returning the request geometry unchanged (the batch is priced twice and the peak exceeds
+    /// single + overlay) / `candle_shared_memory_tier` returning the gate's key (the selection
+    /// names a q8 tier the bf16 generator did not load).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn a_native_prompt_batch_under_an_optimized_rung_is_admitted_at_its_image_count() {
+        // One image on a 16 GB card: staged (the same rung the batch takes).
+        let single = run_iris_arm_with_memory_cap(
+            ArmBehavior::Completes,
+            false,
+            json!({ "seed": 40 }),
+            "16",
+        );
+        assert!(single.outcome.is_ok(), "{:?}", single.outcome);
+        let [single_context] = single.memory_contexts.as_slice() else {
+            panic!(
+                "one optimized request scope per image: {:?}",
+                single.memory_contexts
+            )
+        };
+
+        let batch = run_iris_arm_with_memory_cap(
+            ArmBehavior::Completes,
+            false,
+            batch_payload(&["a red fox", "a blue whale"], 2),
+            OPTIMIZED_BATCH_CAP_GB,
+        );
+        assert!(batch.outcome.is_ok(), "{:?}", batch.outcome);
+        assert_eq!(batch.generate_calls, 1, "one engine call renders the batch");
+        assert_eq!(batch.asset_writes.len(), 4, "{:?}", batch.asset_writes);
+        assert_eq!(
+            batch.loaded_offload,
+            Some(gen_core::OffloadPolicy::Sequential),
+            "the staged selection loads staged"
+        );
+        let [context] = batch.memory_contexts.as_slice() else {
+            panic!(
+                "one request scope for the batch: {:?}",
+                batch.memory_contexts
+            )
+        };
+        assert!(
+            context.selection.strategy.is_optimized(),
+            "{:?}",
+            context.selection
+        );
+        assert_eq!(
+            context.selection.strategy,
+            single_context.selection.strategy
+        );
+        assert_eq!(
+            context.geometry.batch, 4,
+            "admitted at prompts × count, the bound the engine's scope enforces"
+        );
+        assert_eq!(single_context.geometry.batch, 1);
+        // The loaded tier: the one dense artifact, whatever `advanced.mlxQuantize` defaults to.
+        for admitted in [single_context, context] {
+            assert_eq!(
+                admitted.selection.tier.quant, None,
+                "{:?}",
+                admitted.selection
+            );
+            assert_eq!(admitted.selection.tier.precision, gen_core::Precision::Bf16);
+        }
+        // Charged ONCE: (4 images × 1 MP − 1) × the declared 6 GB per megapixel, on top of the
+        // single-image peak of the same rung.
+        let overlay_bytes = (18.0 * crate::fit_gate::BYTES_PER_GIB) as u64;
+        assert_eq!(
+            context.predicted_peak_bytes,
+            single_context.predicted_peak_bytes + overlay_bytes,
+            "the batch is priced by the declared overlay alone"
+        );
     }
 }

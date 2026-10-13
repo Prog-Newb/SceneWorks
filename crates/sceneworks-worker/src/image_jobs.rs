@@ -3730,6 +3730,12 @@ mod iris;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 mod lane_controls;
+// The Candle shared-ladder selector reads the declared activation term so it never prices the same
+// batch and area twice (sc-25690, `candle_memory_strategy::law_geometry`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) use lane_controls::{
+    declared_activation_gb_per_megapixel, DECLARED_ACTIVATION_FLOOR_PIXELS,
+};
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 mod tier_resolver;

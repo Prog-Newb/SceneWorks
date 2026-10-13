@@ -3847,9 +3847,45 @@ fn candle_certified_artifact_path(
             "SceneWorks/flux2-klein-9b-mlx",
             FLUX2_KLEIN_9B_MLX_TURNKEY_REVISION,
         ),
+        // Iris-3B generation (sc-25690). The one dense artifact is the pinned upstream snapshot at
+        // its ROOT — there is no tier sub-directory to join — and its text encoder is a manifest
+        // co-requisite the worker stages cache-only at its own pinned revision
+        // (`attach_required_components`), so the backbone root is the whole caller-chosen identity.
+        // Without this arm the route was permanently uncertified: the shared ladder then submits
+        // the resident estimate alone, and the staged and bounded-attention rungs
+        // `candle-gen-iris` implements could never be selected for a request.
+        "iris_3b" => {
+            return candle_certified_hf_artifact_path(
+                settings,
+                gen_core::iris::UPSTREAM_WEIGHTS_REPO,
+                gen_core::iris::UPSTREAM_WEIGHTS_REVISION,
+                Path::new(""),
+                weights_dir,
+            );
+        }
         _ => return false,
     };
     candle_certified_hf_artifact_path(settings, repo, revision, Path::new(tier), weights_dir)
+}
+
+/// The numeric tier key the SHARED memory selector binds a request to.
+///
+/// The VRAM gate names a tier from the resolved directory's basename, or — for a flat root with no
+/// tier basename — from `advanced.mlxQuantize` (q8 by default; `requested_tier_key`). That key only
+/// has to index the manifest's per-tier floor rows there. The shared selector is stricter: it turns
+/// the key into the `MemoryNumericTier` of the selection, and the provider's safety check refuses a
+/// selection whose tier is not the one the generator LOADED. Iris-3B refuses quantization and has
+/// exactly one dense artifact, so its loaded tier is bf16 whatever the request's advisory quantize
+/// knob says; handing the selector the gate's `q8` would mint a `Q8` selection the loaded bf16
+/// generator rejects ("selected tier does not match loaded tier") the moment an optimized rung is
+/// chosen.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn candle_shared_memory_tier<'a>(engine_id: &str, gate_tier: &'a str) -> &'a str {
+    if engine_id == "iris_3b" {
+        "bf16"
+    } else {
+        gate_tier
+    }
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -13232,6 +13268,10 @@ async fn generate_candle_stream_using(
     )?;
     let mut shared_contract_spec = attached_shared_contract_spec.into_load_spec();
     let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
+    // The numeric tier the shared selector binds this request to — the tier the provider LOADS,
+    // which for a single-artifact dense route is not the gate's bits-derived key (see
+    // `candle_shared_memory_tier`).
+    let shared_tier = candle_shared_memory_tier(engine_id, tier);
     // A supported Hires refinement is a fresh one-reference image-to-image request even when the
     // caller's first pass was Edit or Inpaint. Admit that final-pass identity independently; the
     // original mode/reference/geometry is admitted below for the first pass.
@@ -13251,7 +13291,7 @@ async fn generate_candle_stream_using(
     };
     shared_contract_spec = apply_declared_candle_image_load_shape(
         engine_id,
-        Some(tier),
+        Some(shared_tier),
         shared_admission_mode,
         &request.model_manifest_entry,
         shared_contract_spec,
@@ -13280,7 +13320,7 @@ async fn generate_candle_stream_using(
         settings,
         &shared_contract_spec,
         &request.model_manifest_entry,
-        tier,
+        shared_tier,
     );
     seal_recursive_receipt_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
     seal_ideogram_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
@@ -13290,13 +13330,21 @@ async fn generate_candle_stream_using(
         &shared_contract_spec,
         artifact_is_certified,
         &request.model_manifest_entry,
-        tier,
+        shared_tier,
         shared_admission_mode,
         (adapter_count > 0).then_some("lora"),
         gen_core::MemoryGeometry {
             width: memory_width,
             height: memory_height,
-            batch: 1,
+            // A native prompt batch (sc-25681) is ONE provider call over `prompts × count`
+            // images, so that is the batch the request is admitted at — the provider's request
+            // scope bounds the images it will render by exactly this figure (`candle-gen-iris`
+            // refuses `prompts × count > MemoryGeometry::batch`). The batch's memory is charged
+            // once, by the declared activation overlay above; the selector does not scale the
+            // same activations by this batch again (`candle_memory_strategy::law_geometry`).
+            batch: native_batch
+                .as_ref()
+                .map_or(1, lane_controls::NativePromptBatch::images),
             frames: 1,
             reference_count,
         },
@@ -13330,7 +13378,7 @@ async fn generate_candle_stream_using(
             &shared_contract_spec,
             artifact_is_certified,
             &request.model_manifest_entry,
-            tier,
+            shared_tier,
             shared_request_mode,
             (adapter_count > 0).then_some("lora"),
             gen_core::MemoryGeometry {
@@ -13371,13 +13419,13 @@ async fn generate_candle_stream_using(
             // selection is attributable to the exact estimate that admitted it. The receipt-priced
             // families emit their own exact-receipt event after the load (below) and are not
             // duplicated here.
-            let telemetry = evaluation.selection_telemetry(engine_id, tier);
+            let telemetry = evaluation.selection_telemetry(engine_id, shared_tier);
             tracing::info!(
                 event = "image_memory_strategy_selected",
                 job_id = %job.id,
                 model = %request.model,
                 route = engine_id,
-                actual_tier = tier,
+                actual_tier = shared_tier,
                 strategy = crate::candle_memory_strategy::strategy_label(
                     evaluation.context.selection.strategy
                 ),
