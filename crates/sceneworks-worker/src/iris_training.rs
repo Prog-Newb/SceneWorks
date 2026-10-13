@@ -847,7 +847,17 @@ mod job_tests {
         /// Report a step, wait for the cancel flag, then publish the checkpoint + export and return
         /// `Ok` — the trainer's contract for a cancel after the first optimizer step.
         CancelAfterFirstStep,
+        /// Train a step, publish a checkpoint, then fail at the export the way the engine does (its
+        /// publication is atomic — `gen_core::iris::train::lineage` — so no export is left at the
+        /// final path): the typed error, the checkpoint kept, nothing exported.
+        FailsExport,
+        /// Run the ENGINE's own depth dataset pass (`depth_dataset_pass`, the first thing both depth
+        /// trainers do) on the request the worker shaped, then complete if it accepts the dataset.
+        DepthDatasetPass,
     }
+
+    /// The release depth architecture the engine's depth plan resolves against.
+    const DEPTH_CONFIG: &str = include_str!("iris_restore/fixtures/depth_config.yaml");
 
     #[derive(Default)]
     struct Seen {
@@ -900,6 +910,12 @@ mod job_tests {
         ) -> gen_core::Result<TrainingOutput> {
             self.seen.lock().unwrap().request = Some(req.clone());
             on_progress(TrainingProgress::Preparing);
+            if self.behavior == Behavior::DepthDatasetPass {
+                use gen_core::iris::train::depth as depth_train;
+                let model = gen_core::iris::IrisConfig::parse(DEPTH_CONFIG)?;
+                let plan = depth_train::DepthTrainPlan::resolve(req, &model)?;
+                depth_train::depth_dataset_pass(req, &plan, |_| {})?;
+            }
             on_progress(TrainingProgress::LoadingModel);
             on_progress(TrainingProgress::Caching {
                 current: 1,
@@ -915,7 +931,24 @@ mod job_tests {
                 req.cancel.is_cancelled()
             };
             match self.behavior {
-                Behavior::Completes => {
+                Behavior::FailsExport => {
+                    on_progress(TrainingProgress::Training {
+                        step: 1,
+                        total: req.config.steps,
+                        loss: 0.5,
+                    });
+                    on_progress(TrainingProgress::Checkpoint { step: 1 });
+                    on_progress(TrainingProgress::Saving);
+                    // The checkpoint is durable; the export never reaches its final path.
+                    let exported = write_export(req);
+                    std::fs::remove_file(exported).unwrap();
+                    Err(gen_core::Error::Msg(
+                        "iris: export failed: write model.safetensors: No space left on device \
+                         (os error 28)"
+                            .to_owned(),
+                    ))
+                }
+                Behavior::Completes | Behavior::DepthDatasetPass => {
                     let accumulation = req.config.gradient_accumulation.max(1);
                     on_progress(TrainingProgress::Training {
                         step: accumulation,
@@ -2053,6 +2086,289 @@ mod job_tests {
         let last = terminal(&run.posts);
         assert_eq!(last["status"], "canceled", "{last:#}");
         assert_eq!(last["result"]["trainedArtifactExported"], true, "{last:#}");
+    }
+
+    /// Every file under `root` with its bytes (sorted) — a run's SOURCE, compared before and after.
+    fn tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    files.push((path.clone(), std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    /// A REAL depth dataset the engine's readers decode (64x48 RGB + aligned `.npy` depth): item 0
+    /// has a usable depth ramp and a validity mask, item 1 a depth plane and no mask.
+    fn real_depth_dataset(
+        data: &Path,
+        mask_value: u8,
+        item1_depth: impl Fn(u32) -> f32,
+    ) -> (TrainingDataset, PathBuf) {
+        let (dataset, root) = task_dataset(data, "depth", 2, false);
+        let npy = |f: &dyn Fn(u32) -> f32| {
+            let values: Vec<f32> = (0..48u32)
+                .flat_map(|y| (0..64).map(move |_| y))
+                .map(f)
+                .collect();
+            sceneworks_core::depth_map::encode_npy_f32(64, 48, &values).unwrap()
+        };
+        for index in 0..2 {
+            image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([x as u8, y as u8, 7]))
+                .save(root.join(format!("images/item{index}.png")))
+                .unwrap();
+        }
+        // Stored millimetres under the dataset's `scale: 0.001` / `maxDepth: 80`.
+        std::fs::write(
+            root.join("sidecars/item0.depth.npy"),
+            npy(&|y| 1000.0 + 100.0 * y as f32),
+        )
+        .unwrap();
+        image::GrayImage::from_pixel(64, 48, image::Luma([mask_value]))
+            .save(root.join("sidecars/item0.mask.png"))
+            .unwrap();
+        std::fs::write(root.join("sidecars/item1.depth.npy"), npy(&item1_depth)).unwrap();
+        (dataset, root)
+    }
+
+    fn small_depth(c: &mut sceneworks_core::training::TrainingConfig) {
+        c.gradient_accumulation = 1;
+        c.steps = 4;
+        c.save_every = 2;
+        c.resolution = 64;
+        c.advanced.insert("sampleEvery".into(), json!(2));
+        c.advanced["iris"]["depth_size"] = json!([64, 64]);
+    }
+
+    /// Epic AT6 (sc-25690) — depth training on a dataset with NO valid depth pixel (item 0's mask
+    /// excludes every pixel; item 1's depth is 0 everywhere). The request the worker shapes reaches
+    /// the engine's own dataset pass, which refuses under BOTH invalid-example policies before any
+    /// step: the job fails with the engine's reason, posts no result (so the API registers nothing),
+    /// writes no export, and leaves the dataset and the installed export byte-identical. A dataset
+    /// with valid pixels passes the same pass and completes (the refusal is the data's, not the
+    /// fixture's).
+    #[test]
+    fn a_depth_dataset_with_no_valid_depth_pixels_is_refused_and_publishes_nothing() {
+        let _env = isolated_env("128");
+        for (policy, reason) in [
+            ("reject", "0 valid depth pixels (min_valid_pixels = 2)"),
+            ("skip", "no item of the dataset is a valid depth example"),
+        ] {
+            let data_holder = tempfile::tempdir().unwrap();
+            let data = data_holder.path().canonicalize().unwrap();
+            let export = stage_task_export(&data, "depth");
+            let (dataset, root) = real_depth_dataset(&data, 0, |_| 0.0);
+            let plan = task_plan(&data, "iris_3b_depth", (dataset, root.clone()), |c| {
+                small_depth(c);
+                c.advanced["iris"]["invalid_examples"] = json!(policy);
+            });
+            let (dataset_before, export_before) = (tree(&root), tree(&export));
+            let run = run_as("iris_3b_depth", Behavior::DepthDatasetPass, plan, &data);
+            let error = match &run.outcome {
+                Err(WorkerError::Engine(message)) => message.clone(),
+                other => panic!("{policy}: expected an engine refusal, got {other:?}"),
+            };
+            assert!(
+                error.contains("training failed") && error.contains(reason),
+                "{policy}: {error}"
+            );
+            if policy == "reject" {
+                assert!(error.contains("item0.png"), "the item is named: {error}");
+            }
+            let request = run.seen.request.as_ref().expect("the trainer was reached");
+            assert_eq!(request.items.len(), 2);
+            assert!(
+                run.posts
+                    .iter()
+                    .all(|post| post["status"] != "completed" && post["result"].is_null()),
+                "{policy}: no completion and no result: {:#?}",
+                run.posts
+            );
+            assert!(
+                run.posts.iter().all(|post| post["stage"] != "training"),
+                "{policy}: no optimizer step ran: {:#?}",
+                run.posts
+            );
+            assert_eq!(
+                tree(&data.join("models/finetunes")),
+                Vec::new(),
+                "{policy}: nothing was exported"
+            );
+            assert_eq!(tree(&root), dataset_before, "{policy}: dataset untouched");
+            assert_eq!(tree(&export), export_before, "{policy}: install untouched");
+        }
+
+        // The control: valid pixels pass the same engine pass and the run completes.
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        stage_task_export(&data, "depth");
+        let plan = task_plan(
+            &data,
+            "iris_3b_depth",
+            real_depth_dataset(&data, 255, |y| 2000.0 + 50.0 * y as f32),
+            small_depth,
+        );
+        let run = run_as("iris_3b_depth", Behavior::DepthDatasetPass, plan, &data);
+        assert!(run.outcome.is_ok(), "{:?}\n{:#?}", run.outcome, run.posts);
+        assert_eq!(terminal(&run.posts)["status"], "completed");
+    }
+
+    /// Epic AT6 (sc-25690) — a FAILED export, for every Iris training objective (generation full
+    /// fine-tune, generation LoRA and LoKr, depth, restoration): the job ends in the engine's error
+    /// with no completion and no result on any post (the API registers a trained artifact only from
+    /// a result), no export exists at the output path, the durable checkpoint the trainer published
+    /// before the failure is kept (the run stays resumable), and the run's sources — its dataset
+    /// and its installed weights — are byte-identical.
+    #[test]
+    fn a_failed_export_reports_the_failure_and_registers_nothing_for_every_objective() {
+        let _table = RESOURCE_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = isolated_env("128");
+        for objective in [
+            "generation_full",
+            "generation_lora",
+            "generation_lokr",
+            "depth",
+            "restoration",
+        ] {
+            let data_holder = tempfile::tempdir().unwrap();
+            let data = data_holder.path().canonicalize().unwrap();
+            let install = stage_install(&data);
+            let small = |c: &mut sceneworks_core::training::TrainingConfig| {
+                c.gradient_accumulation = 1;
+                c.steps = 4;
+                c.save_every = 2;
+                c.advanced.insert("sampleEvery".into(), json!(2));
+            };
+            let (engine, plan, output, dataset_root) = match objective {
+                "depth" => {
+                    stage_task_export(&data, "depth");
+                    let dataset = task_dataset(&data, "depth", 2, false);
+                    let root = dataset.1.clone();
+                    (
+                        "iris_3b_depth",
+                        task_plan(&data, "iris_3b_depth", dataset, small),
+                        data.join("models/finetunes/finetune_task"),
+                        root,
+                    )
+                }
+                "restoration" => {
+                    stage_task_export(&data, "upscaler");
+                    let resources = vec![
+                        fixture_resource(
+                            &data,
+                            "lpips_vgg16",
+                            "fixture/vgg",
+                            "model.safetensors",
+                            b"vgg",
+                        ),
+                        fixture_resource(
+                            &data,
+                            "lpips_lin",
+                            "fixture/lin",
+                            "lin.safetensors",
+                            b"lin",
+                        ),
+                        fixture_resource(
+                            &data,
+                            "critic_trunk",
+                            "fixture/trunk",
+                            "trunk.bin",
+                            b"trunk",
+                        ),
+                    ];
+                    *crate::iris_task_training::TEST_TRAINING_RESOURCES
+                        .lock()
+                        .unwrap() = Some(resources);
+                    let dataset = task_dataset(&data, "restoration", 2, true);
+                    let root = dataset.1.clone();
+                    (
+                        "iris_3b_restore",
+                        task_plan(&data, "iris_3b_restore", dataset, |c| {
+                            small(c);
+                            c.resolution = 512;
+                        }),
+                        data.join("models/finetunes/finetune_task"),
+                        root,
+                    )
+                }
+                generation => {
+                    let network = generation.trim_start_matches("generation_");
+                    (
+                        "iris_3b",
+                        plan(&data, &install.backbone, 2, |c| {
+                            small(c);
+                            c.advanced.insert("networkType".into(), json!(network));
+                        }),
+                        data.join("loras/lora_iris"),
+                        data.join("projects/p1/training/datasets/ds1"),
+                    )
+                }
+            };
+            let file_name = plan.output.file_name.clone();
+            let hub = sceneworks_core::hf_home::huggingface_repo_cache_path(&data, BACKBONE_REPO)
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            let (dataset_before, installs_before) = (tree(&dataset_root), tree(&hub));
+            assert!(!dataset_before.is_empty() && !installs_before.is_empty());
+
+            let run = run_as(engine, Behavior::FailsExport, plan, &data);
+            *crate::iris_task_training::TEST_TRAINING_RESOURCES
+                .lock()
+                .unwrap() = None;
+
+            let error = match &run.outcome {
+                Err(WorkerError::Engine(message)) => message.clone(),
+                other => panic!("{objective}: expected the export failure, got {other:?}"),
+            };
+            assert!(
+                error.contains("training failed") && error.contains("export failed"),
+                "{objective}: {error}"
+            );
+            assert!(run.seen.request.is_some(), "{objective}: the trainer ran");
+            assert!(
+                run.posts.iter().any(|post| post["stage"] == "training"),
+                "{objective}: a step was reported before the failure: {:#?}",
+                run.posts
+            );
+            assert!(
+                run.posts
+                    .iter()
+                    .all(|post| post["status"] != "completed" && post["result"].is_null()),
+                "{objective}: no completion and no result (nothing to register): {:#?}",
+                run.posts
+            );
+            let stem = file_name.trim_end_matches(".safetensors");
+            assert!(
+                !output.join(&file_name).exists() && !output.join(stem).exists(),
+                "{objective}: no export at the output path"
+            );
+            let left: Vec<PathBuf> = tree(&output).into_iter().map(|(path, _)| path).collect();
+            assert_eq!(
+                left,
+                [output.join(format!("{stem}.checkpoints/step_00000001/state.json"))],
+                "{objective}: only the durable checkpoint is left beside the missing export"
+            );
+            assert_eq!(
+                tree(&dataset_root),
+                dataset_before,
+                "{objective}: dataset untouched"
+            );
+            assert_eq!(
+                tree(&hub),
+                installs_before,
+                "{objective}: installs untouched"
+            );
+        }
     }
 
     fn fixture_resource(
