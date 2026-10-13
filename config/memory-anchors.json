@@ -12201,23 +12201,23 @@
       "evidence": null
     },
     {
-      "id": "analytic:iris_3b:candle:default",
+      "id": "analytic:iris_3b:candle:bf16",
       "modelId": "iris_3b",
       "modelFamily": "iris",
       "route": "iris_3b",
       "backend": "candle",
-      "tier": "default",
+      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
     },
     {
-      "id": "analytic:iris_3b:mlx:default",
+      "id": "analytic:iris_3b:mlx:bf16",
       "modelId": "iris_3b",
       "modelFamily": "iris",
       "route": "iris_3b",
       "backend": "mlx",
-      "tier": "default",
+      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null

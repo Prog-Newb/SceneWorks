@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:b7fbcf55b9d085ae96305ad6a4552428d0574396c613f30b04e850c50b9f26a8",
+    "sceneWorksRevision": "source-tree:918001dbd9564ac60281a18d6492b6f2ae459ca0e1115b9234f314ecc1692739",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -65,11 +65,11 @@
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
-        "sha256": "9276495b6ebe65609c31d505753b2ce55e597f1d85d74d4010329d5398c5e27c"
+        "sha256": "5c944cca4ca3062ad753a71e8a46fe454ac2b8fd96177001d5018c622cd70e17"
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "e489c4c22d9657b37cbd097fe40691f5c2f9cb0e0c5af526250240239068bf1b"
+        "sha256": "7db55ec08bbd97bfda4056d7a5bc22d2963b295cc0c44d85a1a85bb7eb8ffa39"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -1785,7 +1785,7 @@
       "axes": {
         "mlx": {
           "tiers": [
-            "default"
+            "bf16"
           ],
           "modes": [
             "text_to_image"
@@ -1804,7 +1804,7 @@
         },
         "candle": {
           "tiers": [
-            "default"
+            "bf16"
           ],
           "modes": [
             "text_to_image"
@@ -88449,12 +88449,12 @@
       }
     },
     {
-      "id": "iris_3b:iris_3b:candle:default:text_to_image:lora:bounded_decode",
+      "id": "iris_3b:iris_3b:candle:bf16:text_to_image:lora:bounded_decode",
       "modelId": "iris_3b",
       "resolvedRoute": "iris_3b",
       "provider": "iris_3b",
       "backend": "candle",
-      "tier": "default",
+      "tier": "bf16",
       "mode": "text_to_image",
       "overlay": "lora",
       "rung": "bounded_decode",
@@ -88495,12 +88495,12 @@
       }
     },
     {
-      "id": "iris_3b:iris_3b:candle:default:text_to_image:none:bounded_decode",
+      "id": "iris_3b:iris_3b:candle:bf16:text_to_image:none:bounded_decode",
       "modelId": "iris_3b",
       "resolvedRoute": "iris_3b",
       "provider": "iris_3b",
       "backend": "candle",
-      "tier": "default",
+      "tier": "bf16",
       "mode": "text_to_image",
       "overlay": "none",
       "rung": "bounded_decode",
@@ -88541,12 +88541,12 @@
       }
     },
     {
-      "id": "iris_3b:iris_3b:mlx:default:text_to_image:lora:bounded_decode",
+      "id": "iris_3b:iris_3b:mlx:bf16:text_to_image:lora:bounded_decode",
       "modelId": "iris_3b",
       "resolvedRoute": "iris_3b",
       "provider": "iris_3b",
       "backend": "mlx",
-      "tier": "default",
+      "tier": "bf16",
       "mode": "text_to_image",
       "overlay": "lora",
       "rung": "bounded_decode",
@@ -88587,12 +88587,12 @@
       }
     },
     {
-      "id": "iris_3b:iris_3b:mlx:default:text_to_image:none:bounded_decode",
+      "id": "iris_3b:iris_3b:mlx:bf16:text_to_image:none:bounded_decode",
       "modelId": "iris_3b",
       "resolvedRoute": "iris_3b",
       "provider": "iris_3b",
       "backend": "mlx",
-      "tier": "default",
+      "tier": "bf16",
       "mode": "text_to_image",
       "overlay": "none",
       "rung": "bounded_decode",
@@ -243656,10 +243656,10 @@
     ],
     "instantid_realvisxl": [],
     "iris_3b": [
-      "iris_3b:iris_3b:candle:default:text_to_image:lora:bounded_decode",
-      "iris_3b:iris_3b:candle:default:text_to_image:none:bounded_decode",
-      "iris_3b:iris_3b:mlx:default:text_to_image:lora:bounded_decode",
-      "iris_3b:iris_3b:mlx:default:text_to_image:none:bounded_decode"
+      "iris_3b:iris_3b:candle:bf16:text_to_image:lora:bounded_decode",
+      "iris_3b:iris_3b:candle:bf16:text_to_image:none:bounded_decode",
+      "iris_3b:iris_3b:mlx:bf16:text_to_image:lora:bounded_decode",
+      "iris_3b:iris_3b:mlx:bf16:text_to_image:none:bounded_decode"
     ],
     "kolors": [
       "kolors:kolors:mlx:bf16:character_image:control:resident",
