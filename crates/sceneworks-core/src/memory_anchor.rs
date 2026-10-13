@@ -1415,6 +1415,12 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-25690/iris-3b-depth-bf16-mlx-evidence.json"),
     ),
     (
+        "docs/calibration/sc-25690/iris-3b-restore-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-25690/iris-3b-restore-bf16-candle-evidence.json"
+        ),
+    ),
+    (
         "docs/calibration/sc-25690/iris-3b-restore-bf16-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-25690/iris-3b-restore-bf16-mlx-evidence.json"),
     ),
