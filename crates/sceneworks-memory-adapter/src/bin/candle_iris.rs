@@ -5,8 +5,9 @@
 //!
 //! * **generation** is a registry [`Generator`] and takes the lane's default anchor composition —
 //!   staged residency — exactly the way the worker runs it: the staged (`Sequential`) load, the
-//!   provider's own safety check, its request scope, then the render. Conditioning ends at the
-//!   first solver step, denoise at `Progress::Decoding`.
+//!   provider's own safety check, its request scope, then the render. Conditioning ends when the
+//!   staged request reports the backbone load (`Progress::Loading(LoadPhase::Renderer)`: the text
+//!   encoder is gone and the backbone is not yet on the card), denoise at `Progress::Decoding`.
 //! * **depth** is NOT a generator: `candle-gen-iris`'s `IrisDepth`, one backbone forward on the
 //!   export's shipped empty-prompt states, driven for ONE estimate at the plan geometry.
 //! * **restoration** is a `Transform`: `IrisRestorer`, driven for ONE tiled pass at the plan
@@ -339,6 +340,36 @@ fn context(
     }
 }
 
+/// The capture boundary one generation progress event crosses, if any, advancing `phase`.
+///
+/// The engine's two request shapes report conditioning's end differently: a staged request emits
+/// `Progress::Loading(LoadPhase::Renderer)` once the text encoder is dropped and BEFORE the
+/// backbone loads; a resident one has no such event and its first solver step is the boundary.
+/// `protocol::next_reference_phase` is the one lifecycle every still arm converges on, so the first
+/// of the two closes conditioning and the later one is ignored. Splitting a staged request at the
+/// first solver step instead puts the backbone load and that step inside "conditioning", which is
+/// what made all three phases of the first staged capture read the same peak (sc-25690).
+fn generation_boundary(
+    phase: &mut protocol::ReferencePhase,
+    progress: &Progress,
+) -> Option<Boundary> {
+    let reference = match progress {
+        Progress::Loading(runtime_cuda::gen_core::LoadPhase::Renderer) => {
+            protocol::ReferenceBoundary::RendererLoad
+        }
+        Progress::Step { current: 1, .. } => protocol::ReferenceBoundary::FirstDenoiseStep,
+        Progress::Decoding => protocol::ReferenceBoundary::Decoding,
+        _ => return None,
+    };
+    let next = protocol::next_reference_phase(*phase, reference)?;
+    *phase = next;
+    match next {
+        protocol::ReferencePhase::Denoise => Some(Boundary::ConditioningDone),
+        protocol::ReferencePhase::Decode => Some(Boundary::ForwardDone),
+        protocol::ReferencePhase::Conditioning => None,
+    }
+}
+
 /// Run `planned` once on `loaded`, reporting each boundary as the request crosses it. Generation
 /// renders under the request scope the provider opens for `scoped`, the way the worker runs it.
 fn render(
@@ -354,10 +385,11 @@ fn render(
             scope
                 .configure_request(&mut request)
                 .map_err(|error| format!("configure the iris_3b request scope: {error}"))?;
-            let outcome = generator.generate(&request, &mut |progress| match progress {
-                Progress::Step { current: 1, .. } => boundary(Boundary::ConditioningDone),
-                Progress::Decoding => boundary(Boundary::ForwardDone),
-                _ => {}
+            let mut phase = protocol::ReferencePhase::Conditioning;
+            let outcome = generator.generate(&request, &mut |progress| {
+                if let Some(crossed) = generation_boundary(&mut phase, &progress) {
+                    boundary(crossed);
+                }
             });
             match outcome {
                 Ok(_) => scope
@@ -632,6 +664,43 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A staged generation request closes conditioning when the backbone is about to load, not at
+    /// the first solver step (which then changes nothing); a resident one, which reports no load
+    /// phase, closes it at that step. Both end the forward at `Decoding`.
+    ///
+    /// *Mutation that reds this:* drop the `Progress::Loading(LoadPhase::Renderer)` arm from
+    /// `generation_boundary` (the staged request then splits at the first solver step).
+    #[test]
+    fn a_staged_request_ends_conditioning_at_the_renderer_load() {
+        let boundaries = |events: &[Progress]| {
+            let mut phase = protocol::ReferencePhase::Conditioning;
+            events
+                .iter()
+                .enumerate()
+                .filter_map(|(index, event)| {
+                    generation_boundary(&mut phase, event).map(|boundary| (index, boundary))
+                })
+                .collect::<Vec<_>>()
+        };
+        let step = |current| Progress::Step { current, total: 2 };
+        let staged = [
+            Progress::Loading(runtime_cuda::gen_core::LoadPhase::TextEncoder),
+            Progress::Loading(runtime_cuda::gen_core::LoadPhase::Renderer),
+            step(1),
+            step(2),
+            Progress::Decoding,
+        ];
+        assert_eq!(
+            boundaries(&staged),
+            [(1, Boundary::ConditioningDone), (4, Boundary::ForwardDone)]
+        );
+        let resident = [step(1), step(2), Progress::Decoding];
+        assert_eq!(
+            boundaries(&resident),
+            [(0, Boundary::ConditioningDone), (2, Boundary::ForwardDone)]
+        );
+    }
 
     /// The restoration capture's request is one the restorer's own request resolution accepts,
     /// at the scale the capture names — so the anchor cannot die in planning on a control the

@@ -6151,13 +6151,17 @@
       // activations that grow with the model input's pixel count (both engines run fused/budgeted
       // attention, so the transient is linear in tokens), padded by `extrapolationFactor` above the
       // observed area. A request over the host budget is refused before load — never downscaled.
+      // The Candle `residentGb` is the card's own reading with the model loaded and nothing running
+      // (7306 MiB = 7.13 GiB over the idle baseline, sc-25690 catalog rehearsal run 38403658578):
+      // the gate compares against device-level free VRAM, which also counts the CUDA context, so
+      // the backbone's tensor bytes alone (6.5) under-stated an input smaller than the reference.
       "depth": {
         "admission": {
           "measured": false,
           "referenceModelPixels": 524288,
           "extrapolationFactor": 1.5,
           "mlx": { "residentGb": 6.5, "referencePeakGb": 9.4 },
-          "candle": { "residentGb": 6.5, "referencePeakGb": 8.4 }
+          "candle": { "residentGb": 7.2, "referencePeakGb": 8.4 }
         }
       },
       "mlx": {
