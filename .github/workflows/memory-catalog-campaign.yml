@@ -349,19 +349,27 @@ jobs:
         run: cargo fetch --locked
 
       - name: Build the MLX memory adapter
-        # `../cargo-target` outlives the job and is shared with every other lane on this box. It
-        # can hold mlx-rs proc-macro fingerprints whose dylibs are gone: cargo then calls
-        # `mlx-macros` fresh and rustc answers E0463 for `pmetal-mlx-rs`, deterministically, on
-        # every later run (sc-25690 runs 38340620426 and 38393909347). One retry after dropping
-        # exactly those three packages' artifacts repairs it; libmlx (`pmetal-mlx-sys`) is kept.
+        # `../cargo-target` outlives the job and is shared with every other lane on this box. On
+        # nax-macos-2 it reached a state where freshly built mlx-rs proc-macros are not found by
+        # the crate that uses them (E0463 on `pmetal-mlx-rs`, sc-25690 runs 38340620426,
+        # 38393909347, 38394612935) -- and dropping those packages' artifacts did not repair it,
+        # while the Iris real-weight lane's own target dir builds the same revision fine. So a
+        # failed build says what it saw and is retried ONCE in this lane's own target dir.
         run: |
           build() {
             cargo build --release --locked -p sceneworks-memory-adapter \
-              --features mlx --bin memory-mlx-adapter
+              --features mlx --bin memory-mlx-adapter "$@"
           }
           if ! build; then
-            echo "::warning::adapter build failed; dropping the mlx-rs proc-macro artifacts and retrying once"
-            cargo clean --release --locked -p mlx-macros -p mlx-internal-macros -p pmetal-mlx-rs
+            echo "::warning::adapter build failed in $CARGO_TARGET_DIR; retrying in this lane's own target dir"
+            ls -la "$CARGO_TARGET_DIR"/release/deps/libmlx_macros* \
+              "$CARGO_TARGET_DIR"/release/deps/libmlx_internal_macros* || true
+            ls -ld "$GITHUB_WORKSPACE" "$CARGO_TARGET_DIR" || true
+            env | grep -E '^(RUST|CARGO_BUILD|CARGO_PROFILE|CARGO_ENCODED)' || true
+            grep -nE 'rustflags|linker|strip|target-dir|^\[' "$CARGO_HOME/config.toml" || true
+            build -v 2>&1 | grep -E 'Running .*(mlx_macros|mlx_internal_macros|pmetal_mlx_rs)' | cut -c1-4000 || true
+            export CARGO_TARGET_DIR="$HOME/memory-catalog-adapter-target"
+            echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
             build
           fi
           echo "ADAPTER=$CARGO_TARGET_DIR/release/memory-mlx-adapter" >> "$GITHUB_ENV"
