@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:90c66ba2d8077adafa5107aa1e22492090c78b6021f55131ebf4b954ce8e22c7",
+    "sceneWorksRevision": "source-tree:b7fbcf55b9d085ae96305ad6a4552428d0574396c613f30b04e850c50b9f26a8",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "900cd5797cb38a6f8f136164705417ef76e3e460d8500591655ec3d11a2150ca"
+        "sha256": "24803359380460bd43482e079e60351f4b60d81329454a4f7e00e16156cb0b89"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -138,11 +138,11 @@
       "video": 11
     },
     "cells": 9590,
-    "publishedCells": 3864,
-    "elidedCells": 5726,
+    "publishedCells": 3868,
+    "elidedCells": 5722,
     "elidedByState": {
-      "Implemented": 1240,
-      "Missing": 4486
+      "Implemented": 1242,
+      "Missing": 4480
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 49,
@@ -13196,9 +13196,9 @@
       "coordinates": 2,
       "published": 0,
       "elided": 2,
-      "implemented": 0,
+      "implemented": 2,
       "states": {
-        "Missing": 2
+        "Implemented": 2
       }
     },
     {
@@ -13206,11 +13206,11 @@
       "backend": "candle",
       "rung": "bounded_decode",
       "coordinates": 2,
-      "published": 0,
-      "elided": 2,
+      "published": 2,
+      "elided": 0,
       "implemented": 0,
       "states": {
-        "Missing": 2
+        "Structurally N/A": 2
       }
     },
     {
@@ -13266,11 +13266,11 @@
       "backend": "mlx",
       "rung": "bounded_decode",
       "coordinates": 2,
-      "published": 0,
-      "elided": 2,
+      "published": 2,
+      "elided": 0,
       "implemented": 0,
       "states": {
-        "Missing": 2
+        "Structurally N/A": 2
       }
     },
     {
@@ -88446,6 +88446,190 @@
             "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
           }
         ]
+      }
+    },
+    {
+      "id": "iris_3b:iris_3b:candle:default:text_to_image:lora:bounded_decode",
+      "modelId": "iris_3b",
+      "resolvedRoute": "iris_3b",
+      "provider": "iris_3b",
+      "backend": "candle",
+      "tier": "default",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344",
+          "768x768",
+          "512x512"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "structurally-na",
+      "anchor": null,
+      "derivationDefined": true,
+      "state": "Structurally N/A",
+      "owningFamilyStory": 25684,
+      "owningModelStory": 25680,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs",
+            "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: iris_3b denoises in pixel space, so there is no latent, no autoencoder and no decoder scratch to tile (the decode phase is the [-1, 1] to RGB8 conversion)."
+          }
+        ],
+        "anchor": []
+      }
+    },
+    {
+      "id": "iris_3b:iris_3b:candle:default:text_to_image:none:bounded_decode",
+      "modelId": "iris_3b",
+      "resolvedRoute": "iris_3b",
+      "provider": "iris_3b",
+      "backend": "candle",
+      "tier": "default",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344",
+          "768x768",
+          "512x512"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "structurally-na",
+      "anchor": null,
+      "derivationDefined": true,
+      "state": "Structurally N/A",
+      "owningFamilyStory": 25684,
+      "owningModelStory": 25680,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs",
+            "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: iris_3b denoises in pixel space, so there is no latent, no autoencoder and no decoder scratch to tile (the decode phase is the [-1, 1] to RGB8 conversion)."
+          }
+        ],
+        "anchor": []
+      }
+    },
+    {
+      "id": "iris_3b:iris_3b:mlx:default:text_to_image:lora:bounded_decode",
+      "modelId": "iris_3b",
+      "resolvedRoute": "iris_3b",
+      "provider": "iris_3b",
+      "backend": "mlx",
+      "tier": "default",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344",
+          "768x768",
+          "512x512"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "structurally-na",
+      "anchor": null,
+      "derivationDefined": true,
+      "state": "Structurally N/A",
+      "owningFamilyStory": 25678,
+      "owningModelStory": 25679,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
+            "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: iris_3b denoises in pixel space, so there is no latent, no autoencoder and no decoder scratch to tile (the decode phase is the [-1, 1] to RGB8 conversion)."
+          }
+        ],
+        "anchor": []
+      }
+    },
+    {
+      "id": "iris_3b:iris_3b:mlx:default:text_to_image:none:bounded_decode",
+      "modelId": "iris_3b",
+      "resolvedRoute": "iris_3b",
+      "provider": "iris_3b",
+      "backend": "mlx",
+      "tier": "default",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344",
+          "768x768",
+          "512x512"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "structurally-na",
+      "anchor": null,
+      "derivationDefined": true,
+      "state": "Structurally N/A",
+      "owningFamilyStory": 25678,
+      "owningModelStory": 25679,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
+            "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: iris_3b denoises in pixel space, so there is no latent, no autoencoder and no decoder scratch to tile (the decode phase is the [-1, 1] to RGB8 conversion)."
+          }
+        ],
+        "anchor": []
       }
     },
     {
@@ -243471,7 +243655,12 @@
       "illustrious_xl_v2:sdxl:candle:q8:text_to_image:none:staged_residency"
     ],
     "instantid_realvisxl": [],
-    "iris_3b": [],
+    "iris_3b": [
+      "iris_3b:iris_3b:candle:default:text_to_image:lora:bounded_decode",
+      "iris_3b:iris_3b:candle:default:text_to_image:none:bounded_decode",
+      "iris_3b:iris_3b:mlx:default:text_to_image:lora:bounded_decode",
+      "iris_3b:iris_3b:mlx:default:text_to_image:none:bounded_decode"
+    ],
     "kolors": [
       "kolors:kolors:mlx:bf16:character_image:control:resident",
       "kolors:kolors:mlx:bf16:character_image:control:staged_residency",
