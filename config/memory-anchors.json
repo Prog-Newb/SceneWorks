@@ -3034,6 +3034,51 @@
       "overallAllocatorEnvelopeBytes": 14903410688
     },
     {
+      "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
+      "modelId": "iris_3b",
+      "modelFamily": "iris",
+      "route": "iris_3b",
+      "provider": "iris_3b",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-25690/iris-3b-bf16-candle-evidence.json",
+        "sha256": "9d7fe5acff9a375df4ea1fa42df99e6f965aae0642bacc4c597cf715f8c5c72d",
+        "recordId": "imc-8a22fa05fc612e4ab577",
+        "calibrationFingerprint": "iris-3b-candle-derived-2026-10-12-v1",
+        "loaderClosureDigest": "fc3867ae1fae57e37a1a7cf5bce9071f8c5c98f898f7470cd42824af5e2d8ae1"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 8837398528,
+        "denoise": 12360613888,
+        "decode": 12360613888
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 8837398528,
+        "denoise": 12360613888,
+        "decode": 12360613888
+      },
+      "overallAllocatorEnvelopeBytes": 12360613888
+    },
+    {
       "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
       "modelId": "iris_3b",
       "modelFamily": "iris",
@@ -12241,17 +12286,6 @@
       "route": "instantid",
       "backend": "mlx",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:iris_3b:candle:bf16",
-      "modelId": "iris_3b",
-      "modelFamily": "iris",
-      "route": "iris_3b",
-      "backend": "candle",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
