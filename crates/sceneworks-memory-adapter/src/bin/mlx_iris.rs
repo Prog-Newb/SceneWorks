@@ -317,6 +317,36 @@ fn depth_image(width: u32, height: u32, values: &[f32]) -> Result<Image, String>
     })
 }
 
+/// The capture boundary one generation progress event crosses, if any, advancing `phase`.
+///
+/// The engine's two request shapes report conditioning's end differently: a staged request emits
+/// `Progress::Loading(LoadPhase::Renderer)` once the text encoder is dropped and BEFORE the
+/// backbone loads; a resident one has no such event and its first solver step is the boundary.
+/// `protocol::next_reference_phase` is the one lifecycle every still arm converges on, so the first
+/// of the two closes conditioning and the later one is ignored. Splitting a staged request at the
+/// first solver step instead puts the backbone load and that step inside "conditioning", which is
+/// what made all three phases of the first staged capture read the same peak (sc-25690).
+fn generation_boundary(
+    phase: &mut protocol::ReferencePhase,
+    progress: &Progress,
+) -> Option<Boundary> {
+    let reference = match progress {
+        Progress::Loading(mlx_gen::gen_core::LoadPhase::Renderer) => {
+            protocol::ReferenceBoundary::RendererLoad
+        }
+        Progress::Step { current: 1, .. } => protocol::ReferenceBoundary::FirstDenoiseStep,
+        Progress::Decoding => protocol::ReferenceBoundary::Decoding,
+        _ => return None,
+    };
+    let next = protocol::next_reference_phase(*phase, reference)?;
+    *phase = next;
+    match next {
+        protocol::ReferencePhase::Denoise => Some(Boundary::ConditioningDone),
+        protocol::ReferencePhase::Decode => Some(Boundary::ForwardDone),
+        protocol::ReferencePhase::Conditioning => None,
+    }
+}
+
 /// Run `planned` once on `loaded`, reporting each boundary as the request crosses it.
 fn render(
     loaded: &Loaded,
@@ -326,10 +356,13 @@ fn render(
     match (loaded, planned) {
         (Loaded::Generation(generator), Planned::Generation(request)) => one_image(
             generator
-                .generate(request, &mut |progress| match progress {
-                    Progress::Step { current: 1, .. } => boundary(Boundary::ConditioningDone),
-                    Progress::Decoding => boundary(Boundary::ForwardDone),
-                    _ => {}
+                .generate(request, &mut {
+                    let mut phase = protocol::ReferencePhase::Conditioning;
+                    move |progress| {
+                        if let Some(crossed) = generation_boundary(&mut phase, &progress) {
+                            boundary(crossed);
+                        }
+                    }
                 })
                 .map_err(|error| format!("generate measured iris_3b render: {error}"))?,
         ),
@@ -728,6 +761,43 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A staged generation request closes conditioning when the backbone is about to load, not at
+    /// the first solver step (which then changes nothing); a resident one, which reports no load
+    /// phase, closes it at that step. Both end the forward at `Decoding`.
+    ///
+    /// *Mutation that reds this:* drop the `Progress::Loading(LoadPhase::Renderer)` arm from
+    /// `generation_boundary` (the staged request then splits at the first solver step).
+    #[test]
+    fn a_staged_request_ends_conditioning_at_the_renderer_load() {
+        let boundaries = |events: &[Progress]| {
+            let mut phase = protocol::ReferencePhase::Conditioning;
+            events
+                .iter()
+                .enumerate()
+                .filter_map(|(index, event)| {
+                    generation_boundary(&mut phase, event).map(|boundary| (index, boundary))
+                })
+                .collect::<Vec<_>>()
+        };
+        let step = |current| Progress::Step { current, total: 2 };
+        let staged = [
+            Progress::Loading(mlx_gen::gen_core::LoadPhase::TextEncoder),
+            Progress::Loading(mlx_gen::gen_core::LoadPhase::Renderer),
+            step(1),
+            step(2),
+            Progress::Decoding,
+        ];
+        assert_eq!(
+            boundaries(&staged),
+            [(1, Boundary::ConditioningDone), (4, Boundary::ForwardDone)]
+        );
+        let resident = [step(1), step(2), Progress::Decoding];
+        assert_eq!(
+            boundaries(&resident),
+            [(0, Boundary::ConditioningDone), (2, Boundary::ForwardDone)]
+        );
+    }
 
     /// The restoration capture's request is one the restorer's own request resolution accepts,
     /// at the scale the capture names — so the anchor cannot die in planning on a control the
