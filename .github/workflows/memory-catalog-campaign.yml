@@ -349,9 +349,21 @@ jobs:
         run: cargo fetch --locked
 
       - name: Build the MLX memory adapter
+        # `../cargo-target` outlives the job and is shared with every other lane on this box. It
+        # can hold mlx-rs proc-macro fingerprints whose dylibs are gone: cargo then calls
+        # `mlx-macros` fresh and rustc answers E0463 for `pmetal-mlx-rs`, deterministically, on
+        # every later run (sc-25690 runs 38340620426 and 38393909347). One retry after dropping
+        # exactly those three packages' artifacts repairs it; libmlx (`pmetal-mlx-sys`) is kept.
         run: |
-          cargo build --release --locked -p sceneworks-memory-adapter \
-            --features mlx --bin memory-mlx-adapter
+          build() {
+            cargo build --release --locked -p sceneworks-memory-adapter \
+              --features mlx --bin memory-mlx-adapter
+          }
+          if ! build; then
+            echo "::warning::adapter build failed; dropping the mlx-rs proc-macro artifacts and retrying once"
+            cargo clean --release --locked -p mlx-macros -p mlx-internal-macros -p pmetal-mlx-rs
+            build
+          fi
           echo "ADAPTER=$CARGO_TARGET_DIR/release/memory-mlx-adapter" >> "$GITHUB_ENV"
 
       - name: Bind the operator-staged identity bundles
