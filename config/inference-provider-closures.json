@@ -1,12 +1,12 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v4",
-  "inferenceRevision": "1e0b4c0c65371ab9c295cb59644dd769c8b4e37c",
+  "inferenceRevision": "6eadd2f3ba9fcc642cf86d78d3cc8fed9a1f605f",
   "providers": {
     "candle:bernini": {
       "crate": "crates/media/candle-gen/candle-gen-bernini",
-      "digest": "6048c030b9abc38778cc7d118e3483957fb62c867302c7fdec680e9452178604",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "c068b1ea2d76f54410d192fff3e4f42689e14ee0bb5b88f2bf9afd97224a8e1b",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -19,20 +19,21 @@
         "crates/media/candle-gen/candle-gen-perceptual",
         "crates/media/candle-gen/candle-gen-wan",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 259,
+      "sourceFileCount": 306,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 241
     },
     "candle:chroma1_base": {
       "crate": "crates/media/candle-gen/candle-gen-chroma",
-      "digest": "4cef936e52645acc2f1d2712dfedb615896a24fb3ddc35d9a767e8d904029ff6",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "5b0792a1eaf6f5ad20bbb8c33f088075b324c3389804c228532b5bf1961b8e46",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -47,20 +48,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 290,
+      "sourceFileCount": 337,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 251
     },
     "candle:chroma1_flash": {
       "crate": "crates/media/candle-gen/candle-gen-chroma",
-      "digest": "7e51a0262091b7e273db922b8a33ef2776d1de5ff27a2f3f1f9814de8d2341e2",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "fbcaba9ffcaaac617b4e729fa938561fd9e2d0108460cfd98ee51db06aef232b",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -75,20 +77,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 290,
+      "sourceFileCount": 337,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 251
     },
     "candle:chroma1_hd": {
       "crate": "crates/media/candle-gen/candle-gen-chroma",
-      "digest": "6eac7559560f94d78e6ebe8976dc0f0b36fb704f0622afc9d02bb3d4ad18276c",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "2ab82ccfcea675be142d9a3d9561dce9fee331a332db9c21431988cebeba4c00",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -103,20 +106,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 290,
+      "sourceFileCount": 337,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 251
     },
     "candle:flux1_dev": {
       "crate": "crates/media/candle-gen/candle-gen-flux",
-      "digest": "7a9b307f31d7c24073d576a4beebebd3f6282f5c9476e26a64444abec573732a",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "a9289afefc6023d8ce199e638c632e0f567b7104dd0faf9e6c778fa8f85bbe8b",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -130,20 +134,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 278,
+      "sourceFileCount": 325,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 250
     },
     "candle:flux1_schnell": {
       "crate": "crates/media/candle-gen/candle-gen-flux",
-      "digest": "9ac748a6de3d732869b660d74f82eda2a91f091cb323ec2a1b2538af4e92d640",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "17b9e3ca1dc1ca6a698fc5144f8bc3da955bff8e3df5b3a3a0131827dbaeec46",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -157,20 +162,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 278,
+      "sourceFileCount": 325,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 250
     },
     "candle:flux2_dev": {
       "crate": "crates/media/candle-gen/candle-gen-flux2",
-      "digest": "1b476d6c66e0956d7c6deb965de13f28e3101486f247c2b9e3e9d78737261931",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "22db4c3ecb77cbb81276b02dcfbd18f3bd923f40ff19f1a0db316523bcc4df63",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -180,20 +186,21 @@
         "crates/media/candle-gen/candle-gen-flux2",
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 282,
+      "sourceFileCount": 329,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 248
     },
     "candle:flux2_klein_9b": {
       "crate": "crates/media/candle-gen/candle-gen-flux2",
-      "digest": "2e6c781c6722a109e898b43ad09e8d2b7f46d29727b2a63b8884113d1b8aaa7a",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "61b74d0bd85c4c84c1a694ba102139dd122b4d11fd1c59f8d0667a4821a049ef",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -203,20 +210,21 @@
         "crates/media/candle-gen/candle-gen-flux2",
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 282,
+      "sourceFileCount": 329,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 248
     },
     "candle:ideogram_4": {
       "crate": "crates/media/candle-gen/candle-gen-ideogram",
-      "digest": "f8f60f064a2d057503285b75cb7d23c42b55b821f3474cae5c27eccf6b4c23ba",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "8c678acd9544e7295cb683cc6335b3239927fa80c17a5a8a2b350fb336c37692",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -227,20 +235,21 @@
         "crates/media/candle-gen/candle-gen-ideogram",
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 297,
+      "sourceFileCount": 344,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 249
     },
     "candle:ideogram_4_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-ideogram",
-      "digest": "bc94a270d5ec05b5f0489b3592c5c10d07343aab22acc821a03707f9a8ebbc09",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "daf68e1ec82c00136f1019939ef925ef02926a27f28e5596a8c94dfea5d8ace6",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -251,20 +260,21 @@
         "crates/media/candle-gen/candle-gen-ideogram",
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 297,
+      "sourceFileCount": 344,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 249
     },
     "candle:instantid": {
       "crate": "crates/media/candle-gen/candle-gen-instantid",
-      "digest": "325a6534011684433852b9ee0ce2dfbb36cb80891fec848d642d5700f13d2b17",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "8ee3d1773b383ef0818c16f4cecc3d76237b95b963998b992ade8a6c0938ce24",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -278,20 +288,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 266,
+      "sourceFileCount": 313,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 250
     },
     "candle:iris_3b": {
       "crate": "crates/media/candle-gen/candle-gen-iris",
-      "digest": "941eb19b5f23989b5ce39b219bf58ae233a9427fef5e979597cfb141c851b124",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "c88f1b0287206d7405f6536911143bcd85bc63d1c3773ccce4167da2994381bd",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -300,20 +311,21 @@
         "crates/media/candle-gen/candle-gen",
         "crates/media/candle-gen/candle-gen-iris",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 268,
+      "sourceFileCount": 315,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 239
     },
     "candle:iris_3b_depth": {
       "crate": "crates/media/candle-gen/candle-gen-iris",
-      "digest": "d7081611709e36d50dc21a0f4011e64e915b11c357f3eca69ec9d28ffcdd5b5b",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "e0ceb18675056bdc52f3ed7db47004e5576fcdb62127548a17b8f10a55f9cca3",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -322,20 +334,21 @@
         "crates/media/candle-gen/candle-gen",
         "crates/media/candle-gen/candle-gen-iris",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 268,
+      "sourceFileCount": 315,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 239
     },
     "candle:iris_3b_restore": {
       "crate": "crates/media/candle-gen/candle-gen-iris",
-      "digest": "8658779238b26e7f5c2dbcecaa35fe871429f52ccffd32e6c4a2876e0e797848",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "1c6ccc2ebdecb57ef7b9a89b4e9ad9a965a4d4ff58050949d9422d53f2b0ee2b",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -344,20 +357,21 @@
         "crates/media/candle-gen/candle-gen",
         "crates/media/candle-gen/candle-gen-iris",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 268,
+      "sourceFileCount": 315,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 239
     },
     "candle:kolors": {
       "crate": "crates/media/candle-gen/candle-gen-kolors",
-      "digest": "44a26555f7923bd212cad19d1971b2b5f8e2aba8126d4027d6c2d978fe6d521c",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "f17e062d93e94b2e00653cd07ec21c2b2349f51647bc4f775f281229879ba053",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -371,20 +385,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 274,
+      "sourceFileCount": 321,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 250
     },
     "candle:krea_2_raw": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "6d826107237e794e8063538d708592416687f28694cdf435f324e232a710c365",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "5d9e4ce7b3f222b1c11262ef948f2fc3313ab63ae41f487286a6dc831d00c2ae",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -401,20 +416,21 @@
         "crates/media/candle-gen/candle-gen-qwen-image",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 345,
+      "sourceFileCount": 392,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 253
     },
     "candle:krea_2_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "4f9c28264358cf9c7b9210a84a6e76ca48c837317835d8710c9903bb27ad52b8",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "3ed46cbfe44496752a837736e5ccc6bba3d20e33c3b9169eecd3a1db032d145b",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -431,20 +447,21 @@
         "crates/media/candle-gen/candle-gen-qwen-image",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 345,
+      "sourceFileCount": 392,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 253
     },
     "candle:krea_2_turbo_control": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "ad97c03eb0889c8a70e450d84ed694dc91427854c2389ff180e1d7a6edcbc8b6",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "3fa412ae3837e71dad1ba40e88944e013f3631efd7311adee6fd01191e35d651",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -461,20 +478,21 @@
         "crates/media/candle-gen/candle-gen-qwen-image",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 345,
+      "sourceFileCount": 392,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 253
     },
     "candle:lens": {
       "crate": "crates/media/candle-gen/candle-gen-lens",
-      "digest": "16058fddcb9ebc2d7adffa7a4e35be8ac6c7237a3c1e7f98448eb218b3d4885a",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "5b9bfd9c6b5692aa8608b449d704f14e39c4c0e71c6834f9f4f50802ee58a8c5",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -489,20 +507,21 @@
         "crates/media/candle-gen/candle-gen-perceptual",
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 328,
+      "sourceFileCount": 375,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 253
     },
     "candle:lens_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-lens",
-      "digest": "7a14a98ebbb350a59d8751063f32265cfa38a9b5233eea13bad505c54b891178",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "fce2bd22a100927ea5f29a37d1d9d8c4ebf9d78c3e039b4d27d011a633768fd3",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -517,20 +536,21 @@
         "crates/media/candle-gen/candle-gen-perceptual",
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 328,
+      "sourceFileCount": 375,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 253
     },
     "candle:ltx_2_3_distilled": {
       "crate": "crates/media/candle-gen/candle-gen-ltx",
-      "digest": "3ef01d824d8be74ea7ffe7723a919c0672c43eafe2e59d9ea893314bfc693483",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "b817fee6b9353321fcd31d9cf36d3e8f4d36491f75bcffc54e2a725702195155",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -543,20 +563,21 @@
         "crates/media/candle-gen/candle-gen-ltx",
         "crates/media/candle-gen/candle-gen-perceptual",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 315,
+      "sourceFileCount": 362,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 243
     },
     "candle:ltx_2_5_distilled": {
       "crate": "crates/media/candle-gen/candle-gen-ltx",
-      "digest": "01ccc60a4f1dcae400e16fc0b365eda98aee945f8968472a9ca70c67cc39316b",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "0ca78ddaeb3af3741f3de14203f9e576a93594a2325c4b3152b6c642a16b0211",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -569,20 +590,21 @@
         "crates/media/candle-gen/candle-gen-ltx",
         "crates/media/candle-gen/candle-gen-perceptual",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 315,
+      "sourceFileCount": 362,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 243
     },
     "candle:mage_flow": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "2475c75bf9ba63fd1203537512281e959cf5775f91a79aa39b3be07d13a74172",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "9f7abbd98c4cabc828a71b0e184e2027f70ab0fbb490ce43e35a6a2be8315a5f",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -598,20 +620,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 308,
+      "sourceFileCount": 355,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 252
     },
     "candle:mage_flow_base": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "59fa136fa68488ee3e9d85948398c8f32a65c60b31e9a4985592c744521b85b4",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "c28cd4ef8f7d089c18b4918a02fba91d7ef330f3514095119ac508033cb1a8c0",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -627,20 +650,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 308,
+      "sourceFileCount": 355,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 252
     },
     "candle:mage_flow_edit": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "2a54e80f565233ff7eb879376d084c45645f3b5a4bd4e728a5f60e6b1fd9d5b7",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "b13fcc13e285153e3a30777c1a99fcefccdc99ea91b660e0ffe010824b4181cb",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -656,20 +680,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 308,
+      "sourceFileCount": 355,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 252
     },
     "candle:mage_flow_edit_base": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "8ad3c8361a16072d375fa446e47d9282c06ff748277f74307f634e6bc1843b7f",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "9f4e15264639d79e0ed288b28fe4ce7952eddeb024af788485a6d018ac98891d",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -685,20 +710,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 308,
+      "sourceFileCount": 355,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 252
     },
     "candle:mage_flow_edit_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "2a1ec4341c4bb3b7db539461fa1a6a6ac66063d22c799c0c614ebad74016db69",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "c09c7213bc50ec0f6616b2b5ceb564d59df2726853ce3368b6d3be3de3aca11f",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -714,20 +740,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 308,
+      "sourceFileCount": 355,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 252
     },
     "candle:mage_flow_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "28d8f3eadd4d5ec8d4aa7976de92a905e54e34650f792139f658ad9543253a0f",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "b97fe6d2c6346eeab35f44e5ba95809d7a26a3f1cc71c06b48da217a7af9b2b9",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -743,20 +770,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 308,
+      "sourceFileCount": 355,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 252
     },
     "candle:minimax_h3": {
       "crate": "crates/media/candle-gen/candle-gen-minimax-h3",
-      "digest": "5372d6e658406683340522c17bcc23d4d63c9dc06a43d7231d3028ab6a04063d",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "22d6a992475b266ba7a9a3ffde33255c7fccd736f9d51b14f894d68d2db7ece0",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -772,20 +800,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 339,
+      "sourceFileCount": 386,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 252
     },
     "candle:pulid_flux": {
       "crate": "crates/media/candle-gen/candle-gen-pulid",
-      "digest": "86e317a95a11a7136328a6d2800d008135e713738e2675ca22b039f68a30f24f",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "29deb9fde0488bf4770753933d6df663ca5bd6601db4869b77776f1540871ffc",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -800,20 +829,21 @@
         "crates/media/candle-gen/candle-gen-pulid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 293,
+      "sourceFileCount": 340,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 251
     },
     "candle:qwen_image": {
       "crate": "crates/media/candle-gen/candle-gen-qwen-image",
-      "digest": "87bc20034df4c23274041e14a19ece9634d5c8ab8ed4d0bace293468cc7640c9",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "25b3fe5e23a91cb0af4466a9e9f5bfbf0c6ba039e019a68d4b2796984c23471c",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -822,20 +852,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-qwen-image",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 219,
+      "sourceFileCount": 266,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 237
     },
     "candle:qwen_image_2_1": {
       "crate": "crates/media/candle-gen/candle-gen-qwen-image-2-1",
-      "digest": "9e3b614fd35e7ab5d6be0cd3618c15863b04d54c14efac2233181abac85eacc7",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "09bf02adf9b200597dc08b91906677aee3b0012f85b3ec6eb0560b48259dc863",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -848,20 +879,21 @@
         "crates/media/candle-gen/candle-gen-perceptual",
         "crates/media/candle-gen/candle-gen-qwen-image-2-1",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 290,
+      "sourceFileCount": 337,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 243
     },
     "candle:qwen_image_edit": {
       "crate": "crates/media/candle-gen/candle-gen-qwen-image",
-      "digest": "f91be986506e9af61dc555dd50917c96cc8ff264705de5ab4291a3196aab647a",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "79429534152adce9a6863c6bd7aded197773805be13cbfb350565e63c0cad76a",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -870,20 +902,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-qwen-image",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 219,
+      "sourceFileCount": 266,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 237
     },
     "candle:sana_1600m": {
       "crate": "crates/media/candle-gen/candle-gen-sana",
-      "digest": "ec8d0eaee903369419daffb1c518ccfd1b643e2da85b7e7ab3b64239581b40d4",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "7c61c03ae787f22ebdcaa6ad6f4e09674ec9e909ad20c1fce35a390928b74251",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -892,20 +925,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sana",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 206,
+      "sourceFileCount": 253,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 237
     },
     "candle:sana_sprint_1600m": {
       "crate": "crates/media/candle-gen/candle-gen-sana",
-      "digest": "89953ad3d7f70b5044b3a4535aa568e797dc78dbecf36149b08b976a8091a47e",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "ff1b5952fd5c9ded589a69bfa6b5656f23cb8cc851919fa67291cc7c59aeeab7",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -914,20 +948,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sana",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 206,
+      "sourceFileCount": 253,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 237
     },
     "candle:scail2_14b": {
       "crate": "crates/media/candle-gen/candle-gen-scail2",
-      "digest": "0fdf51717dd583ad9914179895b9b8603c21123d2eba4b32d6e2b9b13c1c7409",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "93280cba227fd2432348a87bc9098f3795c776897bd237a8cd187c1bf276f897",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -940,20 +975,21 @@
         "crates/media/candle-gen/candle-gen-scail2",
         "crates/media/candle-gen/candle-gen-wan",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 248,
+      "sourceFileCount": 295,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 241
     },
     "candle:sd3_5_large": {
       "crate": "crates/media/candle-gen/candle-gen-sd3",
-      "digest": "13f18e2630c130bd3a76f2f13ec08a529749b05315180fea312db9fcd3c2897c",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "518495ce673ee6992a62878e762d38896848cd71b3c44cff336f4a01c6833025",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -965,20 +1001,21 @@
         "crates/media/candle-gen/candle-gen-perceptual",
         "crates/media/candle-gen/candle-gen-sd3",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 223,
+      "sourceFileCount": 270,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 248
     },
     "candle:sd3_5_large_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-sd3",
-      "digest": "cfe70a6ce1a2f7e8198f95dd25b1173ca1e46f02f7c5d887c78527c05a32ef97",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "6a1b7fef6ccb5922bea1fe70b15e9bb478b8d91227baee675ac579f6bb568915",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -990,20 +1027,21 @@
         "crates/media/candle-gen/candle-gen-perceptual",
         "crates/media/candle-gen/candle-gen-sd3",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 223,
+      "sourceFileCount": 270,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 248
     },
     "candle:sd3_5_medium": {
       "crate": "crates/media/candle-gen/candle-gen-sd3",
-      "digest": "f8a2faa91b3e5c72147bc4890b684539b369b73e7eab4dd2a6bf025406075ae2",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "e2fe8a86880eaee55f8c099efce6e4219ab08322ea2c7ad83ab381761732a435",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1015,20 +1053,21 @@
         "crates/media/candle-gen/candle-gen-perceptual",
         "crates/media/candle-gen/candle-gen-sd3",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 223,
+      "sourceFileCount": 270,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 248
     },
     "candle:sdxl": {
       "crate": "crates/media/candle-gen/candle-gen-sdxl",
-      "digest": "56417bf76acf06905303f59d5884ecea965d34746961bc448cb3f51f4e3feff7",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "15adf2372dd6a3ce0d116037d3e63ee6a19e7624a459e44d786687ae7fd93753",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1041,20 +1080,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 258,
+      "sourceFileCount": 305,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 249
     },
     "candle:sensenova_u1_8b": {
       "crate": "crates/media/candle-gen/candle-gen-sensenova",
-      "digest": "437f2407f2a83b33a32a1197a5958592e8b88922c7112a77728edebabc9f733c",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "61f0d7498d09109b00c63b2cb9f84917bd8a65dd2969957df58b983b970d8686",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1063,20 +1103,21 @@
         "crates/media/candle-gen/candle-gen",
         "crates/media/candle-gen/candle-gen-sensenova",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 259,
+      "sourceFileCount": 306,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 239
     },
     "candle:sensenova_u1_8b_fast": {
       "crate": "crates/media/candle-gen/candle-gen-sensenova",
-      "digest": "c51a184de399b7c802d96f8cf8765f0172b22b00d0c2d9d7d0d89d326642a40d",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "9028161150db7885ac715ea0434be65b39bcc8565360fe72ff446eb3499de152",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1085,20 +1126,21 @@
         "crates/media/candle-gen/candle-gen",
         "crates/media/candle-gen/candle-gen-sensenova",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 259,
+      "sourceFileCount": 306,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 239
     },
     "candle:wan2_2_i2v_14b": {
       "crate": "crates/media/candle-gen/candle-gen-wan",
-      "digest": "135460313f16da86342e73dfeb7510cca6c8de388d96b3507d5b2e0eff570db5",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "4b9d05b891ad872601fb9501bf5e91a31ba56c820e46653424d7398af1828204",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1110,20 +1152,21 @@
         "crates/media/candle-gen/candle-gen-perceptual",
         "crates/media/candle-gen/candle-gen-wan",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 235,
+      "sourceFileCount": 282,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 240
     },
     "candle:wan2_2_t2v_14b": {
       "crate": "crates/media/candle-gen/candle-gen-wan",
-      "digest": "bca5c7891745d2f248bb6d511fe7fd47df6d3067f2643998a613b07873f40e5e",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "40fd59db6bb855459a6cba4fbf3722717fe335e579ae0789434fb2219729fc94",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1135,20 +1178,21 @@
         "crates/media/candle-gen/candle-gen-perceptual",
         "crates/media/candle-gen/candle-gen-wan",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 235,
+      "sourceFileCount": 282,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 240
     },
     "candle:wan2_2_ti2v_5b": {
       "crate": "crates/media/candle-gen/candle-gen-wan",
-      "digest": "22db5e55fc57cb5c1a16a5964b212842d15e758d42780dfdd584db675055b071",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "d11373ca4e0056d18edfb6098f02fd27bd3ab1a3cfac6e6010203ceb98d14064",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1160,20 +1204,21 @@
         "crates/media/candle-gen/candle-gen-perceptual",
         "crates/media/candle-gen/candle-gen-wan",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 235,
+      "sourceFileCount": 282,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 240
     },
     "candle:yue2": {
       "crate": "crates/audio/candle-audio-yue2",
-      "digest": "df769264bc14f3e6c3d7e7966cd779616c8bc3d8d965dcec366a47a9b3c7d379",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "f403f4e1ec6d849ea061c2d9bc17ab53235cc04a665d6c5a8cf18a8b2353a78a",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/audio/candle-audio",
         "crates/audio/candle-audio-yue2",
@@ -1182,20 +1227,21 @@
         "crates/kernels/candle-quant-kernels",
         "crates/llm/candle-llm",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 252,
+      "sourceFileCount": 299,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 247
     },
     "candle:z_image": {
       "crate": "crates/media/candle-gen/candle-gen-z-image",
-      "digest": "09d92bdc89fc3046345d84d8c4a2dafd06d8ae2e6dbdaaba0fd106b60a51b5d3",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "db4fbe098b3fee66abdc0c9618f02c24f893bf5ca1d8ce02a88f7989e6c0c4cf",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1208,20 +1254,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-z-image",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 246,
+      "sourceFileCount": 293,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 249
     },
     "candle:z_image_control": {
       "crate": "crates/media/candle-gen/candle-gen-z-image",
-      "digest": "8d51e705dc7078da771e8fbb4bfbff83b529ca1f0b160a9cc164ad34ed6d1bc5",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "298a52a8492fcd78f823c14c422e73b182c4fe7f196fcee7a47f1e200c8a2eb9",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1234,20 +1281,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-z-image",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 246,
+      "sourceFileCount": 293,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 249
     },
     "candle:z_image_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-z-image",
-      "digest": "928b2da7b8d5b42eb198ede7407d084ce513969b439a144cd89e3f7b68d58085",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "1b4d4ed14cb70c0225ccedc9f3e2f90ea22da78c776c986f247c690e4b64d4b3",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1260,20 +1308,21 @@
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-z-image",
         "crates/media/candle-gen/vendor/candle-core",
-        "crates/media/candle-gen/vendor/candle-kernels"
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
       ],
       "universalCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 246,
+      "sourceFileCount": 293,
       "sharedContractFileCount": 132,
       "lockedPackageCount": 249
     },
     "mlx:bernini": {
       "crate": "crates/media/mlx-gen/mlx-gen-bernini",
-      "digest": "b84403571309c102007d9379a58543d7cae6c5d7bda8eb1d9a499bcd2662753e",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "272b6f875a71d11744ee43ec659904929694dfdd0cc591d95f57b4c6efe0cacb",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1296,8 +1345,8 @@
     },
     "mlx:chroma1_base": {
       "crate": "crates/media/mlx-gen/mlx-gen-chroma",
-      "digest": "916a71371236c66342901d175496f8eca02074a5b2a8c3d74813411e1f007ccc",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "17cb3d8ac091f6d55c46c8fb5de913615cee34e19924d650d1307a1910be69d1",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1323,8 +1372,8 @@
     },
     "mlx:chroma1_flash": {
       "crate": "crates/media/mlx-gen/mlx-gen-chroma",
-      "digest": "ea01b2cd88c366fd8c9fe96446726ad95100f1b9c623086cd9602fbb16d30093",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "2d40a6ff8619f376b3d675852011337e9a6d1c140e09b87e3afb1e45af61a844",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1350,8 +1399,8 @@
     },
     "mlx:chroma1_hd": {
       "crate": "crates/media/mlx-gen/mlx-gen-chroma",
-      "digest": "5eb31b744306a27ddbd1b930b698c733f202749a229f88ce30037e3f2b0db89c",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "de1746234d35b3683a6039eba91faac5ed04d9f4869457d2228fbd35e1aece43",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1377,8 +1426,8 @@
     },
     "mlx:flux1_dev": {
       "crate": "crates/media/mlx-gen/mlx-gen-flux",
-      "digest": "956493d083a70aeeffc42e993fe8d3acc6f5576b81330bc5ac857ab0a6aea0d4",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "64582d99ba1e948f6ec250e2ad8eb840fe9274da5686cee0c59b791b5b45fd1a",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1403,8 +1452,8 @@
     },
     "mlx:flux1_schnell": {
       "crate": "crates/media/mlx-gen/mlx-gen-flux",
-      "digest": "bbf43eb46d28ebdee410dec2f8629898a8eeab6e5aeb82391c0e2077bed8e4e5",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "17687f45e9e624a907f145c4d114985c30460dad9ff5e60b0315297c074808c2",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1429,8 +1478,8 @@
     },
     "mlx:flux2_dev": {
       "crate": "crates/media/mlx-gen/mlx-gen-flux2",
-      "digest": "0d0c26b145e920d85262d4743940baa16daab936dfe164cf8d6b3d9580a8b81b",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "3481e684fcf773125ffda0e55a625fc31c1f22129fd2a550f50575c436345f73",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1449,8 +1498,8 @@
     },
     "mlx:flux2_klein_9b": {
       "crate": "crates/media/mlx-gen/mlx-gen-flux2",
-      "digest": "43162c50eb02db53af9e8eea7d7de241826fc0ff31c713d70211eb5932d0aa9f",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "7b2145aaa98bc02c6a76a97f904887ee2c32d503c9f305cc792e3596202d9e5d",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1469,8 +1518,8 @@
     },
     "mlx:ideogram_4": {
       "crate": "crates/media/mlx-gen/mlx-gen-ideogram",
-      "digest": "c6f339a72e019acda987b187ec77006fe1b6698d1a152b6133ad7b0cb2ea209a",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "309bfcb883b0bcde8ca6bf879a30b01d4cb2970bca4216adfc2b9a7bba205d7c",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1490,8 +1539,8 @@
     },
     "mlx:ideogram_4_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-ideogram",
-      "digest": "240a0b71031e07dc946db1abc5753561a4514e6cd37a99eee9e9407885795097",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "c7f4c9db60a53ca9d4ce1bdd24e578cc361dc469324769761166d2910651161e",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1511,8 +1560,8 @@
     },
     "mlx:instantid": {
       "crate": "crates/media/mlx-gen/mlx-gen-instantid",
-      "digest": "1b7c545d046354cd1a8ac758aa55ff2ea024ebc8ed021637ea7b53ecbb9f428e",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "3946c9e008db39e4f764f6ad47ac8fe930db3ca26d2aec087f9c856ffc5fa57e",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1536,8 +1585,8 @@
     },
     "mlx:iris_3b": {
       "crate": "crates/media/mlx-gen/mlx-gen-iris",
-      "digest": "4132cda7bcd1dea412329efa898738c2b085755eed2b4d5abe1e6a7e582ac728",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "8080a097a9a150c22eb356e893ec1f4ffe48aa4457bbd1042fd107d8c91d8768",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1555,8 +1604,8 @@
     },
     "mlx:iris_3b_depth": {
       "crate": "crates/media/mlx-gen/mlx-gen-iris",
-      "digest": "a07be6738e30eebaffccfaf4b6455dcc166cdf2d6440f7fe5e258ea15426ecd1",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "d770c400ea23fb3a4420269b4ab2be7e07eb6d6acf145b5c19c03280cd3fdc42",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1574,8 +1623,8 @@
     },
     "mlx:iris_3b_restore": {
       "crate": "crates/media/mlx-gen/mlx-gen-iris",
-      "digest": "2b8a6589c66be2b057997f95f10a17d1c36ba3793472f19c25a695c82e1515f4",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "9bae63f0695492c08202a6a463d408c0ee6cf934385f2055f1f1a656b434ebc0",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1593,8 +1642,8 @@
     },
     "mlx:kolors": {
       "crate": "crates/media/mlx-gen/mlx-gen-kolors",
-      "digest": "52799d5e72226a4ea21643a64c4d449ce6eedec67459ed57cfed81f855d1308f",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "ca993cd7252767480d279ed8cf759642cfd84d9a42ba1bfa1dcb60cccf674863",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1618,8 +1667,8 @@
     },
     "mlx:krea_2_raw": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
-      "digest": "c9eb66902a536fce4fc8001d08e15ee8967279bb06f523d7c574601124166aa6",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "457bc3f1fef2ade44666b7a7d1216fdbfe1eec6033d420d76fd07510081d99d1",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1646,8 +1695,8 @@
     },
     "mlx:krea_2_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
-      "digest": "a30a2a875ebecbfb76e983a32e32cb76525ab1d5c2cc50c1b8c3ce81ddb418c2",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "f833fee239e95f2f6c213ca29d5b557d32f3edbb82697ef57c9118b6ee747977",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1674,8 +1723,8 @@
     },
     "mlx:krea_2_turbo_control": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
-      "digest": "f6879235d9fe1b4f31c4c35c77417059fe14ef0ce6927e6bf7cca2901897db2f",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "a1bd773dd3def52518f5a5feb7e0f37b2abbffde0a80dba28b378c8815885fc0",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1702,8 +1751,8 @@
     },
     "mlx:krea_realtime_14b": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea-realtime",
-      "digest": "87ccd15e5eacfc4ce47a8672db9837b361eca6f7f19231bb0a6b661fcf47ab87",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "7003bf3c1255797d4c32ab7185d83f98c7d26bb3032841025794020c4e2a181e",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1726,8 +1775,8 @@
     },
     "mlx:lens": {
       "crate": "crates/media/mlx-gen/mlx-gen-lens",
-      "digest": "7120eaadfe5d4e6ac4c1499a49d1dc22bf91899f1843727fb2a9bb128af34539",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "7dd42d4bdca4b09fa220a89cdd7218cf9e066b067e6b265b9002c7ee6e9dc32d",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1751,8 +1800,8 @@
     },
     "mlx:lens_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-lens",
-      "digest": "807998b45128a842ea1c078593f07c6f708c7c8a29a486ea6ec3e99aa38b5e9b",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "0b32e0c8e2fc56149dec6e2bd0ae828a6fbf16550b5e7ba15904a7ed2d8da087",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1776,8 +1825,8 @@
     },
     "mlx:ltx_2_3": {
       "crate": "crates/media/mlx-gen/mlx-gen-ltx",
-      "digest": "8d23061ff1d450871db33c560df44d989690c56c67cc3fa3934ed3e9e2ab9489",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "bcf6d69d272c89030519409f6486427f174b13870a54d34ca6327392b55ab547",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1799,8 +1848,8 @@
     },
     "mlx:ltx_2_5": {
       "crate": "crates/media/mlx-gen/mlx-gen-ltx",
-      "digest": "e3d2639cecfec06cc039924cff6ad363f6c6a6eb8a4a095966601cd62850a1f8",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "3716723618037455f103fda6d2fb23956e06cf777fff86b3eda7f92fafe1287e",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1822,8 +1871,8 @@
     },
     "mlx:mage_flow": {
       "crate": "crates/media/mlx-gen/mlx-gen-mage",
-      "digest": "9cf7a0d0765cadc5415efbed925b8e6c52d6abe7f09214907763893bf7f7aeb7",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "1ad5d32b0d2147f8af119233ad60910c9111fea25431d235248a3ce685d93f12",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1848,8 +1897,8 @@
     },
     "mlx:mage_flow_base": {
       "crate": "crates/media/mlx-gen/mlx-gen-mage",
-      "digest": "f616be8e1f1e5c88c7b29f9aad6463220d85816004b84ea9ff72b5a88b7d9ee2",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "9f06b94a18bed916d8b282616fa46baa508fa41f6e7da40f8ca63944ea95feb9",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1874,8 +1923,8 @@
     },
     "mlx:mage_flow_edit": {
       "crate": "crates/media/mlx-gen/mlx-gen-mage",
-      "digest": "56d491963cc93f04e662dcf22aaaed64abc548ddbc1def69043de4c4e6d3a5a9",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "e4944f7b7f8cc8cd9fcea17fd7cf22416b3e437a9f689095a128da45467c72d7",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1900,8 +1949,8 @@
     },
     "mlx:mage_flow_edit_base": {
       "crate": "crates/media/mlx-gen/mlx-gen-mage",
-      "digest": "d759a5c51a814ca4f43c1dfe9458f8e57b2186e83f5ca646fdee484fc68da05b",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "18f5a365ad8dfbfc879d60bf66b048c7e2eb11a221d515eeac3b511228744629",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1926,8 +1975,8 @@
     },
     "mlx:mage_flow_edit_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-mage",
-      "digest": "9368a87774a075afc28e659b10af2dbedd3d792bbaf14c9b424faa65efcc8332",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "f90d633ce9ccc9f76e64cab185fb3a76f7472cb53846dab0c481773bb84d7810",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1952,8 +2001,8 @@
     },
     "mlx:mage_flow_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-mage",
-      "digest": "92defbef3ebece53aba5f222e1aa4527ff00e09c9922bc5ae5e75c450e5fe80e",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "cf9432ba15db270b35ec0f24041b772e1b1e63693a98d437d5d1e17d9b654728",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1978,8 +2027,8 @@
     },
     "mlx:minimax_h3": {
       "crate": "crates/media/mlx-gen/mlx-gen-minimax-h3",
-      "digest": "f2832274202c4ab31e494b92506836a97c33a409dbd6a6af168cfc25539dcf85",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "18f9af35e3039674fc9e96a75afff1bc59fa5a7eb98d975bc913e5d03e8e01a7",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2004,8 +2053,8 @@
     },
     "mlx:pulid_flux": {
       "crate": "crates/media/mlx-gen/mlx-gen-pulid",
-      "digest": "6d95022832401e40228a147bd6fe5e4d67f6a96fae6120cdfa9721c7a6a6cd7f",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "89af9ba0f69ea2859c864a4a709666439147e245ebea40b460ba5664bc88d340",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2031,8 +2080,8 @@
     },
     "mlx:qwen_image": {
       "crate": "crates/media/mlx-gen/mlx-gen-qwen-image",
-      "digest": "2ef8052d44369d705e9571babd01d781bb3689c8d5c133118d1dcfec711983e4",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "8b0e8b069c3b8ccfd617de712633e9bf3f51ae5c4dc7095fca25f783a134c1bc",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2056,8 +2105,8 @@
     },
     "mlx:qwen_image_2_1": {
       "crate": "crates/media/mlx-gen/mlx-gen-qwen-image-2-1",
-      "digest": "618091474fa03852b00d7fd3af333f901d6495528352ffe6b6a0b3808fbdad2b",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "14969f0f4704e4dcdabd014955e7dfc5f3d6f38b1b2715a05075ae874196efa1",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2081,8 +2130,8 @@
     },
     "mlx:qwen_image_edit": {
       "crate": "crates/media/mlx-gen/mlx-gen-qwen-image",
-      "digest": "889257ae572386b11f61d17a41bfdfad66a88dd279a29f59c3585d94984e39af",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "4341387517cc141b82294d28b34abeb005a1c0c9bee307f0fe8b52de47fb8055",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2106,8 +2155,8 @@
     },
     "mlx:sana_1600m": {
       "crate": "crates/media/mlx-gen/mlx-gen-sana",
-      "digest": "fc75f0ab93e0ace0fe077cd3eda01f8de59e82879b818df5196834d989787b0b",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "d08943f8ff4ca4d161c01d39f5abee309e35a5e25f0ee996d8fba47a2a04e864",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2126,8 +2175,8 @@
     },
     "mlx:sana_sprint_1600m": {
       "crate": "crates/media/mlx-gen/mlx-gen-sana",
-      "digest": "3f3743a0172a8a0c0dc1d206f69c90943f2936449163de75cb8aae264e868a4d",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "113e17a7d54c2952adc66284cad1ca6d11b2270168667326d6d1f711f1ac3a57",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2146,8 +2195,8 @@
     },
     "mlx:scail2_14b": {
       "crate": "crates/media/mlx-gen/mlx-gen-scail2",
-      "digest": "4858578dac6dba1fcf63aa0dd0ce62aa4985b65ad147d6497e95372d29a1b4a7",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "24922842512e1567b118bc36dc6087a396272c366864b1eb3c5c55da4aee80df",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2170,8 +2219,8 @@
     },
     "mlx:sd3_5_large": {
       "crate": "crates/media/mlx-gen/mlx-gen-sd3",
-      "digest": "46e1738ff4392a38477adcf39a7bec88a86f8f2801a7d5fe05224b92011b852d",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "76fd5d52b589546075e20705f2b8949c0a23bab3e00c756dd6ff2ae806c94589",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2197,8 +2246,8 @@
     },
     "mlx:sd3_5_large_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-sd3",
-      "digest": "0e135b7568fe910dd366e11e5f883ce33e9bb6b70b3383f813a02cdb4c214ea2",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "b0dfd5bc556d0a3f5ce3ee7c8c6c3a0c0ab152da5136a8163135b4b9dcc46f2f",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2224,8 +2273,8 @@
     },
     "mlx:sd3_5_medium": {
       "crate": "crates/media/mlx-gen/mlx-gen-sd3",
-      "digest": "482b8c348f1c72cf08f8da6ae60786ed5353d457db337a5981053510d3be7c18",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "71186eedc43723690d7c82c2126acd737d98492cb9ade4795008d00e8eb4e48c",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2251,8 +2300,8 @@
     },
     "mlx:sdxl": {
       "crate": "crates/media/mlx-gen/mlx-gen-sdxl",
-      "digest": "e083cac80988676c3bdcd6b423997a3159c368ffc985617f18a17950dc2f1fd8",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "3749150961417f2efba68af3a0f3528e51babc633fcd6737ed7a4de5169a51e3",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2275,8 +2324,8 @@
     },
     "mlx:sensenova_u1_8b": {
       "crate": "crates/media/mlx-gen/mlx-gen-sensenova",
-      "digest": "3ab813dc33047fc63f6ab3326f451e3618058ae36637efd1642ae2f8483a7af4",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "7cddefba006b97f1daff779f0341778d026a592e6a9f4a3507db2b1914498935",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2294,8 +2343,8 @@
     },
     "mlx:sensenova_u1_8b_fast": {
       "crate": "crates/media/mlx-gen/mlx-gen-sensenova",
-      "digest": "275b79b36deb7fb15aa335642289006af651a90d6b23d22555e809b8a54c8860",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "1c719d2e21a79434ce151695839e2270ed3db5e427b54126c4b08a29874cc78d",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2313,8 +2362,8 @@
     },
     "mlx:wan2_2_i2v_14b": {
       "crate": "crates/media/mlx-gen/mlx-gen-wan",
-      "digest": "4bed78e7f0f81d955b350c2e974e3bceb1df983ded46f4f626a66309ee5ef114",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "34cf54247c28b2a0094c4b021353eeaed62ebab804b64b9e5b3a20d38a8a861d",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2336,8 +2385,8 @@
     },
     "mlx:wan2_2_t2v_14b": {
       "crate": "crates/media/mlx-gen/mlx-gen-wan",
-      "digest": "440afdb29399963fba32c0ce8f0e80fb6cb754b3dafbc7c5c3fcfe0b0ed89b99",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "8b059da8823ae33ab79f039291dd33ae7817cc2e9d95953917160f1b9a3f0cc4",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2359,8 +2408,8 @@
     },
     "mlx:wan2_2_ti2v_5b": {
       "crate": "crates/media/mlx-gen/mlx-gen-wan",
-      "digest": "7ac90b1f2de8831e605e78e2070cfc5f741f538fec6c11e4690dc4e6bfd03ca3",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "c75f00183a84f21c252af4bf167c1370afa63d960401096f7725d8504250fc39",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2382,8 +2431,8 @@
     },
     "mlx:z_image": {
       "crate": "crates/media/mlx-gen/mlx-gen-z-image",
-      "digest": "346f8e8064fa7bac6a09a32e66f6c96e929ff1b4a6aa723775c5ab11866d0edf",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "8606e0a15598f9292697e1890eba2f2ced30902427c9caca8766bb9b79483dd1",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2406,8 +2455,8 @@
     },
     "mlx:z_image_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-z-image",
-      "digest": "eb50cb69883362b5d66a5e610832a825ee41a08c870af75a9711783011b5a4c8",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "e385bd84fe5eaa1273077e1e3971ac8502a84698250209fb787f3b2e345eec22",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2430,8 +2479,8 @@
     },
     "mlx:z_image_turbo_control": {
       "crate": "crates/media/mlx-gen/mlx-gen-z-image",
-      "digest": "926f23eef8e9ce3b4e71445c7100cba21f9b7c7e19438a3d22c0278dd26a33a9",
-      "sharedContractDigest": "963835f1f0837a86b4de05566886de5d086f7a09054d18fce86f69043130f415",
+      "digest": "3211dbef84110a7f565d16e7c9e9594228fa154bd63de74f9849cfd4c88316ca",
+      "sharedContractDigest": "a8af4cf5acb23b7fd1373e1c0863ad96a7787d601b606c3c59f194fe3ec6b81b",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
