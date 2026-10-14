@@ -11343,17 +11343,6 @@ mod tests {
         assert_eq!(asset["lineage"]["parents"], json!(["asset-video"]));
     }
 
-    /// sc-12371: `asset.file` MEASURES the clip; `recipe.normalizedSettings` REPLAYS the ask. The
-    /// same fact feeds both and they must not be given the same number.
-    ///
-    /// The trap this pins is a real one that nearly shipped: making `file.duration` honest by
-    /// changing the fact's `duration` key ALSO rewrites `normalizedSettings.duration`, which
-    /// sc-12324's "re-run this generation" rebuilds the payload from. A 6 s ask would replay as
-    /// 5.96 s — off the model's `limits.durations` menu, which sc-12347 now enforces server-side,
-    /// so the re-run could be refused outright.
-    ///
-    /// DISCRIMINATING: the measured pair (149 frames / 5.96 s) differs from the requested pair
-    /// (6.0 s), so collapsing the two in EITHER direction is RED here.
     #[test]
     fn video_sidecar_persists_observed_veda_separately_from_replay_controls() {
         let controls = json!({"enabled":true,"generated":"90%","reference":"12",
@@ -11392,6 +11381,17 @@ mod tests {
             .is_none());
     }
 
+    /// sc-12371: `asset.file` MEASURES the clip; `recipe.normalizedSettings` REPLAYS the ask. The
+    /// same fact feeds both and they must not be given the same number.
+    ///
+    /// The trap this pins is a real one that nearly shipped: making `file.duration` honest by
+    /// changing the fact's `duration` key ALSO rewrites `normalizedSettings.duration`, which
+    /// sc-12324's "re-run this generation" rebuilds the payload from. A 6 s ask would replay as
+    /// 5.96 s — off the model's `limits.durations` menu, which sc-12347 now enforces server-side,
+    /// so the re-run could be refused outright.
+    ///
+    /// DISCRIMINATING: the measured pair (149 frames / 5.96 s) differs from the requested pair
+    /// (6.0 s), so collapsing the two in EITHER direction is RED here.
     #[test]
     fn video_sidecar_file_measures_the_clip_while_normalized_settings_replay_the_ask() {
         let fact = json!({
