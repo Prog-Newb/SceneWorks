@@ -855,6 +855,7 @@ async fn generate_flux2_edit_stream(
         (adapter_count > 0).then(|| format!("adapters:{adapter_count}")),
     );
     let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        native_batch: 1,
         conditioning_windows: None,
         width,
         height,
@@ -1432,6 +1433,7 @@ async fn generate_flux2_dev_control_stream(
         None => memory_plan,
     };
     let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        native_batch: 1,
         conditioning_windows: None,
         width,
         height,

@@ -628,6 +628,41 @@ pub(crate) fn manifest_measured_pixels(manifest: &JsonObject<String, Value>) -> 
         .unwrap_or(MANIFEST_ROW_DEFAULT_MEASURED_PIXELS)
 }
 
+/// The geometry the derivation law prices for one request (sc-25690).
+///
+/// Normally the request's own. An entry that DECLARES its per-megapixel activation term
+/// (`candle.imageActivationGbPerMegapixel` — Iris-3B) has every image of a native prompt batch and
+/// every megapixel beyond the ONE image at 1024² its floors carry charged by
+/// `lane_controls::declared_activation_overlay_bytes`, which reaches every candidate here as
+/// `runtime_overlay_bytes`. The law scales an anchor's activation residue by the request's batch
+/// and area too, so pricing such an entry at the request's own geometry would charge the same
+/// activations twice: once declared, once derived. For a declaring entry the law therefore prices
+/// one image at no more than the floors' area, and the declared term carries the rest.
+///
+/// The admitted `MemoryGeometry` the provider's request scope receives is NOT this value — it
+/// stays the request's own, because the scope bounds the images a request may render by `batch`.
+fn law_geometry(manifest: &JsonObject<String, Value>, geometry: MemoryGeometry) -> MemoryGeometry {
+    if crate::image_jobs::declared_activation_gb_per_megapixel(manifest).is_none() {
+        return geometry;
+    }
+    let floor_pixels = crate::image_jobs::DECLARED_ACTIVATION_FLOOR_PIXELS;
+    let pixels = u64::from(geometry.width) * u64::from(geometry.height);
+    let (width, height) = if pixels > floor_pixels {
+        let edge = u32::try_from(floor_pixels.isqrt())
+            .unwrap_or(u32::MAX)
+            .max(1);
+        (edge, edge)
+    } else {
+        (geometry.width, geometry.height)
+    };
+    MemoryGeometry {
+        width,
+        height,
+        batch: 1,
+        ..geometry
+    }
+}
+
 fn scale_ideogram_hires_envelope(
     engine_id: &str,
     mode: &MemoryMode,
@@ -1394,8 +1429,11 @@ fn synthesize_estimate_floors(
     // currency are the only guards left, and a cell with no anchor row falls through to
     // `floor_anchor` below -- the contract-only per-rung ladder (sc-22664), never a bare
     // manifest scalar repeated across every rung.
+    // The geometry the LAW prices — the request's own, except where the manifest's declared
+    // activation term already charges the batch and the area (see `law_geometry`).
+    let law = law_geometry(manifest, geometry);
     let anchor = candle_image_anchor(
-        anchors, engine_id, model_id, contract, tier_key, mode, overlay, geometry,
+        anchors, engine_id, model_id, contract, tier_key, mode, overlay, law,
     );
     let components = crate::video_admission::anchor_component_bytes(contract.asset_facts);
     // The contract-only basis for a staged composition with no anchor: the staged row treated as
@@ -1436,9 +1474,9 @@ fn synthesize_estimate_floors(
         // Every rung is priced from THIS, never from the staged rung's number (sc-22664).
         let regime = request_regime(&engaged, &parameters);
         let request = |regime: RequestRegime| ImageDeriveRequest {
-            width: geometry.width,
-            height: geometry.height,
-            batch: geometry.batch.max(1),
+            width: law.width,
+            height: law.height,
+            batch: law.batch.max(1),
             conditioning_tokens: None,
             regime,
         };

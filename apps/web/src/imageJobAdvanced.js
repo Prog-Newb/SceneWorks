@@ -26,6 +26,14 @@ export function buildImageJobAdvanced(state) {
     sampler,
     scheduler,
     schedulerShift,
+    // sc-25681: a model with a schedule-shift axis but no scheduler menu (Iris-3B,
+    // `image.supportsSchedulerShift`) — the shift rides on its own.
+    supportsSchedulerShift,
+    // sc-25681: the CFG interval `[start, end]` (already resolved by the studio: `null` when the
+    // model does not offer one, the default full interval is selected, or CFG is off) and the
+    // caption-overflow policy (`"default"` = the checkpoint's own).
+    cfgInterval,
+    captionOverflow,
     // Step / guidance overrides.
     stepsOverride,
     guidanceOverride,
@@ -126,11 +134,20 @@ export function buildImageJobAdvanced(state) {
     // (non-default) scheduler is active — it shapes that curated schedule;
     // the default scheduler keeps the engine's resolution-native shift, so
     // emitting it there would override the no-op default (epic 7114).
-    ...(scheduler &&
-    scheduler !== "default" &&
+    // sc-25681: a model that declares the shift axis without a scheduler menu (Iris-3B) sends
+    // its shift regardless — there is no scheduler picker to gate it on.
+    ...(((scheduler && scheduler !== "default") || supportsSchedulerShift) &&
     Number.isFinite(Number(schedulerShift))
       ? { schedulerShift: Number(schedulerShift) }
       : {}),
+    // CFG interval (sc-25681): emitted only for a non-default interval on a model that offers
+    // one, with CFG on — the studio resolves all three into `cfgInterval` (null otherwise), so a
+    // default recipe stays byte-identical and an interval the engine would refuse never rides.
+    ...(Array.isArray(cfgInterval) && cfgInterval.length === 2
+      ? { cfgInterval: [Number(cfgInterval[0]), Number(cfgInterval[1])] }
+      : {}),
+    // Caption-overflow policy (sc-25681): "default" (the checkpoint's own) is omitted.
+    ...(captionOverflow && captionOverflow !== "default" ? { captionOverflow } : {}),
     // Step / guidance overrides — empty string means "use the model
     // default", which the worker reads off MODEL_TARGETS.
     ...(stepsOverride !== "" && Number.isFinite(Number(stepsOverride))

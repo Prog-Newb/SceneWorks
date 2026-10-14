@@ -145,6 +145,7 @@ import {
 } from "../components/generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { useBatchPromptState } from "./imageStudio/useBatchPromptState.js";
+import { CAPTION_OVERFLOW_LABELS, promptBatchSize, resolveCfgInterval } from "./imageStudio/samplingControls.js";
 import { usePidState, useStrictControlState } from "./imageStudio/useImageControlState.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import {
@@ -198,9 +199,12 @@ import { resolveJobResultAssets } from "../jobResultAssets.js";
 import {
   availableUpscaleEngines as upscaleEnginesForPlatform,
   upscaleEngineHasSoftness,
+  upscaleEngineIsRestoration,
   upscaleFactorsForEngine,
   useUpscaleEngineFallback,
 } from "../upscaleEngines.js";
+import { IRIS_RESTORE_DEFAULTS, irisControlsFromRecord, irisRestoreControls, restorePlanBodyForRenders } from "../irisRestore.js";
+import { IrisRestoreControls } from "../components/IrisRestoreControls.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { STYLE_GROUPS, styleHintForId, styleTextForId } from "../data/styleCatalog.js";
@@ -211,6 +215,10 @@ import {
   guidanceDefaultFromModel,
   guidanceMethodDefaultFromModel,
   guidanceMethodOptionsFromModel,
+  maxStepsForModel,
+  negativePromptInertAtGuidance,
+  guidanceIsOff,
+  patchGridHint,
   samplerDefaultFromModel,
   samplerOptionsFromModel,
   schedulerDefaultFromModel,
@@ -329,6 +337,8 @@ export function ImageStudio() {
     gpuOptions,
     imageModels,
     models = [],
+    // API token for the Iris restoration plan preview (sc-25683).
+    token = "",
     modelCatalogStatus = "ready",
     jobs = [],
     importAsset,
@@ -578,7 +588,11 @@ export function ImageStudio() {
   // model changes.
   const [sampler, setSampler] = useState(saved.sampler ?? "default");
   const [scheduler, setScheduler] = useState(saved.scheduler ?? "default");
-  const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? 3.0);
+  const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? null);
+  // sc-25681: the CFG interval (two raw inputs, "" = the model's own bound) and the caption-
+  // overflow policy ("default" = the checkpoint's own), for a model that declares them (Iris-3B).
+  const [cfgInterval, setCfgInterval] = useState(saved.cfgInterval ?? "");
+  const [captionOverflow, setCaptionOverflow] = useState(saved.captionOverflow ?? "default");
   // Guidance method (epic 7434). "cfg" is the engine-standard no-op default; the
   // picker only surfaces alternatives a model advertises on the active backend
   // (CFG++ on the SDXL family / MLX). Rides `advanced.guidanceMethod`.
@@ -647,6 +661,11 @@ export function ImageStudio() {
   const [upscaleEngine, setUpscaleEngine] = useState(saved.upscaleEngine ?? "real-esrgan");
   // SeedVR2 detail/softness knob (0..1, sc-4815) — only used by the seedvr2 engine.
   const [upscaleSoftness, setUpscaleSoftness] = useState(saved.upscaleSoftness ?? 0);
+  // Iris restoration controls (sc-25683) — only used by the `iris` engine, which is sized by `scale`.
+  const [upscaleRestore, setUpscaleRestore] = useState(() =>
+    irisRestoreControls(saved.upscaleRestore ?? IRIS_RESTORE_DEFAULTS),
+  );
+  const [restorePlanStatus, setRestorePlanStatus] = useState({ ready: false, blocked: false, error: null });
   const [hiresFixEnabled, setHiresFixEnabled] = useState(saved.hiresFixEnabled ?? false);
   const [hiresFixSteps, setHiresFixSteps] = useState(saved.hiresFixSteps ?? 0);
   const [hiresFixDenoisingStrength, setHiresFixDenoisingStrength] = useState(
@@ -670,6 +689,17 @@ export function ImageStudio() {
   const togglePromptTool = useCallback(
     (tool) => setPromptTool((current) => (current === tool ? null : tool)),
     [],
+  );
+  const depthControlAssets = useMemo(
+    () =>
+      assets.filter(
+        (asset) =>
+          asset.type === "depth" &&
+          asset.projectId === activeProject?.id &&
+          !asset.status?.trashed &&
+          !asset.status?.rejected,
+      ),
+    [assets, activeProject?.id],
   );
   const editImageAssets = useMemo(
     () =>
@@ -708,11 +738,14 @@ export function ImageStudio() {
   }, [upscaleFactor]);
 
   // Engines offered in the picker; AuraSR is dropped on every platform (sc-3668 / sc-5499).
-  const availableUpscaleEngines = upscaleEnginesForPlatform(macCapabilities);
+  // Iris restoration (sc-25683) is offered only once its own `iris_3b_restore` task is installed.
+  const availableUpscaleEngines = upscaleEnginesForPlatform(macCapabilities, models);
+  const irisUpscale = upscaleEnabled && upscaleEngineIsRestoration(upscaleEngine);
   // If a restored/saved engine is gated out (e.g. a stale saved AuraSR selection), fall back to the
   // default real-esrgan engine so the user never submits an aura-sr job the native workers refuse (sc-8853).
   useUpscaleEngineFallback({
     macCapabilities,
+    models,
     upscaleEngine,
     setUpscaleEngine,
     upscaleFactor,
@@ -978,10 +1011,16 @@ export function ImageStudio() {
       : [];
   const controlActive = showControlPanel && Boolean(activeControlMode);
   const controlIsImageMode = controlActive && activeControlMode !== "pose";
+  // A saved depth-map asset (Iris-3B, sc-25682) IS a depth control map: it is offered only in depth
+  // mode and always rides as the passthrough `advanced.controlImage` — the worker derives the
+  // near-bright control image from its raw map (it is never re-estimated as if it were a photo).
+  const controlAssetIsDepth =
+    activeControlMode === "depth" && depthControlAssets.some((asset) => asset.id === controlImageAssetId);
+  const effectiveControlPassthrough = controlImagePassthrough || controlAssetIsDepth;
   const controlPreprocessSourceId =
-    controlIsImageMode && !controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
+    controlIsImageMode && !effectiveControlPassthrough && controlImageAssetId ? controlImageAssetId : null;
   const controlPassthroughId =
-    controlIsImageMode && controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
+    controlIsImageMode && effectiveControlPassthrough && controlImageAssetId ? controlImageAssetId : null;
 
   // Images each resolved-prompt job emits: the pose count when poses are selected (they
   // replace `count` variations), else `count`. Total batch image count feeds the run label
@@ -1436,6 +1475,32 @@ export function ImageStudio() {
   // these two for the same reason (`showGuidance` / `showNegative`).
   const supportsGuidance = selectedModel?.image?.supportsGuidance !== false;
   const supportsNegativePrompt = selectedModel?.image?.supportsNegativePrompt !== false;
+  // sc-25679: a model whose negative prompt IS the CFG unconditional
+  // (`image.negativePromptRequiresGuidance`, Iris-3B) refuses one with CFG off. The field stays
+  // visible (the axis exists — raise Guidance and it applies) but is DISABLED and not sent while
+  // the effective guidance is 1.0: a transient inertness, the Wan-Lightning precedent above.
+  const negativePromptCfgOff = negativePromptInertAtGuidance(selectedModel, guidanceOverride);
+  // sc-25681: the remaining declared sampling controls. A schedule-shift axis without a scheduler
+  // menu shows the Schedule shift control on its own; the CFG interval is disabled (and not sent)
+  // while CFG is off, exactly like the CFG-bound negative prompt; the caption-overflow menu only
+  // appears for a model that offers policies.
+  const supportsSchedulerShift = selectedModel?.image?.supportsSchedulerShift === true;
+  // `null` = no explicit value yet (a fresh workspace, or a recipe that recorded none): the model's
+  // own default, which for a shift-axis model (Iris-3B) is its checkpoint's flow shift — not the
+  // historical blanket 3.0, which would be SENT for it and silently change the schedule.
+  const effectiveSchedulerShift = schedulerShift ?? schedulerShiftDefaultFromModel(selectedModel);
+  const showSchedulerShift = supportsSchedulerShift || (showSchedulerPicker && scheduler !== "default");
+  const supportsCfgInterval = supportsGuidance && selectedModel?.image?.supportsCfgInterval;
+  const cfgIntervalDisabled = guidanceIsOff(selectedModel, guidanceOverride);
+  const { interval: resolvedCfgInterval, error: cfgIntervalError } = resolveCfgInterval({
+    model: supportsGuidance ? selectedModel : null,
+    text: cfgInterval,
+    guidanceOverride,
+  });
+  const captionOverflowChoices = selectedModel?.image?.captionOverflowPolicies ?? [];
+  const outgoingCaptionOverflow = captionOverflowChoices.includes(captionOverflow)
+    ? captionOverflow
+    : "default";
   const hiresFixModelCapable = Boolean(
     supportsImg2img || selectedModel?.family === "sdxl",
   );
@@ -1493,6 +1558,8 @@ export function ImageStudio() {
     setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions));
     setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions));
     setSchedulerShift(schedulerShiftDefaultFromModel(selectedModel));
+    setCfgInterval("");
+    setCaptionOverflow("default");
     setGuidanceMethod(
       preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions),
     );
@@ -1834,7 +1901,16 @@ export function ImageStudio() {
     setGuidanceOverride(rawSettings.guidanceScale ?? "");
     setSampler(rawSettings.sampler ?? "default");
     setScheduler(rawSettings.scheduler ?? "default");
-    setSchedulerShift(rawSettings.schedulerShift ?? rawSettings.timestepShift ?? 3.0);
+    setSchedulerShift(rawSettings.schedulerShift ?? rawSettings.timestepShift ?? null);
+    // sc-25681: the recorded CFG interval / caption-overflow policy (absent = the model's own).
+    setCfgInterval(rawSettings.cfgInterval?.join?.(", ") ?? "");
+    setCaptionOverflow(rawSettings.captionOverflow ?? "default");
+    // sc-25681: an image of a native prompt batch reopens the whole batch.
+    const batch = rawSettings.promptBatch;
+    if (Array.isArray(batch) && batch.length > 1) {
+      setBatchMode(true);
+      setBatchPromptsText(batch.join(batch.some((p) => p.includes("\n")) ? "\n---\n" : "\n"));
+    }
     setGuidanceMethod(rawSettings.guidanceMethod ?? "cfg");
     setCharacterId(settings.characterId ?? "");
     setCharacterLookId(settings.characterLookId ?? "");
@@ -1919,6 +1995,11 @@ export function ImageStudio() {
     if (typeof upscale?.softness === "number") {
       setUpscaleSoftness(upscale.softness);
     }
+    // Reopen an Iris restoration's applied controls (sc-25683).
+    const irisControls = irisControlsFromRecord(upscale);
+    if (irisControls) {
+      setUpscaleRestore(irisControls);
+    }
     const hiresFix = launchRequest.hiresFix ?? rawSettings.hiresFix ?? settings.hiresFix;
     setHiresFixEnabled(Boolean(hiresFix?.enabled));
     setHiresFixSteps(hiresFix?.steps ?? 0);
@@ -1947,6 +2028,9 @@ export function ImageStudio() {
   const { width, height, invalid: dimensionsInvalid } = dimensionEval;
   // A precise, user-facing ERROR (never a raw requirement): names this model's actual range/stride.
   const dimensionError = dimensionConstraintMessage(dimensionEval);
+  // sc-25681: a model that shows its patch grid below a declared side (Iris-3B, 1024) says so
+  // whenever the effective width or height is under it.
+  const patchGridNotice = patchGridHint(selectedModel, width, height);
   const hiresFixTargetWidth = Math.round(width * hiresFixUpscaleBy);
   const hiresFixTargetHeight = Math.round(height * hiresFixUpscaleBy);
   const hiresFixTargetInvalid =
@@ -2093,6 +2177,11 @@ export function ImageStudio() {
       ["sampler", setSampler],
       ["scheduler", setScheduler],
       ["schedulerShift", setSchedulerShift],
+      [
+        "cfgInterval",
+        (value) => setCfgInterval(value?.join?.(", ") ?? ""),
+      ],
+      ["captionOverflow", setCaptionOverflow],
       ["guidanceMethod", setGuidanceMethod],
       ["textEncoderModel", setTextEncoderModel],
       ["ipAdapterScale", setIpAdapterScale],
@@ -2105,6 +2194,7 @@ export function ImageStudio() {
       ["upscaleFactor", setUpscaleFactor],
       ["upscaleEngine", setUpscaleEngine],
       ["upscaleSoftness", setUpscaleSoftness],
+      ["upscaleRestore", (value) => setUpscaleRestore(irisRestoreControls(value))],
       ["hiresFixEnabled", setHiresFixEnabled],
       ["hiresFixSteps", setHiresFixSteps],
       ["hiresFixDenoisingStrength", setHiresFixDenoisingStrength],
@@ -2145,7 +2235,9 @@ export function ImageStudio() {
       steps: finiteNumberOrUndefined(stepsOverride),
       sampler,
       scheduler,
-      schedulerShift,
+      schedulerShift: effectiveSchedulerShift,
+      ...(resolvedCfgInterval ? { cfgInterval: resolvedCfgInterval } : {}),
+      ...(outgoingCaptionOverflow !== "default" ? { captionOverflow: outgoingCaptionOverflow } : {}),
       guidanceMethod,
       ...(supportsTextEncoderSelection &&
       selectedTextEncoderModel !== defaultTextEncoderId
@@ -2155,6 +2247,7 @@ export function ImageStudio() {
       upscaleFactor,
       upscaleEngine,
       upscaleSoftness,
+      upscaleRestore,
       hiresFixEnabled,
       hiresFixSteps,
       hiresFixDenoisingStrength,
@@ -2194,6 +2287,7 @@ export function ImageStudio() {
     upscaleFactor,
     upscaleEngine,
     upscaleSoftness,
+    upscaleRestore,
     hiresFixEnabled,
     hiresFixSteps,
     hiresFixDenoisingStrength,
@@ -2218,6 +2312,8 @@ export function ImageStudio() {
     sampler,
     scheduler,
     schedulerShift,
+    cfgInterval,
+    captionOverflow,
     guidanceMethod,
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
@@ -2281,6 +2377,10 @@ export function ImageStudio() {
           dimensionError ||
           "Width and height must each be between 256 and 4096.",
       );
+      return;
+    }
+    if (cfgIntervalError) {
+      setSubmitError(cfgIntervalError);
       return;
     }
     setSubmitting(true);
@@ -2415,7 +2515,7 @@ export function ImageStudio() {
       // preset stack composed or a replayed recipe restored — the field is hidden for it, so
       // sending text the user cannot see or edit (and the worker's `resolve_negative_prompt`
       // discards anyway) would be a ghost input recorded on this job's recipe.
-      negativePrompt: supportsNegativePrompt
+      negativePrompt: supportsNegativePrompt && !negativePromptCfgOff
         ? stackActive
           ? composedStack.negativePrompt
           : negativePrompt
@@ -2454,6 +2554,7 @@ export function ImageStudio() {
       upscaleFactor,
       upscaleEngine,
       upscaleSoftness,
+      upscaleRestore,
       hiresFixEnabled,
       hiresFixSteps,
       hiresFixDenoisingStrength,
@@ -2461,7 +2562,10 @@ export function ImageStudio() {
       hiresFixCfgScale: supportsGuidance ? hiresFixCfgScale : "",
       sampler,
       scheduler,
-      schedulerShift,
+      schedulerShift: effectiveSchedulerShift,
+      supportsSchedulerShift,
+      cfgInterval: resolvedCfgInterval,
+      captionOverflow: outgoingCaptionOverflow,
       stepsOverride,
       // Same rule for the guidance axis (sc-15299): a CFG-free engine never receives a scale, so
       // the override is blanked before it reaches the builder and `advanced.guidanceScale` is
@@ -2588,6 +2692,10 @@ export function ImageStudio() {
       );
       return;
     }
+    if (cfgIntervalError) {
+      setBatchError(cfgIntervalError);
+      return;
+    }
     const styledBatchPrompts = () => (function* composedBatchPrompts() {
       for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
         const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
@@ -2648,14 +2756,31 @@ export function ImageStudio() {
         }
       }
     }
-    for (const entry of iterateBatch(batchPrompts, batchVariables)) {
+    // sc-25681: a model with a native prompt batch (Iris-3B) packs consecutive same-size prompts
+    // into one job of up to `promptBatchSize` prompts; every other model keeps one job per prompt.
+    // The job's own `count` (a preset stack may override the studio's), so prompts × count fits.
+    const size = promptBatchSize(selectedModel, buildBatchJobRequest("").count);
+    function* chunks() {
+      let chunk = [];
+      for (const entry of iterateBatch(batchPrompts, batchVariables)) {
+        // Strip a leading [WxH] directive (sc-10063): the model gets the clean prompt, the job
+        // gets that per-prompt resolution.
+        const item = parsePromptResolution(entry.prompt);
+        if (chunk.length >= size || (chunk[0] && JSON.stringify(chunk[0].resolution) !== JSON.stringify(item.resolution))) {
+          yield chunk;
+          chunk = [];
+        }
+        chunk.push(item);
+      }
+      if (chunk.length) yield chunk;
+    }
+    for (const chunk of chunks()) {
       await waitForBatchSlot();
       if (batchAbortRef.current) {
         break;
       }
-      // Strip a leading [WxH] directive (sc-10063): the model gets the clean prompt, the job
-      // gets that per-prompt resolution.
-      const { prompt: cleanPrompt, resolution } = parsePromptResolution(entry.prompt);
+      const [{ prompt: cleanPrompt, resolution }] = chunk;
+      const n = chunk.length;
       try {
         let request;
         if (structuredPromptModel) {
@@ -2676,20 +2801,27 @@ export function ImageStudio() {
           });
         } else {
           request = buildBatchJobRequest(cleanPrompt, { resolution });
+          // Each prompt composed exactly as its own job would be; `prompt` stays prompts[0].
+          if (n > 1) request.prompts = chunk.map((item) => buildBatchJobRequest(item.prompt, { resolution }).prompt);
         }
         const job = await createImageJob(request);
         const current = batchRunRef.current;
         if (!current) break;
         replaceBatchRun(
           job?.id
-            ? { ...current, submitted: current.submitted + 1, activeJobIds: [...current.activeJobIds, job.id] }
-            : { ...current, submitted: current.submitted + 1, failed: current.failed + 1 },
+            ? {
+                ...current,
+                submitted: current.submitted + n,
+                activeJobIds: [...current.activeJobIds, job.id],
+                sizes: { ...current.sizes, [job.id]: n },
+              }
+            : { ...current, submitted: current.submitted + n, failed: current.failed + n },
         );
         if (batchAbortRef.current && job?.id) jobAction(job, "cancel");
       } catch {
         const current = batchRunRef.current;
         if (!current) break;
-        replaceBatchRun({ ...current, submitted: current.submitted + 1, failed: current.failed + 1 });
+        replaceBatchRun({ ...current, submitted: current.submitted + n, failed: current.failed + n });
       }
     }
     const current = batchRunRef.current;
@@ -2742,6 +2874,17 @@ export function ImageStudio() {
       releaseBatchSlotWaiters();
     }
   }, [batchRun, jobs, setBatchRun]);
+  // The Iris post-processing plan covers what the next run renders: the Studio size for a single
+  // Generate, every distinct per-prompt [WxH] size (or the Studio size) for a prompt batch (S2).
+  const restorePlanBody = useMemo(
+    () =>
+      restorePlanBodyForRenders({
+        width,
+        height,
+        resolutions: batchMode ? batchPrompts.map((line) => parsePromptResolution(line).resolution) : [],
+      }),
+    [batchMode, batchPrompts, height, width],
+  );
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
   // Prompt lines whose leading [WxH] directive (sc-10063) breaks the SELECTED model's geometry — the
@@ -2793,6 +2936,7 @@ export function ImageStudio() {
       // own 512–2048 / ÷16 envelope; every other model gets the global 256–4096 / no-stride default.
       dimensionConstraints,
       decoderCapabilitiesPending,
+      restorePlan: irisUpscale ? restorePlanStatus : null,
     }),
     [
       activeProject,
@@ -2803,6 +2947,8 @@ export function ImageStudio() {
       batchResolutionIssues,
       dimensionConstraints,
       decoderCapabilitiesPending,
+      irisUpscale,
+      restorePlanStatus,
     ],
   );
   // sc-13131 / sc-13133: the live composed-prompt preview for the selected Style Catalog entry, and
@@ -2854,6 +3000,7 @@ export function ImageStudio() {
       // not only on click. null when the dimensions are valid.
       dimensionError,
       decoderCapabilitiesPending,
+      restorePlan: irisUpscale ? restorePlanStatus : null,
     }),
     [
       activeProject,
@@ -2876,6 +3023,8 @@ export function ImageStudio() {
       multiPhaseValidationIssues,
       dimensionError,
       decoderCapabilitiesPending,
+      irisUpscale,
+      restorePlanStatus,
     ],
   );
   const batchValidity = useValidation(imageBatchValidation, batchDraft, undefined);
@@ -3687,6 +3836,12 @@ export function ImageStudio() {
                     <option key={option} value={option}>{formatResolutionLabel(option)}</option>
                   ))}
                 </select>
+                {/* sc-25681: informational only — the size is never restricted. */}
+                {patchGridNotice ? (
+                  <span className="field-hint" role="note">
+                    {patchGridNotice}
+                  </span>
+                ) : null}
               </label>
               <label className="settings-field settings-field-count">
                 Variations
@@ -3840,9 +3995,11 @@ export function ImageStudio() {
               poseBlockText={macPoseBlock ? macPoseBlock.text : null}
               controlImageAssetId={controlImageAssetId}
               onControlImageChange={setControlImageAssetId}
-              controlImagePassthrough={controlImagePassthrough}
+              controlImagePassthrough={effectiveControlPassthrough}
               onControlImagePassthroughChange={setControlImagePassthrough}
-              controlImageAssets={editImageAssets}
+              controlImageAssets={
+                activeControlMode === "depth" ? [...depthControlAssets, ...editImageAssets] : editImageAssets
+              }
               importAsset={importAsset}
               projectId={activeProject?.id}
               characters={characters}
@@ -3923,7 +4080,7 @@ export function ImageStudio() {
                   </select>
                 </label>
               ) : null}
-              {showSchedulerPicker && scheduler !== "default" ? (
+              {showSchedulerShift ? (
                 <label>
                   Schedule shift
                   <input
@@ -3932,7 +4089,7 @@ export function ImageStudio() {
                     onChange={(event) => setSchedulerShift(Number(event.target.value))}
                     step="0.1"
                     type="number"
-                    value={schedulerShift}
+                    value={effectiveSchedulerShift}
                   />
                 </label>
               ) : null}
@@ -3946,7 +4103,7 @@ export function ImageStudio() {
                     is byte-identical. Mirrors VideoStudio, which has read this key since sc-19426. */}
                 <input
                   min={String(minStepsForModel(selectedModel))}
-                  max="80"
+                  max={String(maxStepsForModel(selectedModel))}
                   onChange={(event) => setStepsOverride(event.target.value)}
                   placeholder={String(stepsDefaultFromModel(selectedModel) ?? "")}
                   type="number"
@@ -3968,6 +4125,41 @@ export function ImageStudio() {
                     type="number"
                     value={guidanceOverride}
                   />
+                </label>
+              ) : null}
+              {/* sc-25681: the CFG interval — guidance runs only at model times inside
+                  [start, end] (1 = noise, 0 = clean). Disabled, and not sent, while guidance is
+                  1.0: the engine refuses an interval there because it would do nothing. */}
+              {supportsCfgInterval ? (
+                <label>
+                  Guidance interval
+                  <input
+                    disabled={cfgIntervalDisabled}
+                    onChange={(event) => setCfgInterval(event.target.value)}
+                    placeholder="0, 1"
+                    value={cfgInterval}
+                  />
+                  <span className="field-hint" role={cfgIntervalError ? "alert" : undefined}>
+                    {cfgIntervalDisabled
+                      ? "Needs guidance above 1."
+                      : cfgIntervalError || "start, end: guidance runs only between (1 = noise)."}
+                  </span>
+                </label>
+              ) : null}
+              {captionOverflowChoices.length ? (
+                <label>
+                  Long prompts
+                  <select
+                    aria-label="Caption overflow"
+                    onChange={(event) => setCaptionOverflow(event.target.value)}
+                    value={outgoingCaptionOverflow}
+                  >
+                    {["default", ...captionOverflowChoices].map((policy) => (
+                      <option key={policy} value={policy}>
+                        {CAPTION_OVERFLOW_LABELS[policy] ?? policy}
+                      </option>
+                    ))}
+                  </select>
                 </label>
               ) : null}
               {supportsTextStyle ? (
@@ -4202,6 +4394,7 @@ export function ImageStudio() {
                 />
                 Upscale
               </label>
+              {upscaleEngineIsRestoration(upscaleEngine) ? null : (
               <label>
                 Scale
                 <select disabled={!upscaleEnabled || usePid} onChange={(event) => setUpscaleFactor(Number(event.target.value))} value={upscaleFactor}>
@@ -4212,6 +4405,7 @@ export function ImageStudio() {
                   ))}
                 </select>
               </label>
+              )}
               <label>
                 Engine
                 <select disabled={!upscaleEnabled || usePid} onChange={(event) => handleUpscaleEngineChange(event.target.value)} value={upscaleEngine}>
@@ -4222,6 +4416,19 @@ export function ImageStudio() {
                   ))}
                 </select>
               </label>
+              {upscaleEngineIsRestoration(upscaleEngine) && upscaleEnabled && !usePid ? (
+                // Iris restoration (sc-25683): scale / input sizing / colour fix, with the engine
+                // planner's processing + output dimensions for THIS generation's size shown before
+                // submission (a budgeted result is labelled as such).
+                <IrisRestoreControls
+                  idPrefix="studio-iris"
+                  onChange={(next) => setUpscaleRestore(irisRestoreControls(next))}
+                  onStatus={setRestorePlanStatus}
+                  planBody={restorePlanBody}
+                  token={token}
+                  value={upscaleRestore}
+                />
+              ) : null}
               {upscaleEngineHasSoftness(upscaleEngine) ? (
                 <label title="Higher restores more detail from a degraded source; 0 keeps it faithful.">
                   Detail
@@ -4331,7 +4538,16 @@ export function ImageStudio() {
               {supportsNegativePrompt ? (
                 <label className="prompt-field">
                   Negative prompt
-                  <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
+                  <textarea
+                    disabled={negativePromptCfgOff}
+                    onChange={(event) => setNegativePrompt(event.target.value)}
+                    value={negativePrompt}
+                  />
+                  {negativePromptCfgOff ? (
+                    <span className="field-hint">
+                      The negative prompt only applies with guidance above 1.0 for this model.
+                    </span>
+                  ) : null}
                 </label>
               ) : null}
             </div>

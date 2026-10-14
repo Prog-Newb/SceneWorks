@@ -6902,6 +6902,273 @@ mod download_receipt_tests {
         }
     }
 
+    /// sc-25679 (E4): Iris-3B's GENERATION task is the backbone root files plus ONE hard
+    /// `text_encoder` component (Qwen3-VL-4B-Instruct at its pinned revision). The primary fetches
+    /// only the root `config.yaml` + `model.safetensors` — never the `depth/` / `upscaler/` task
+    /// backbones — and the entry stays not-installed (a repairable partial install) until the
+    /// encoder snapshot is present, so Image Studio never advertises a half-installed generator.
+    #[test]
+    fn iris_generation_install_state_gates_on_its_text_encoder_component() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let model = builtin_models_entry("iris_3b");
+
+        let co_requisites = model_co_requisite_downloads(&model);
+        assert_eq!(
+            co_requisites.len(),
+            1,
+            "generation has exactly one component"
+        );
+        let encoder = &co_requisites[0];
+        assert_eq!(
+            encoder.get("componentId").and_then(Value::as_str),
+            Some("text_encoder")
+        );
+        assert_eq!(
+            encoder.get("repo").and_then(Value::as_str),
+            Some("Qwen/Qwen3-VL-4B-Instruct")
+        );
+
+        let context = model_download_context(&model).unwrap().unwrap();
+        assert_eq!(context.repo, "speridlabs/iris-3b");
+        assert_eq!(context.files, ["config.yaml", "model.safetensors"]);
+        let backbone = huggingface_repo_cache_path(data_dir, &context.repo)
+            .unwrap()
+            .join("snapshots/7445443349bc9abe3c96f01ff793e2098ca012b3");
+        std::fs::create_dir_all(&backbone).unwrap();
+        for file in &context.files {
+            std::fs::write(backbone.join(file), b"weights").unwrap();
+        }
+        let partial = install_state_for(Some(context.clone()), &model, data_dir);
+        assert!(
+            !partial.installed,
+            "backbone without its encoder is not installed"
+        );
+        assert!(
+            partial.cache_incomplete,
+            "a missing encoder is a repairable partial install"
+        );
+
+        let revision = encoder.get("revision").and_then(Value::as_str).unwrap();
+        let snapshot = huggingface_repo_cache_path(data_dir, "Qwen/Qwen3-VL-4B-Instruct")
+            .unwrap()
+            .join("snapshots")
+            .join(revision);
+        for file in string_array_field(encoder, "files") {
+            let path = snapshot.join(seeded_file_path(&file));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"weights").unwrap();
+        }
+        // The shard index is validated, so it must name the shard the glob seeded.
+        let shard = seeded_file_path("model-*.safetensors");
+        std::fs::write(
+            snapshot.join("model.safetensors.index.json"),
+            serde_json::to_vec(&serde_json::json!({ "weight_map": { "w": shard } })).unwrap(),
+        )
+        .unwrap();
+        let installed = install_state_for(Some(context), &model, data_dir);
+        assert!(
+            installed.installed,
+            "backbone + encoder is installed: incomplete={} missing={:?} path={:?}",
+            installed.cache_incomplete, installed.missing_required_files, installed.installed_path
+        );
+        assert!(
+            installed.missing_required_files.is_empty(),
+            "{:?}",
+            installed.missing_required_files
+        );
+    }
+
+    /// sc-25680: Iris-3B is served on Candle/CUDA too, so its catalog entry is NOT platform-scoped:
+    /// after the running OS's `retain_downloads_for_os` filter on Windows and Linux the backbone and
+    /// its `text_encoder` component both survive, and the install state gates on the encoder exactly
+    /// as it does on macOS (a backbone alone is a repairable partial install).
+    #[test]
+    fn iris_generation_install_state_is_the_same_on_the_candle_platforms() {
+        let _env = isolate_hf_cache();
+        let base = builtin_models_entry("iris_3b");
+        assert_ne!(
+            base.get("macOnly").and_then(Value::as_bool),
+            Some(true),
+            "iris_3b has a Candle lane, so it must not be labelled macOS-only"
+        );
+        for os in ["windows", "linux"] {
+            let temp = tempfile::tempdir().unwrap();
+            let data_dir = temp.path();
+            let mut model = base.clone();
+            retain_downloads_for_os(&mut model, os);
+            let co_requisites = model_co_requisite_downloads(&model);
+            assert_eq!(co_requisites.len(), 1, "{os}: the text_encoder survives");
+            assert_eq!(
+                co_requisites[0].get("componentId").and_then(Value::as_str),
+                Some("text_encoder"),
+                "{os}"
+            );
+            let context = model_download_context(&model).unwrap().unwrap();
+            assert_eq!(context.repo, "speridlabs/iris-3b", "{os}");
+            assert_eq!(context.files, ["config.yaml", "model.safetensors"], "{os}");
+
+            let backbone = huggingface_repo_cache_path(data_dir, &context.repo)
+                .unwrap()
+                .join("snapshots/7445443349bc9abe3c96f01ff793e2098ca012b3");
+            std::fs::create_dir_all(&backbone).unwrap();
+            for file in &context.files {
+                std::fs::write(backbone.join(file), b"weights").unwrap();
+            }
+            let partial = install_state_for(Some(context.clone()), &model, data_dir);
+            assert!(
+                !partial.installed && partial.cache_incomplete,
+                "{os}: backbone without its encoder is a repairable partial install"
+            );
+
+            let encoder = &co_requisites[0];
+            let revision = encoder.get("revision").and_then(Value::as_str).unwrap();
+            let snapshot = huggingface_repo_cache_path(data_dir, "Qwen/Qwen3-VL-4B-Instruct")
+                .unwrap()
+                .join("snapshots")
+                .join(revision);
+            for file in string_array_field(encoder, "files") {
+                let path = snapshot.join(seeded_file_path(&file));
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"weights").unwrap();
+            }
+            let shard = seeded_file_path("model-*.safetensors");
+            std::fs::write(
+                snapshot.join("model.safetensors.index.json"),
+                serde_json::to_vec(&serde_json::json!({ "weight_map": { "w": shard } })).unwrap(),
+            )
+            .unwrap();
+            let installed = install_state_for(Some(context), &model, data_dir);
+            assert!(
+                installed.installed,
+                "{os}: backbone + encoder is installed: {:?}",
+                installed.missing_required_files
+            );
+        }
+    }
+
+    /// sc-25682 (E4): Iris-3B DEPTH is its own task install — exactly the three `depth/` export files
+    /// at the pinned revision, NO co-requisite (no text encoder, no generation backbone), installed
+    /// only when all three are present. Same on every platform (both lanes serve it).
+    #[test]
+    fn iris_depth_installs_from_its_own_task_closure_without_a_text_encoder() {
+        let _env = isolate_hf_cache();
+        let base = builtin_models_entry("iris_3b_depth");
+        assert_eq!(base.get("type").and_then(Value::as_str), Some("utility"));
+        for os in ["macos", "windows", "linux"] {
+            let temp = tempfile::tempdir().unwrap();
+            let data_dir = temp.path();
+            let mut model = base.clone();
+            retain_downloads_for_os(&mut model, os);
+            assert!(
+                model_co_requisite_downloads(&model).is_empty(),
+                "{os}: depth needs no text encoder or backbone component"
+            );
+            let context = model_download_context(&model).unwrap().unwrap();
+            assert_eq!(context.repo, "speridlabs/iris-3b", "{os}");
+            assert_eq!(
+                context.files,
+                [
+                    "depth/config.yaml",
+                    "depth/model.safetensors",
+                    "depth/empty_prompt.safetensors"
+                ],
+                "{os}"
+            );
+            let snapshot = huggingface_repo_cache_path(data_dir, &context.repo)
+                .unwrap()
+                .join("snapshots/7445443349bc9abe3c96f01ff793e2098ca012b3");
+            // The GENERATION backbone's root files are not a depth install.
+            std::fs::create_dir_all(snapshot.join("depth")).unwrap();
+            for file in ["config.yaml", "model.safetensors"] {
+                std::fs::write(snapshot.join(file), b"weights").unwrap();
+            }
+            for file in &context.files[..2] {
+                std::fs::write(snapshot.join(file), b"weights").unwrap();
+            }
+            let torn = install_state_for(Some(context.clone()), &model, data_dir);
+            assert!(
+                !torn.installed,
+                "{os}: two of three export files is not installed"
+            );
+            std::fs::write(snapshot.join(&context.files[2]), b"weights").unwrap();
+            let installed = install_state_for(Some(context), &model, data_dir);
+            assert!(
+                installed.installed,
+                "{os}: the complete depth export is installed: {:?}",
+                installed.missing_required_files
+            );
+        }
+    }
+
+    /// sc-25684 (E4): Iris-3B RESTORATION is its own task install too — exactly the three `upscaler/`
+    /// export files at the pinned revision, NO co-requisite (no text encoder), installed only when all
+    /// three are present; neither the generation backbone's root files nor the `depth/` export make
+    /// it installed. Same on every platform (both lanes serve it).
+    #[test]
+    fn iris_restoration_installs_from_its_own_task_closure_without_a_text_encoder() {
+        let _env = isolate_hf_cache();
+        let base = builtin_models_entry("iris_3b_restore");
+        assert_eq!(base.get("type").and_then(Value::as_str), Some("utility"));
+        for os in ["macos", "windows", "linux"] {
+            let temp = tempfile::tempdir().unwrap();
+            let data_dir = temp.path();
+            let mut model = base.clone();
+            retain_downloads_for_os(&mut model, os);
+            assert!(
+                model_co_requisite_downloads(&model).is_empty(),
+                "{os}: restoration needs no text encoder or backbone component"
+            );
+            let context = model_download_context(&model).unwrap().unwrap();
+            assert_eq!(context.repo, "speridlabs/iris-3b", "{os}");
+            assert_eq!(
+                context.files,
+                [
+                    "upscaler/config.yaml",
+                    "upscaler/model.safetensors",
+                    "upscaler/empty_prompt.safetensors"
+                ],
+                "{os}"
+            );
+            let snapshot = huggingface_repo_cache_path(data_dir, &context.repo)
+                .unwrap()
+                .join("snapshots/7445443349bc9abe3c96f01ff793e2098ca012b3");
+            // The OTHER tasks' complete installs are not a restoration install.
+            std::fs::create_dir_all(snapshot.join("depth")).unwrap();
+            std::fs::create_dir_all(snapshot.join("upscaler")).unwrap();
+            for file in [
+                "config.yaml",
+                "model.safetensors",
+                "depth/config.yaml",
+                "depth/model.safetensors",
+                "depth/empty_prompt.safetensors",
+            ] {
+                std::fs::write(snapshot.join(file), b"weights").unwrap();
+            }
+            let absent = install_state_for(Some(context.clone()), &model, data_dir);
+            assert!(
+                !absent.installed,
+                "{os}: other tasks do not install restoration"
+            );
+            for file in &context.files[..2] {
+                std::fs::write(snapshot.join(file), b"weights").unwrap();
+            }
+            let torn = install_state_for(Some(context.clone()), &model, data_dir);
+            assert!(
+                !torn.installed && torn.cache_incomplete,
+                "{os}: two of three export files is a repairable partial install"
+            );
+            std::fs::write(snapshot.join(&context.files[2]), b"weights").unwrap();
+            let installed = install_state_for(Some(context), &model, data_dir);
+            assert!(
+                installed.installed,
+                "{os}: the complete restoration export is installed: {:?}",
+                installed.missing_required_files
+            );
+        }
+    }
+
     /// sc-13681 / sc-13686: each MOSS TTS entry advertises its RVQ codec as a HARD component
     /// coRequisite (`moss_ttsd_v05` → XY_Tokenizer, `moss_tts_realtime` → MOSS-Audio-Tokenizer). Because
     /// install-state gates on hard coRequisites, a MOSS entry stays not-installed until the codec
@@ -8814,6 +9081,12 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        // A trained checkpoint of a builtin generation engine (the Iris full-model export,
+        // sc-25685) renders through that engine's id-keyed lane, so it carries the engine's verdict.
+        let id: &str = match crate::iris_training::trained_task_checkpoint(object) {
+            Some(objective) => objective.base_model(),
+            None => id,
+        };
         model_mac_support(id, model_type, family)
     };
     if let Ok(mac_support) = serde_json::to_value(mac_support) {
@@ -8831,6 +9104,10 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let id: &str = match crate::iris_training::trained_task_checkpoint(object) {
+            Some(objective) => objective.base_model(),
+            None => id,
+        };
         model_candle_support(id, model_type)
     };
     if let Ok(candle_support) = serde_json::to_value(candle_support) {
@@ -9871,6 +10148,11 @@ async fn load_model_catalog_inputs(
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
     let mut models = merge_entries_by_id(builtin, user);
+    // A trained checkpoint (Iris full export) takes its generation surface from its engine's entry
+    // on every read, never from a registration-time snapshot.
+    for model in &mut models {
+        crate::iris_training::overlay_trained_checkpoint_surface(model, &decoder_providers)?;
+    }
     retain_models_for_os(&mut models, std::env::consts::OS, &state.settings.data_dir)?;
     // Resolve per-platform download sources before computing install state/size: some video models
     // carry both a native MLX-convert checkpoint (macOS) and a diffusers/torch checkpoint
@@ -10040,6 +10322,9 @@ pub(crate) async fn resolve_model_manifest_entry(
         None
     };
     let mut entry = merge_model_manifest_entry(builtin_entry, user_entry);
+    if catalog_scope == Some("user") {
+        crate::iris_training::overlay_trained_checkpoint_surface(&mut entry, &builtin)?;
+    }
     if entry.as_object().is_none_or(JsonObject::is_empty) {
         // The model-source seam (sc-19708) resolves fixed utility models (upscalers, detectors,
         // the face stack) for job admission even when the configured manifest directory is
@@ -11181,11 +11466,17 @@ pub(crate) fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<Path
         .filter(|value| !value.is_empty() && !value.contains("${"))
     {
         let path = PathBuf::from(source_path);
-        paths.push(if path.is_absolute() {
+        let run_dir = if path.is_absolute() {
             path
         } else {
             data_dir.join(path)
-        });
+        };
+        // An Iris training run's checkpoint root and its `.prior` retirement (sc-25690), named by
+        // the engine contract. They sit inside the run directory, which goes first so a trash
+        // delete moves the run as one item; the named paths then catch any the directory missed.
+        let checkpoint_dirs = crate::iris_training::iris_run_checkpoint_paths(model, &run_dir);
+        paths.push(run_dir);
+        paths.extend(checkpoint_dirs);
     }
     unique_paths(paths)
 }
@@ -13609,6 +13900,161 @@ mod variant_delete_tests {
         }
         // The repo cache dir itself must NOT be pruned — the sibling still lives in it.
         assert!(repo.is_dir(), "shared repo cache survives a scoped delete");
+    }
+
+    /// sc-25682 (E4): the generation and depth TASK installs share `speridlabs/iris-3b`; deleting
+    /// either entry removes only its own files and keeps the other task's, driven by the SHIPPED
+    /// catalog entries.
+    #[tokio::test]
+    async fn deleting_one_iris_task_keeps_the_other_tasks_files() {
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .unwrap();
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        let catalog: Vec<Value> = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| matches!(entry["id"].as_str(), Some("iris_3b" | "iris_3b_depth")))
+            .cloned()
+            .collect();
+        assert_eq!(catalog.len(), 2);
+        let entry = |id: &str| catalog.iter().find(|e| e["id"] == id).unwrap().clone();
+
+        let depth_files: &[&str] = &[
+            "depth/config.yaml",
+            "depth/model.safetensors",
+            "depth/empty_prompt.safetensors",
+        ];
+        let generation_files: &[&str] = &["config.yaml", "model.safetensors"];
+        for (deleted, kept_files, removed_files) in [
+            ("iris_3b_depth", generation_files, depth_files),
+            ("iris_3b", depth_files, generation_files),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let data_dir = tmp.path();
+            let repo = huggingface_repo_cache_path(data_dir, "speridlabs/iris-3b").unwrap();
+            for (index, rel) in [
+                "config.yaml",
+                "model.safetensors",
+                "depth/config.yaml",
+                "depth/model.safetensors",
+                "depth/empty_prompt.safetensors",
+            ]
+            .iter()
+            .enumerate()
+            {
+                seed(&repo, rel, &format!("blob{index}"), 10 + index);
+            }
+            let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+            remove_whole_model_artifacts(
+                &catalog,
+                deleted,
+                &entry(deleted),
+                data_dir,
+                &allowed_roots,
+                true,
+            )
+            .await
+            .unwrap();
+            for rel in kept_files {
+                assert!(
+                    repo.join("snapshots/rev").join(rel).exists(),
+                    "deleting {deleted} must keep {rel}"
+                );
+            }
+            for rel in removed_files {
+                assert!(
+                    !repo.join("snapshots/rev").join(rel).exists(),
+                    "deleting {deleted} removes its own {rel}"
+                );
+            }
+        }
+    }
+
+    /// sc-25684 (E4): ALL THREE Iris task installs — generation (root files), depth (`depth/`) and
+    /// restoration (`upscaler/`) — share the `speridlabs/iris-3b` snapshot, and the two task exports
+    /// ship byte-identical `empty_prompt.safetensors` (one shared blob). Deleting any one task through
+    /// the SHIPPED catalog removes exactly its own files and keeps every other task's files AND their
+    /// blob contents — including a blob the deleted task shared with a kept one — and never touches
+    /// the generation task's Qwen3-VL text encoder when a depth or restoration task is deleted.
+    #[tokio::test]
+    async fn deleting_any_iris_task_keeps_every_other_tasks_files_and_shared_blobs() {
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .unwrap();
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        let catalog = manifest["models"].as_array().unwrap().clone();
+        let entry = |id: &str| catalog.iter().find(|e| e["id"] == id).unwrap().clone();
+        let generation: &[&str] = &["config.yaml", "model.safetensors"];
+        let depth: &[&str] = &[
+            "depth/config.yaml",
+            "depth/model.safetensors",
+            "depth/empty_prompt.safetensors",
+        ];
+        let restoration: &[&str] = &[
+            "upscaler/config.yaml",
+            "upscaler/model.safetensors",
+            "upscaler/empty_prompt.safetensors",
+        ];
+        for (deleted, removed, kept) in [
+            ("iris_3b", generation, [depth, restoration]),
+            ("iris_3b_depth", depth, [generation, restoration]),
+            ("iris_3b_restore", restoration, [generation, depth]),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let data_dir = tmp.path();
+            let repo = huggingface_repo_cache_path(data_dir, "speridlabs/iris-3b").unwrap();
+            for (index, rel) in generation
+                .iter()
+                .chain(depth)
+                .chain(restoration)
+                .enumerate()
+            {
+                if rel.ends_with("empty_prompt.safetensors") {
+                    // Both task exports point at ONE blob.
+                    seed(&repo, rel, "empty-prompt-blob", 7);
+                } else {
+                    seed(&repo, rel, &format!("blob{index}"), 10 + index);
+                }
+            }
+            let encoder =
+                huggingface_repo_cache_path(data_dir, "Qwen/Qwen3-VL-4B-Instruct").unwrap();
+            seed(&encoder, "config.json", "encoder-config", 5);
+            let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+            remove_whole_model_artifacts(
+                &catalog,
+                deleted,
+                &entry(deleted),
+                data_dir,
+                &allowed_roots,
+                true,
+            )
+            .await
+            .unwrap();
+            let snapshot = repo.join("snapshots/rev");
+            for rel in removed {
+                assert!(
+                    !snapshot.join(rel).exists(),
+                    "deleting {deleted} removes its own {rel}"
+                );
+            }
+            for rel in kept.iter().flat_map(|files| files.iter()) {
+                let bytes = std::fs::read(snapshot.join(rel))
+                    .unwrap_or_else(|error| panic!("deleting {deleted} broke {rel}: {error}"));
+                assert!(!bytes.is_empty(), "deleting {deleted} emptied {rel}");
+            }
+            assert!(
+                encoder.join("snapshots/rev/config.json").exists(),
+                "deleting {deleted} must not touch the text encoder's own repo"
+            );
+        }
     }
 
     /// sc-25213 (finding 6): the two de-distill training adapter entries share ONE repo snapshot

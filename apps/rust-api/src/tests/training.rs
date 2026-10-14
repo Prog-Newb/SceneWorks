@@ -122,7 +122,9 @@ fn platform_effective_training_catalog_advertises_adapter_noise_support() {
     for candle in [false, true] {
         let registry = crate::training::effective_training_targets_for_candle(candle);
         for target in &registry.targets {
-            let adapter = target.id != "krea_2_control";
+            // The Iris-3B trainers declare no epic 2123 technique.
+            let adapter = target.id != "krea_2_control"
+                && !sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel);
             assert_eq!(
                 sceneworks_core::training::target_supports_weight_noise(target),
                 adapter,
@@ -165,7 +167,7 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
         .targets
         .iter()
         .map(|target| target.id.clone())
-        .filter(|id| id != "krea_2_control")
+        .filter(|id| id != "krea_2_control" && !id.starts_with("iris_3b"))
         .collect();
     assert_eq!(mlx, all);
     assert!(mlx.iter().any(|id| id == "z_image_turbo_lora"));
@@ -3343,6 +3345,53 @@ async fn create_training_job_queues_real_run_when_not_dry_run() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(queued[0]["id"], job_id);
     assert_eq!(queued[0]["type"], "lora_train");
+}
+
+/// Only Iris finishes a cancel durably (epic sc-25678, E8): a canceled NON-Iris run registers
+/// nothing even when its result claims an export and the adapter file exists.
+#[tokio::test]
+async fn canceled_non_iris_training_job_registers_nothing_even_when_marked_exported() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (job_id, output_dir, adapter_path) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job(&app, &job_id).await;
+    std::fs::create_dir_all(&output_dir).expect("output dir creates");
+    write_test_safetensors(&adapter_path);
+
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "canceled",
+            "stage": "canceled",
+            "progress": 1,
+            "message": "canceled",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "result": {
+                "outputPath": adapter_path.display().to_string(),
+                "trainedArtifactExported": true
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{canceled}");
+    assert_eq!(canceled["status"], "canceled");
+    assert!(
+        canceled["result"].get("loraRegistered").is_none(),
+        "a non-Iris cancel registers nothing: {canceled}"
+    );
 }
 
 #[tokio::test]

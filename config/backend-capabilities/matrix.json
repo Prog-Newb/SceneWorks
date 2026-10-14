@@ -2,61 +2,61 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 129,
+    "modelCount": 136,
     "importedFamilyCount": 4,
-    "cellCount": 1035,
+    "cellCount": 1056,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "80c3555220790631bb4967ad1226304ef2dd3d8b5ca03692916f2d7f0fd242c9",
-    "apiDto": "21aa41cafe6a2d9e47ffeedbc0d902874332e401511d439f44eecef7a904f3ab",
-    "apiGeneration": "75e502e31d13ac2018e9bfdc17e6bc939f24704fc04fd4a93008eb9c5cdffa12",
-    "apiValidation": "a3509e547a1551e73eccc417fef08e6b118e6d18eb8d4eb717aa7f4214746cbe",
+    "apiContractEntry": "8fb5886d7fad764b97cf40488355185702242be93c568548b6294cb5eeabe7aa",
+    "apiDto": "e4938dead6f3c9679f2449f312a522f6307c1fabd9358a3e1e69adf7cbd72e27",
+    "apiGeneration": "2b2784c851c5d43cfc59db8d43b008a0a3bb1176b9a66b34239c4a02ae9b364d",
+    "apiValidation": "86a7dfe6d28b75737bd287d1061d082b171e47d006eef512eb7a36a4cebf416b",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "d7109d1b5d52706909cbb2d96b1856efb93973c0f135bb5a5d575238911997b3",
-    "descriptorCandleFacts": "98813d747cefc028460b8d9f98205e5be598354e76c66fae12e8c70299d37955",
-    "descriptorCandleRuntime": "928935914e6a01f45ff28cc49b26c3c738f43f0e48f99df988a8eba95cc19f5b",
-    "descriptorMlxFacts": "d9d42af87ac9cd7152fe8706757be9d49ad9fefe2ac9732731df60863b561425",
-    "descriptorMlxRuntime": "4c8f997e48115ab55d42fa152da3bed1501d647997ee54f03c717c2f45cb754a",
-    "descriptorPreviewFacts": "442a6e7f82626847ce06f6e17a44d4a6af386efac6db65a8c4f72963e57f3fae",
+    "descriptorAudioFacts": "8a0d319cbc369be9dd04b5b1eae4b509f677b905a7d877fe3bc7308fa83ff7e7",
+    "descriptorCandleFacts": "5551fb5878c703a0db70fce02daed2fbfdfd2deea8f8263b1c471275310ace15",
+    "descriptorCandleRuntime": "18e3a72af64299fd1e338affa967de45b1d1444ee18cff777994be062ae280f6",
+    "descriptorMlxFacts": "3d6d5445ffd6d3f579630c8499bd20dd6bb1c4f7d3776cf5e384b258c9330b6d",
+    "descriptorMlxRuntime": "332cd6e8517108f94338056caa8ec50cd21831acfe1d8eca2e8bf0997885ed77",
+    "descriptorPreviewFacts": "806253bb20033a562cef09f3bc7ac206817ad1a2ea3d6cbd5dbdab4aeccc8c54",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "4f1de963e24e0fd8ff8a8527fdd81f7f767adde88a23646b7803ae4717326558",
-    "modelImportDefaults": "53f087f4749ef411c44a0b9b57fb1daf7d3b7e642f7512852d2453b24062bfb6",
-    "routerCandle": "b0148c4f70e2cada8e175cc91f3d3c83463f204375fd8dfa93acb56a49ae1a79",
-    "routerCatalog": "8fdeb7cec1a2579ce0d297eb25887a9fbf4d69b2b49b671d5a99151ddf57d4d9",
-    "routerGaps": "2d2cc4850415809c97871455b7621cb729958a00fe58cf4c67f73ea691501400",
-    "routerMlx": "c2a7d7a77963ea42bde821ea0c4b4a5929031ec1d583f4f6bc68b194945fb6f9",
-    "scheduler": "546d662a915ffff4411087c6fa1fdb0a641c008804539d6fab452723216a78ad",
-    "trainingCatalog": "143774854151affc7a971f30ab3278cf0a64edbe91caab749d3e61239022b4da",
+    "manifest": "9e4decb29499c41ca0913247e5a3ad1e4e94acc80bb18e987429a66e2586166f",
+    "modelImportDefaults": "b72858fe7ef1ac1ff3dc40f1426e129c7e054a6a8bf923dd5226050986b1a937",
+    "routerCandle": "9f4adef06bcae0a06250e38e2e14acd92280ab7e2d0b2f85e6c6908e0a9ee947",
+    "routerCatalog": "27f75cee22fe10cb44128643d32f22764434d418de9ab28c5d90cc891ba86c24",
+    "routerGaps": "dcb08b7a75dce6e5a5633f2c2eae13e25c8fdd5e5b88008d58d60728cd6acdfe",
+    "routerMlx": "63dee36fb3190fd49b93ae9fe2854202959ee3938793557446f68046804cbbde",
+    "scheduler": "cdc28ab9a6e9fba882f94f0437a6dfade114c03e58066181ed6833eba57e2215",
+    "trainingCatalog": "f615fb294f2b60ed84ba9280a801ca52a8efc32ddeeccc1eef09d021c66942ad",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
-    "webImageAdvanced": "685edcd46c3b986eec15916c31261ec5b18e527d6c70b76a0fbacff7c9487b8d",
-    "webImageRequest": "5a64c49b080d9e426ad0af92eeae9bfdb7a59b74556513476e7ef226c97bedf2",
-    "webMacGating": "4fdb497f1044f3827e3ba051c6386018f76f731dc49159ce87b72f82796f1b3e",
+    "webImageAdvanced": "16c4dc222a2ebe6072bfddf445b8d19d9b6bc82ef8f04bdc9313a013f2d17579",
+    "webImageRequest": "55d0130e36d1c2b1192dcada746ae4b0e035ad1d07d779b801bb453564833680",
+    "webMacGating": "edd5caead44b6cd56f0306fbcf2078e2a6b391fcb130ad1f859cda6cc3aa9ae3",
     "webPreviewGating": "0db03f8997f27f8e205ed262ac2ed951d6002c29b53aeea4bae38da40739c077",
     "webSimpleAudio": "b2782f4e1363bfc0f5c71402261b8863cd7f47d0b5545fc975c1cd4dd87b03c4",
     "webSimpleAudioStudio": "7ffbd94e291de76958b928b467591f153116362400be9c7deaa730b925538ae5",
     "webSimpleJobs": "e72e036e0e6f28470fbd33bb02e76b30a5261ffd84d64424a782a159de3ec644",
     "webSimpleVideo": "6404756ee8ed4d3d9139969f977933e72c82e11b02297d664eb97703acab6885",
-    "webUpscaleEngines": "31f3e26fbd009954126a324ea37dc9e2e1a9fa89955620c50794fb2df1ec40d4",
+    "webUpscaleEngines": "0d80f32e7e14a97773e5c8cc05a31c2dd9ea2657aa41904a5cc0123382dfee38",
     "webVideoStudio": "9d6e6d3f542df81fba3a976b8cf0ca4e1a316f5afbe6649494ce532d48d7223c",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
-    "workerDispatch": "c74e95af625f5310b759300ba13a4831fda06fd89cce7e6aac7d856395294dc7",
-    "workerEngineTable": "cdd10c5672a8a447b67c5b33c341325b9cba015477440c412bd9aca1237573c6",
-    "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "ea8f8ff8df8eb2061a77f2bbe2dc028b1c808b6a930afb133bc0e5e816f6db78",
-    "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
-    "workerImageMageFinetuned": "e00a6ccd9b811cda73073e0bd8270e58ab60c4a8a8e647f18f3fdec9c30a0935",
-    "workerImagePulid": "992ac547e891d30ae485411506bb9088961224653a5a89c2699fa2cd879a985f",
+    "workerDispatch": "fe2c44e746f9ac0afb1ecbac30a081f8fb4693e5c5a21f28891dc87af33c5d48",
+    "workerEngineTable": "85d32676e6f2ea02fb6ff94a5bf21aa80275c032574219a9c7c7fa6f4a32ebb4",
+    "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
+    "workerImageDispatch": "f1151e2bd87a21499d87364dedac9bbc894fef58de41314a7e37771fb40d811a",
+    "workerImageKreaImported": "6fbc8d9a80bc03a295bcbf39c6c11298e7fba33f4d702dc5a06f328ac9eb4c1b",
+    "workerImageMageFinetuned": "da5a75e976782f92c6561ad3b7f9e364bb03c74d12e7f77a8658727d8ae85d80",
+    "workerImagePulid": "f2ffa16632abb63110c1250412e8517b1e3c3b38f5dde0efb6847e09a2954cdc",
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "41b8190787fdbf975411b0e3d7701378ddd253cc76ba37f4024f3306c1d0bd50",
-    "workerUtilityDispatch": "41899f0a9b7f354c61020aea67904246b3d0084ffeaf20e1d0cb89bf2fc9ed3c",
+    "workerTrainingDispatch": "edb4816ba2646e4792aff7eaeeedc7bd71aba9dc8268d9689fcb8b537ce6b5f8",
+    "workerUtilityDispatch": "888e127be2e7590424f045a93db36d5602e8b10ec630a0e40c36a63a7ae92467",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
     "workerVideoDispatch": "14ebc949a182da1ecc3af1ba5b38c584fd2d629a55e1d16d2e13f10c4ac84697",
@@ -2176,6 +2176,164 @@
           "candle": true
         }
       ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_3b",
+      "family": "iris",
+      "modelType": "image",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "evaluatedOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "iris_3b_depth",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "image_depth",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_3b_restore",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "engine:iris",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_repa_teacher_dinov2_base",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_restore_train_critic_trunk",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_restore_train_lpips_lin",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_restore_train_vgg16",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",
@@ -7813,6 +7971,17 @@
       ]
     },
     {
+      "jobType": "image_depth",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
       "jobType": "image_detail",
       "category": "per-model",
       "requests": [
@@ -8130,6 +8299,83 @@
       "target": "illustrious_xl_v2_lora",
       "baseModel": "illustrious_xl_v2",
       "kernel": "sdxl_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_depth",
+      "baseModel": "iris_3b_depth",
+      "kernel": "iris_train",
+      "networkType": "full",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_generation",
+      "baseModel": "iris_3b",
+      "kernel": "iris_train",
+      "networkType": "full",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_generation",
+      "baseModel": "iris_3b",
+      "kernel": "iris_train",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_generation",
+      "baseModel": "iris_3b",
+      "kernel": "iris_train",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_restore",
+      "baseModel": "iris_3b_restore",
+      "kernel": "iris_train",
+      "networkType": "full",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_restore",
+      "baseModel": "iris_3b_restore",
+      "kernel": "iris_train",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_restore",
+      "baseModel": "iris_3b_restore",
+      "kernel": "iris_train",
       "networkType": "lora",
       "support": {
         "capability": "train",

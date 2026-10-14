@@ -350,6 +350,9 @@ fn fully_populated_envelope() -> WorkflowShare {
             factor: Some(2),
             engine: Some("seedvr2".to_owned()),
             softness: Some(0.25),
+            scale: Some(1.5),
+            input_sizing: Some("budgeted".to_owned()),
+            color_fix: Some(true),
         }),
         loras: vec![WorkflowLora {
             name: Some("coast".to_owned()),
