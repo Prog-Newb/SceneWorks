@@ -1612,13 +1612,7 @@ test("an Anchored rollup carries (stale) exactly when every anchor behind it is 
   assert.doesNotMatch(row(allStale, unanchored[0], unanchored[1]), /\(stale\)/);
   // The shipped artifact agrees with the renderer.
   const shipped = await readFile(new URL("../docs/generated/memory-matrix.md", import.meta.url), "utf8");
-  // Source-tree provenance is intentionally frozen between terminal campaigns. Keep this
-  // rollup test about rendered semantic rows; source-tree freshness is owned by the terminal
-  // campaign, not ordinary feature commits.
-  const withoutSourceRevision = (markdown) =>
-    markdown.replace(/^- SceneWorks revision: `source-tree:[0-9a-f]{64}`\n/m, "");
-  assert.match(shipped, /^- SceneWorks revision: `source-tree:[0-9a-f]{64}`$/m);
-  assert.equal(withoutSourceRevision(shipped), withoutSourceRevision(renderMarkdown(matrix)));
+  assert.equal(shipped, renderMarkdown(matrix));
 });
 
 // ── sc-22513: the collapse ─────────────────────────────────────────────────────────────────────
@@ -2688,4 +2682,31 @@ test("every tier a route rule declares, and a download ships, survives onto the 
     ["bf16"],
     "...and the narrowing this story exists for still holds: no packed SANA turnkey off-Mac",
   );
+});
+
+// sc-25690: a calibration plan row is keyed `model:tier:backend`, and the anchor it produces is
+// ingested against the matrix cell at that exact coordinate. A plan row whose tier the model's
+// lane does not publish measures fine and then dies at ingest as a corpus that reaches no catalog
+// cell — which is what the first real `iris_3b:bf16:mlx` capture did while the matrix published
+// Iris on the `default` pseudo-tier. Plan rows for entries outside the matrix (task routes, the
+// out-of-matrix corpora) are governed by their own declarations and are skipped here.
+//
+// Mutation that reds this: drop the `iris_3b:*` rows from CONVERTER_TIER_OVERRIDES and regenerate
+// the matrix (the two iris_3b plan rows name `bf16`, the axis says `default`).
+test("every planned anchor of a matrix model names a tier its lane publishes", async () => {
+  const matrix = JSON.parse(await readFile("docs/generated/memory-matrix.json", "utf8"));
+  const plan = JSON.parse(await readFile("config/memory-calibration-plan.json", "utf8"));
+  const models = new Map(matrix.models.map((model) => [model.id, model]));
+  const offAxis = [];
+  let checked = 0;
+  for (const key of Object.keys(plan.anchors)) {
+    const [modelId, tier, backend] = key.split(":");
+    const model = models.get(modelId);
+    if (!model) continue;
+    checked += 1;
+    const tiers = model.axes?.[backend]?.tiers ?? [];
+    if (!tiers.includes(tier)) offAxis.push(`${key} (axis: ${tiers.join(", ") || "none"})`);
+  }
+  assert.ok(checked > 0, "the plan names matrix models");
+  assert.deepEqual(offAxis, []);
 });

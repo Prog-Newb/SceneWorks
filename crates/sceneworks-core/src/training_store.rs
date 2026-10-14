@@ -19,9 +19,51 @@ use crate::store_util::{
 };
 use crate::time::utc_now;
 use crate::training::{
-    caption_with_trigger_words, Caption, CaptionSource, TrainingDataset, TrainingDatasetItem,
-    TrainingDatasetStatus, TrainingModality, TRAINING_CONTRACT_SCHEMA_VERSION,
+    caption_with_trigger_words, max_training_reference_images, Caption, CaptionMode, CaptionSource,
+    TrainingDataset, TrainingDatasetItem, TrainingDatasetReference, TrainingDatasetStatus,
+    TrainingModality, TRAINING_CONTRACT_SCHEMA_VERSION,
 };
+
+/// Which Iris training sidecar of a dataset item ([`TrainingDatasetStore::set_iris_item_sidecar`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrisSidecarKind {
+    /// The aligned numerical depth map (`.npy` / 8- or 16-bit grayscale `.png`).
+    Depth,
+    /// The depth map's validity mask (`.npy` / `.png`, non-zero = valid).
+    DepthMask,
+    /// The aligned degraded input of a restoration pair.
+    Degraded,
+}
+
+impl IrisSidecarKind {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "depth" => Some(Self::Depth),
+            "mask" => Some(Self::DepthMask),
+            "degraded" => Some(Self::Degraded),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Depth => "depth",
+            Self::DepthMask => "mask",
+            Self::Degraded => "degraded",
+        }
+    }
+}
+
+/// One sidecar write: the staged file + its extension (`None` removes the sidecar), and — for a
+/// depth map — the per-item value conversion (`scale`, `minDepth`, `maxDepth`).
+#[derive(Debug, Clone)]
+pub struct IrisItemSidecar {
+    pub kind: IrisSidecarKind,
+    pub source: Option<(PathBuf, String)>,
+    pub scale: Option<f64>,
+    pub min_depth: Option<f64>,
+    pub max_depth: Option<f64>,
+}
 
 const DATASET_MANIFEST_NAME: &str = "dataset.sceneworks.training-dataset.json";
 // Tier-1 CLIP embeddings sidecar (sc-6535) — kept out of the manifest (768×f32 per item is too big
@@ -113,10 +155,28 @@ pub struct TrainingDatasetItemInput {
     pub height: Option<u32>,
     #[serde(default)]
     pub control_image_path: Option<String>,
+    /// The ORDERED reference images of an instruction-edit pair (sc-24161): each is a library
+    /// `assetId` or a project-relative `path`, materialized into the dataset like the item image.
+    /// The item image is the edit target and its caption the edit instruction. Order is kept.
+    #[serde(default)]
+    pub references: Vec<TrainingDatasetReferenceInput>,
     /// Forward-compatible per-item training inputs. LTX-2.5 uses
     /// `ltxPreparedBundlePath`; ordinary image datasets leave this empty.
     #[serde(flatten)]
     pub extra: ExtraFields,
+}
+
+/// One reference image of an instruction-edit dataset item (sc-24161) — the same source contract as
+/// an item: a library `assetId`, else a project-relative `path`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingDatasetReferenceInput {
+    #[serde(default)]
+    pub asset_id: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 /// A trusted server-side source used to materialize bytes that do not yet live
@@ -142,6 +202,9 @@ pub struct CaptionInput {
     pub source: Option<CaptionSource>,
     #[serde(default)]
     pub trigger_words: Vec<String>,
+    /// The auto-caption mode that produced `text` (sc-24829); carried through unchanged.
+    #[serde(default)]
+    pub mode: Option<CaptionMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +261,10 @@ impl TrainingDatasetStore {
         Self {
             project_path: project_path.into(),
         }
+    }
+
+    pub(crate) fn project_path(&self) -> &Path {
+        &self.project_path
     }
 
     pub fn list_datasets(
@@ -523,6 +590,173 @@ impl TrainingDatasetStore {
         }
         if let Some(backup) = backup {
             let _ = fs::remove_file(backup);
+        }
+        Ok(dataset)
+    }
+
+    /// Install (or, with `source: None`, remove) one Iris training sidecar of a dataset item
+    /// (sc-25687 depth / sc-25688 restoration): the aligned depth map, its validity mask, or the
+    /// aligned degraded input. The file is copied to `sidecars/<item>.<kind>.<ext>` beside the
+    /// dataset and the item is stamped with its dataset-relative path (`extra.irisDepth` /
+    /// `extra.irisDegradedImage`). Callers cannot choose a destination; the CONTENT (format,
+    /// alignment with the item's image) is checked by the caller with the engine's own readers
+    /// before this runs.
+    pub fn set_iris_item_sidecar(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_id: &str,
+        sidecar: &IrisItemSidecar,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        use crate::training::iris::depth::ITEM_DEPTH_KEY;
+        use crate::training::iris::restore::ITEM_DEGRADED_KEY;
+        if !is_safe_id(dataset_id) || !is_safe_id(item_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid training dataset or item ID".to_owned(),
+            ));
+        }
+        let mut dataset = self.read_dataset_by_id(dataset_id)?;
+        ensure_dataset_project(project_id, &dataset)?;
+        let root = dataset_root(&self.project_path, dataset_id);
+        let item = dataset
+            .items
+            .iter_mut()
+            .find(|item| item.id == item_id)
+            .ok_or_else(|| {
+                ProjectStoreError::NotFound("Training dataset item not found".to_owned())
+            })?;
+        let kind = sidecar.kind.as_str();
+        let installed = match &sidecar.source {
+            None => None,
+            Some((source, extension)) => {
+                let extension = extension.to_ascii_lowercase();
+                let allowed: &[&str] = match sidecar.kind {
+                    IrisSidecarKind::Depth | IrisSidecarKind::DepthMask => &["npy", "png"],
+                    IrisSidecarKind::Degraded => &["png", "jpg", "jpeg", "webp"],
+                };
+                if !allowed.contains(&extension.as_str()) {
+                    return Err(ProjectStoreError::BadRequest(format!(
+                        "A {kind} sidecar must be one of: {}.",
+                        allowed.join(", ")
+                    )));
+                }
+                if !fs::metadata(source)?.is_file() {
+                    return Err(ProjectStoreError::BadRequest(
+                        "The sidecar upload must be a regular file".to_owned(),
+                    ));
+                }
+                let dir = root.join("sidecars");
+                fs::create_dir_all(&dir)?;
+                let relative = format!("sidecars/{item_id}.{kind}.{extension}");
+                let staged = dir.join(format!(".{item_id}.{kind}.{}.tmp", random_hex(8)?));
+                fs::copy(source, &staged)?;
+                Some((relative, staged))
+            }
+        };
+        let previous_files = |value: Option<&Value>, keys: &[&str]| -> Vec<String> {
+            keys.iter()
+                .filter_map(|key| {
+                    value
+                        .and_then(|value| value.get(*key))
+                        .and_then(Value::as_str)
+                })
+                .map(str::to_owned)
+                .collect()
+        };
+        let mut stale: Vec<String> = Vec::new();
+        match sidecar.kind {
+            IrisSidecarKind::Depth => {
+                let previous = item.extra.get(ITEM_DEPTH_KEY).cloned();
+                match &installed {
+                    Some((relative, _)) => {
+                        stale.extend(previous_files(previous.as_ref(), &["path"]));
+                        let mut depth = serde_json::Map::new();
+                        depth.insert("path".to_owned(), Value::String(relative.clone()));
+                        if let Some(mask) = previous
+                            .as_ref()
+                            .and_then(|value| value.get("maskPath"))
+                            .cloned()
+                        {
+                            depth.insert("maskPath".to_owned(), mask);
+                        }
+                        for (key, number) in [
+                            ("scale", sidecar.scale),
+                            ("minDepth", sidecar.min_depth),
+                            ("maxDepth", sidecar.max_depth),
+                        ] {
+                            if let Some(number) = number {
+                                depth.insert(key.to_owned(), Value::from(number));
+                            }
+                        }
+                        item.extra
+                            .insert(ITEM_DEPTH_KEY.to_owned(), Value::Object(depth));
+                    }
+                    None => {
+                        stale.extend(previous_files(previous.as_ref(), &["path", "maskPath"]));
+                        item.extra.remove(ITEM_DEPTH_KEY);
+                    }
+                }
+            }
+            IrisSidecarKind::DepthMask => {
+                let Some(Value::Object(depth)) = item.extra.get_mut(ITEM_DEPTH_KEY) else {
+                    if let Some((_, staged)) = &installed {
+                        let _ = fs::remove_file(staged);
+                    }
+                    return Err(ProjectStoreError::BadRequest(
+                        "Attach the item's depth map before its validity mask.".to_owned(),
+                    ));
+                };
+                if let Some(previous) = depth.get("maskPath").and_then(Value::as_str) {
+                    stale.push(previous.to_owned());
+                }
+                match &installed {
+                    Some((relative, _)) => {
+                        depth.insert("maskPath".to_owned(), Value::String(relative.clone()));
+                    }
+                    None => {
+                        depth.remove("maskPath");
+                    }
+                }
+            }
+            IrisSidecarKind::Degraded => {
+                if let Some(previous) = item.extra.get(ITEM_DEGRADED_KEY).and_then(Value::as_str) {
+                    stale.push(previous.to_owned());
+                }
+                match &installed {
+                    Some((relative, _)) => {
+                        item.extra.insert(
+                            ITEM_DEGRADED_KEY.to_owned(),
+                            Value::String(relative.clone()),
+                        );
+                    }
+                    None => {
+                        item.extra.remove(ITEM_DEGRADED_KEY);
+                    }
+                }
+            }
+        }
+        if let Err(error) = crate::training::iris::validate_item_iris_extras(&item.extra) {
+            if let Some((_, staged)) = &installed {
+                let _ = fs::remove_file(staged);
+            }
+            return Err(ProjectStoreError::BadRequest(error));
+        }
+        if let Some((relative, staged)) = &installed {
+            let destination = root.join(relative);
+            if let Err(error) = fs::rename(staged, &destination) {
+                let _ = fs::remove_file(staged);
+                return Err(ProjectStoreError::Io(error));
+            }
+            stale.retain(|path| path != relative);
+        }
+        dataset.version = dataset.version.saturating_add(1);
+        dataset.updated_at = utc_now();
+        self.save_dataset(&dataset)?;
+        // Only sidecars this method owns are ever removed (never the item's image).
+        for path in stale {
+            if path.starts_with("sidecars/") && is_safe_relative_path(&path) {
+                let _ = fs::remove_file(root.join(&path));
+            }
         }
         Ok(dataset)
     }
@@ -949,7 +1183,10 @@ impl TrainingDatasetStore {
         })
     }
 
-    fn read_dataset_by_id(&self, dataset_id: &str) -> ProjectStoreResult<TrainingDataset> {
+    pub(crate) fn read_dataset_by_id(
+        &self,
+        dataset_id: &str,
+    ) -> ProjectStoreResult<TrainingDataset> {
         if !is_safe_id(dataset_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid training dataset ID".to_owned(),
@@ -964,7 +1201,7 @@ impl TrainingDatasetStore {
         read_dataset(&manifest_path)
     }
 
-    fn save_dataset(&self, dataset: &TrainingDataset) -> ProjectStoreResult<()> {
+    pub(crate) fn save_dataset(&self, dataset: &TrainingDataset) -> ProjectStoreResult<()> {
         let manifest_path = dataset_manifest_path(&self.project_path, &dataset.id);
         write_json(&manifest_path, dataset)?;
         index_dataset(&self.project_path, dataset, &manifest_path)
@@ -1472,6 +1709,22 @@ fn rollback_file_renames(applied: &[AppliedRename]) {
     }
 }
 
+/// Refuses a caption whose `mode` is not one of the known caption modes (sc-24829, E6): an
+/// unrecognized string deserializes to `CaptionMode::Unknown` and would otherwise be stored
+/// silently on every dataset write path (create/update items, external items, caption sidecars).
+fn validate_caption_input_mode(caption: Option<&CaptionInput>) -> ProjectStoreResult<()> {
+    match caption.and_then(|caption| caption.mode.as_ref()) {
+        Some(CaptionMode::Unknown(mode)) => Err(ProjectStoreError::FieldInvalid {
+            field: "mode",
+            code: "training_field_error",
+            detail: format!(
+                "caption.mode {mode:?} is not supported; use default, subjectOnly, or triggerOnly."
+            ),
+        }),
+        _ => Ok(()),
+    }
+}
+
 fn apply_caption_patches(
     dataset: &mut TrainingDataset,
     inputs: Vec<TrainingDatasetCaptionSidecarItemInput>,
@@ -1479,6 +1732,7 @@ fn apply_caption_patches(
 ) -> ProjectStoreResult<()> {
     let mut seen_inputs = Vec::new();
     for input in inputs {
+        validate_caption_input_mode(Some(&input.caption))?;
         if !is_safe_id(&input.item_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid training dataset item ID".to_owned(),
@@ -1501,6 +1755,7 @@ fn apply_caption_patches(
             text: input.caption.text,
             source: input.caption.source.unwrap_or(CaptionSource::Manual),
             trigger_words: input.caption.trigger_words,
+            mode: input.caption.mode,
             updated_at: Some(now.to_owned()),
             extra: Default::default(),
         };
@@ -1595,6 +1850,11 @@ fn materialize_external_item(
     now: &str,
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
+    crate::training::iris::validate_item_iris_extras(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
+    crate::training::iris::curricula::validate_item_split(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
+    validate_caption_input_mode(input.item.caption.as_ref())?;
     let source_path = fs::canonicalize(&input.source_path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             ProjectStoreError::NotFound("Verified dataset source was unavailable".to_owned())
@@ -1609,6 +1869,11 @@ fn materialize_external_item(
     }
     ensure_supported_item_mime(&source_path, modality)?;
     let item = input.item;
+    if !item.references.is_empty() {
+        return Err(ProjectStoreError::BadRequest(
+            "Catalog-materialized dataset items cannot carry edit reference images".to_owned(),
+        ));
+    }
     let source_kind = crate::media_convert::sniff_image_kind_at(&source_path).ok_or_else(|| {
         ProjectStoreError::BadRequest("Verified dataset source was not an image".to_owned())
     })?;
@@ -1644,6 +1909,7 @@ fn materialize_external_item(
         asset_id: None,
         path: relative_path,
         control_image_path,
+        references: Vec::new(),
         display_name: item
             .display_name
             .unwrap_or_else(|| input_display_name(&source_path)),
@@ -1651,6 +1917,7 @@ fn materialize_external_item(
             text: caption.text,
             source: caption.source.unwrap_or(CaptionSource::Imported),
             trigger_words: caption.trigger_words,
+            mode: caption.mode,
             updated_at: Some(now.to_owned()),
             extra: Default::default(),
         },
@@ -1684,41 +1951,62 @@ fn materialize_item(
     now: &str,
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
-    let source = resolve_item_source(project_path, project_id, &input, modality)?;
-    // sc-6143: normalize a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to lossless PNG
-    // as it lands in the dataset. Uploads are normalized at import, but a dataset built from a library
-    // asset or a project-relative path copies the bytes verbatim — so without this an AVIF reaches the
-    // dataset's `images/` and breaks BOTH actual training (the trainer reads dataset images straight
-    // through the engine, with no decode backstop) and the Dataset Doctor. Format is sniffed by content,
-    // never the extension; a file we cannot sniff (e.g. SVG) passes through with its original extension.
-    let source_kind = crate::media_convert::sniff_image_kind_at(&source.path);
-    let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
-    let extension = if needs_transcode {
-        ".png".to_owned()
-    } else {
-        source
-            .path
-            .extension()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.is_empty())
-            .map(|value| format!(".{}", value.to_ascii_lowercase()))
-            .unwrap_or_else(|| ".bin".to_owned())
-    };
-    let relative_path = format!("images/{item_id}{extension}");
-    let target_path = media_dir.join(format!("{item_id}{extension}"));
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent)?;
+    // Per-item named captions (`captions: {field: text}`, the Iris trainer's `caption_field(s)`
+    // source) ride in the forward-compatible extra bag; refuse a malformed map at the store
+    // boundary rather than at the trainer mid-epoch.
+    crate::training::iris::validate_item_iris_extras(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
+    crate::training::iris::curricula::validate_item_split(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
+    validate_caption_input_mode(input.caption.as_ref())?;
+    let reference_ceiling = max_training_reference_images() as usize;
+    if input.references.len() > reference_ceiling {
+        return Err(ProjectStoreError::BadRequest(format!(
+            "Dataset item '{item_id}' carries {} reference images, but training accepts at most {reference_ceiling} reference images per edit item",
+            input.references.len()
+        )));
     }
-    if needs_transcode {
-        let kind = source_kind.expect("needs_transcode implies a sniffed kind");
-        crate::media_convert::transcode_to_png(&source.path, &target_path).map_err(|error| {
-            ProjectStoreError::BadRequest(format!(
-                "Could not convert {} image to a supported format: {error}",
-                kind.label()
-            ))
-        })?;
-    } else {
-        fs::copy(&source.path, &target_path)?;
+    let source = resolve_item_source(project_path, project_id, &input, modality)?;
+    let (relative_path, target_path) = store_item_media(&source, media_dir, "", &item_id)?;
+    // Instruction-edit pairs (sc-24161): every ordered reference lands under `images/refs/`, named
+    // by item id + 1-based ordinal, so the stored order is the order given and a later rename of the
+    // item image (`images/<stem>.<ext>`) can never collide with a reference file.
+    let mut references = Vec::with_capacity(input.references.len());
+    for (index, reference) in input.references.iter().enumerate() {
+        let reference_source = resolve_media_source(
+            project_path,
+            project_id,
+            reference.asset_id.as_deref(),
+            reference.path.as_deref(),
+            modality,
+            "Dataset item reference",
+        )?;
+        let (reference_path, reference_target) = store_item_media(
+            &reference_source,
+            media_dir,
+            "refs/",
+            &format!("{item_id}_ref{}", index + 1),
+        )?;
+        let (mut width, mut height) = (reference_source.width, reference_source.height);
+        if width.is_none() || height.is_none() {
+            if let Some((file_w, file_h)) =
+                crate::media_convert::image_dimensions(&reference_target)
+            {
+                width = width.or(Some(file_w));
+                height = height.or(Some(file_h));
+            }
+        }
+        references.push(TrainingDatasetReference {
+            asset_id: reference_source.asset_id,
+            path: reference_path,
+            display_name: reference
+                .display_name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .or(Some(reference_source.display_name)),
+            width,
+            height,
+        });
     }
     let control_image_path = validated_control_image_path(input.control_image_path)?;
     let caption = input.caption.unwrap_or_default();
@@ -1742,11 +2030,13 @@ fn materialize_item(
         asset_id: source.asset_id,
         path: relative_path,
         control_image_path,
+        references,
         display_name: input.display_name.unwrap_or(source.display_name),
         caption: Caption {
             text: caption.text,
             source: caption.source.unwrap_or(CaptionSource::Manual),
             trigger_words: caption.trigger_words,
+            mode: caption.mode,
             updated_at: Some(now.to_owned()),
             extra: Default::default(),
         },
@@ -1814,6 +2104,9 @@ pub fn repoint_item(item: &TrainingDatasetItem, source: RepointSource) -> Traini
         // The condition was rendered from the OLD pixels — the new bytes invalidate it exactly
         // like tier0_scalars/quality_ack, so clear it (a re-point should re-render). epic 10159.
         control_image_path: None,
+        // An edit pair's references are the edit's SOURCES, independent of the target's pixels, so
+        // a re-pointed (e.g. upscaled) target keeps them (sc-24161).
+        references: item.references.clone(),
         display_name: item.display_name.clone(),
         caption: item.caption.clone(),
         width: source.width,
@@ -1853,33 +2146,54 @@ fn resolve_item_source(
     input: &TrainingDatasetItemInput,
     modality: &TrainingModality,
 ) -> ProjectStoreResult<ItemSource> {
-    if let Some(asset_id) = input.asset_id.as_deref().filter(|value| !value.is_empty()) {
+    resolve_media_source(
+        project_path,
+        project_id,
+        input.asset_id.as_deref(),
+        input.path.as_deref(),
+        modality,
+        "Dataset item",
+    )
+}
+
+/// Resolve one dataset media source — a library `asset_id`, else a project-relative `path` — to a
+/// verified in-project file. Shared by item images and their edit-pair references (sc-24161);
+/// `label` names which one a refusal is about.
+fn resolve_media_source(
+    project_path: &Path,
+    project_id: &str,
+    asset_id: Option<&str>,
+    path: Option<&str>,
+    modality: &TrainingModality,
+    label: &str,
+) -> ProjectStoreResult<ItemSource> {
+    if let Some(asset_id) = asset_id.filter(|value| !value.is_empty()) {
         return resolve_asset_source(project_path, project_id, asset_id, modality);
     }
-    let relative_path = input
-        .path
-        .as_deref()
+    let relative_path = path
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
-            ProjectStoreError::BadRequest("Dataset item assetId or path is required".to_owned())
+            ProjectStoreError::BadRequest(format!("{label} assetId or path is required"))
         })?;
     if !is_safe_relative_path(relative_path) {
-        return Err(ProjectStoreError::BadRequest(
-            "Invalid dataset item path".to_owned(),
-        ));
+        return Err(ProjectStoreError::BadRequest(format!(
+            "Invalid {} path",
+            label.to_ascii_lowercase()
+        )));
     }
     let root = fs::canonicalize(project_path)?;
     let path = fs::canonicalize(project_path.join(relative_path)).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
-            ProjectStoreError::NotFound("Dataset item file not found".to_owned())
+            ProjectStoreError::NotFound(format!("{label} file not found"))
         } else {
             ProjectStoreError::Io(error)
         }
     })?;
     if !path.starts_with(&root) || !path.is_file() {
-        return Err(ProjectStoreError::BadRequest(
-            "Invalid dataset item path".to_owned(),
-        ));
+        return Err(ProjectStoreError::BadRequest(format!(
+            "Invalid {} path",
+            label.to_ascii_lowercase()
+        )));
     }
     ensure_supported_item_mime(&path, modality)?;
     Ok(ItemSource {
@@ -1889,6 +2203,55 @@ fn resolve_item_source(
         width: None,
         height: None,
     })
+}
+
+/// Copy (or, for a valid-but-unsupported format, transcode to PNG) one resolved source into the
+/// dataset media dir as `<media_dir>/<subdir><stem><ext>`, returning its dataset-root-relative path
+/// (`images/<subdir><stem><ext>`) and absolute location.
+///
+/// sc-6143: a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/BMP/GIF) is normalized to lossless
+/// PNG as it lands in the dataset. Uploads are normalized at import, but a dataset built from a
+/// library asset or a project-relative path copies the bytes verbatim — so without this an AVIF
+/// reaches the dataset's `images/` and breaks BOTH actual training (the trainer reads dataset
+/// images straight through the engine, with no decode backstop) and the Dataset Doctor. Format is
+/// sniffed by content, never the extension; a file we cannot sniff (e.g. SVG) passes through with
+/// its original extension.
+fn store_item_media(
+    source: &ItemSource,
+    media_dir: &Path,
+    subdir: &str,
+    stem: &str,
+) -> ProjectStoreResult<(String, PathBuf)> {
+    let source_kind = crate::media_convert::sniff_image_kind_at(&source.path);
+    let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
+    let extension = if needs_transcode {
+        ".png".to_owned()
+    } else {
+        source
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(".{}", value.to_ascii_lowercase()))
+            .unwrap_or_else(|| ".bin".to_owned())
+    };
+    let relative_path = format!("images/{subdir}{stem}{extension}");
+    let target_path = media_dir.join(format!("{subdir}{stem}{extension}"));
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if needs_transcode {
+        let kind = source_kind.expect("needs_transcode implies a sniffed kind");
+        crate::media_convert::transcode_to_png(&source.path, &target_path).map_err(|error| {
+            ProjectStoreError::BadRequest(format!(
+                "Could not convert {} image to a supported format: {error}",
+                kind.label()
+            ))
+        })?;
+    } else {
+        fs::copy(&source.path, &target_path)?;
+    }
+    Ok((relative_path, target_path))
 }
 
 fn resolve_asset_source(
@@ -1995,7 +2358,10 @@ fn ensure_supported_item_mime(path: &Path, modality: &TrainingModality) -> Proje
     Ok(())
 }
 
-fn ensure_dataset_project(project_id: &str, dataset: &TrainingDataset) -> ProjectStoreResult<()> {
+pub(crate) fn ensure_dataset_project(
+    project_id: &str,
+    dataset: &TrainingDataset,
+) -> ProjectStoreResult<()> {
     if dataset.project_id.as_deref() != Some(project_id) {
         return Err(ProjectStoreError::NotFound(
             "Training dataset not found".to_owned(),
@@ -2252,7 +2618,7 @@ fn write_text(path: &Path, payload: &str) -> ProjectStoreResult<()> {
     atomic_write(path, payload.as_bytes())
 }
 
-fn dataset_item_path(
+pub(crate) fn dataset_item_path(
     project_path: &Path,
     dataset: &TrainingDataset,
     item: &TrainingDatasetItem,
@@ -2327,11 +2693,13 @@ mod tests {
             asset_id: None,
             path: format!("images/{id}.png"),
             control_image_path: None,
+            references: Vec::new(),
             display_name: id.to_owned(),
             caption: Caption {
                 text: String::new(),
                 source: CaptionSource::Manual,
                 trigger_words: Vec::new(),
+                mode: None,
                 updated_at: None,
                 extra: Default::default(),
             },
@@ -2380,6 +2748,56 @@ mod tests {
         }
     }
 
+    // sc-24829 (E6): an unknown caption mode on the external-item path is a field error, refused
+    // before the source is even opened (the bogus source path would otherwise be NotFound).
+    #[test]
+    fn external_item_with_an_unknown_caption_mode_is_a_mode_field_error() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let input = ExternalTrainingDatasetItemInput {
+            item: TrainingDatasetItemInput {
+                id: Some("item_0001".to_owned()),
+                asset_id: None,
+                path: None,
+                display_name: None,
+                caption: Some(CaptionInput {
+                    text: "a caption".to_owned(),
+                    source: Some(CaptionSource::Auto),
+                    trigger_words: Vec::new(),
+                    mode: Some(CaptionMode::Unknown("faceOnly".to_owned())),
+                }),
+                width: None,
+                height: None,
+                control_image_path: None,
+                references: Vec::new(),
+                extra: Default::default(),
+            },
+            source_path: temp.path().join("missing.png"),
+            expected_content_hash: String::new(),
+            expected_width: 1,
+            expected_height: 1,
+            extra: Default::default(),
+        };
+        let error = materialize_external_item(
+            temp.path(),
+            &TrainingModality::Image,
+            input,
+            "item_0001".to_owned(),
+            "now",
+        )
+        .expect_err("unknown caption mode is refused");
+        match error {
+            ProjectStoreError::FieldInvalid {
+                field,
+                code,
+                detail,
+            } => {
+                assert_eq!((field, code), ("mode", "training_field_error"));
+                assert!(detail.contains("caption.mode \"faceOnly\""), "{detail}")
+            }
+            other => panic!("expected a mode field error, got {other:?}"),
+        }
+    }
+
     /// sc-6143: building a dataset from a path-based item normalizes a valid-but-unsupported source
     /// (here BMP — the same decode gap AVIF hits) to PNG as it lands in `images/`, so neither the
     /// trainer (which reads dataset images straight through the engine, no decode backstop) nor the
@@ -2417,6 +2835,7 @@ mod tests {
                         width: None,
                         height: None,
                         control_image_path: None,
+                        references: Vec::new(),
                         extra: Default::default(),
                     }],
                 },
@@ -2476,6 +2895,7 @@ mod tests {
             text: "a photo of Mira".to_owned(),
             source: CaptionSource::Auto,
             trigger_words: vec!["mira".to_owned()],
+            mode: None,
             updated_at: Some("then".to_owned()),
             extra: Default::default(),
         };

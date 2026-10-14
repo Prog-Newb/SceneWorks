@@ -150,21 +150,26 @@ use workflows::{get_asset_workflow, inspect_workflow, max_inspect_multipart_body
 // crate-root consumer.
 #[cfg(test)]
 use assets::sweep_stale_asset_uploads_before;
+mod iris_curricula;
+mod iris_task_training;
+mod iris_training;
 mod training;
 use training::{
     batch_rename_training_dataset_items, create_training_dataset,
     create_training_dataset_analysis_job, create_training_dataset_caption_job,
     create_training_dataset_face_analysis_job, create_training_dataset_parquet_import_job,
-    create_training_dataset_upscale_job, create_training_job, delete_training_dataset,
-    finalize_training_dataset_parquet_import, get_training_dataset, get_training_dataset_readiness,
+    create_training_dataset_subject_mask_job, create_training_dataset_upscale_job,
+    create_training_job, delete_training_dataset, finalize_training_dataset_parquet_import,
+    get_training_dataset, get_training_dataset_readiness, get_training_dataset_subject_masks,
     list_training_datasets, list_training_presets, list_training_targets,
     repoint_training_dataset_items, resolve_control_overlay_output_location,
     resolve_finetune_output_location, resolve_training_output_location,
     set_training_dataset_item_quality_ack, smart_crop_training_dataset_items,
     strip_exif_training_dataset_items, trusted_adapter_files, trusted_base_checkpoint_files,
     update_training_dataset, upload_ltx_prepared_bundle, upload_training_dataset_item,
-    validate_lora_id_component, write_training_dataset_analysis_embeddings,
-    write_training_dataset_caption_sidecars, write_training_dataset_face_embeddings,
+    upload_training_dataset_subject_mask, validate_lora_id_component,
+    write_training_dataset_analysis_embeddings, write_training_dataset_caption_sidecars,
+    write_training_dataset_face_embeddings, write_training_dataset_subject_masks,
 };
 mod generation;
 use generation::{
@@ -200,11 +205,12 @@ use dto::{
     ConditionalComponentsDownloadRequest, CreateEventTicketRequest, DatasetAnalysisJobRequest,
     DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest, DatasetFaceRecordsBody,
     DatasetImageFixBody, DatasetParquetImportJobRequest, DatasetRepointBody,
-    DatasetUpscaleJobRequest, DirectoriesResponse, EventsQuery, FaceLikenessCompareRequest,
-    FrameExtractRequest, HealthResponse, HostCapabilitiesResponse, ImageJobRequest,
-    InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest,
-    LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest, ModelImportRequest,
-    ModelImportSourceV1, OwnershipModeV1, PersonDetectionJobRequest, PersonTrackCorrectionsRequest,
+    DatasetSubjectMaskJobRequest, DatasetSubjectMasksBody, DatasetUpscaleJobRequest,
+    DirectoriesResponse, EventsQuery, FaceLikenessCompareRequest, FrameExtractRequest,
+    HealthResponse, HostCapabilitiesResponse, ImageJobRequest, InterleaveJobRequest, JobsQuery,
+    LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest, LorasQuery, MetricsQuery,
+    ModelConvertRequest, ModelDownloadRequest, ModelImportRequest, ModelImportSourceV1,
+    OwnershipModeV1, PersonDetectionJobRequest, PersonTrackCorrectionsRequest,
     PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest,
     QualityAckBody, ReadinessQuery, RecipePresetsQuery, SavedVoiceCreateRequest,
     StartupReadinessResponse, TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest,
@@ -283,6 +289,13 @@ use prompts::create_prompt_refine_job;
 // `face_likeness_compare` job scoring a candidate asset against a source identity reference asset.
 mod face_likeness;
 use face_likeness::create_face_likeness_compare_job;
+// Iris-3B monocular depth (sc-25682): the typed `image_depth` route behind the Image Editor and
+// Library depth actions.
+mod depth_jobs;
+use depth_jobs::create_image_depth_job;
+// Iris-3B restoration pre-submission plan preview (sc-25683): the engine's pure planner, no weights.
+mod image_restoration;
+use image_restoration::plan_image_restoration;
 mod poses;
 use poses::{create_pose_sources, create_poses, get_pose_preview, sweep_stale_pose_uploads};
 mod keypoints;
@@ -394,6 +407,14 @@ const MAX_JSON_BODY_BYTES: usize = 10 * 1024 * 1024;
 // still exceed the ordinary API ceiling by hundreds of megabytes.
 const MAX_PARQUET_FINALIZE_BODY_BYTES: usize = 512 * 1024 * 1024;
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
+// sc-2126: the subject-mask worker POSTs a dataset's masks as base64 PNG in chunks of at most
+// 64 MiB of encoded items (`SUBJECT_MASK_POST_CHUNK_BYTES` in the worker's subject_mask_jobs.rs),
+// so any dataset size fits; this per-body ceiling leaves the chunk generous headroom.
+const MAX_SUBJECT_MASKS_BODY_BYTES: usize = 256 * 1024 * 1024;
+// One replacement-mask upload: the store's encoded-mask cap plus multipart framing headroom. The
+// store re-checks the exact limit and answers a field-level error past it.
+const MAX_SUBJECT_MASK_MULTIPART_BODY_BYTES: usize =
+    sceneworks_core::training_subject_masks::SUBJECT_MASK_MAX_UPLOAD_BYTES as usize + 1024 * 1024;
 const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
 const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
 const MAX_MODEL_MULTIPART_BODY_BYTES: usize = MAX_MODEL_UPLOAD_BYTES + 16 * 1024 * 1024;
@@ -1507,6 +1528,18 @@ fn create_app_with_state_mode(
         .route("/api/v1/auth/verify", post(verify_access))
         .route("/api/v1/training/targets", get(list_training_targets))
         .route("/api/v1/training/presets", get(list_training_presets))
+        .route(
+            "/api/v1/training/data-walk",
+            get(iris_training::training_data_walk),
+        )
+        .route(
+            "/api/v1/training/iris/stage-presets",
+            get(iris_curricula::iris_stage_presets),
+        )
+        .route(
+            "/api/v1/training/iris/plan-check",
+            post(iris_curricula::iris_plan_check),
+        )
         .route("/api/v1/catalogs", get(list_catalogs).post(create_catalog))
         .route("/api/v1/catalogs/attach", post(attach_catalog))
         .route(
@@ -1651,6 +1684,17 @@ fn create_app_with_state_mode(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/ltx-prepared-bundle",
             post(upload_ltx_prepared_bundle).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
+        // Iris depth / restoration dataset sidecars + the pre-launch dataset check (sc-25687/8).
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/iris-sidecar/:kind",
+            post(iris_task_training::upload_iris_item_sidecar)
+                .delete(iris_task_training::delete_iris_item_sidecar)
+                .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/iris-check",
+            post(iris_task_training::check_iris_task_dataset),
+        )
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/batch-rename",
             post(batch_rename_training_dataset_items),
@@ -1681,6 +1725,23 @@ fn create_app_with_state_mode(
             post(create_training_dataset_face_analysis_job),
         )
         .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-mask-jobs",
+            post(create_training_dataset_subject_mask_job),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-masks",
+            // The worker POSTs generated masks (base64 PNG) in chunks of up to 64 MiB, beyond the
+            // small JSON router default, so this route gets its own bounded limit.
+            get(get_training_dataset_subject_masks)
+                .post(write_training_dataset_subject_masks)
+                .layer(DefaultBodyLimit::max(MAX_SUBJECT_MASKS_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/subject-mask",
+            post(upload_training_dataset_subject_mask)
+                .layer(DefaultBodyLimit::max(MAX_SUBJECT_MASK_MULTIPART_BODY_BYTES)),
+        )
+        .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/analysis-embeddings",
             post(write_training_dataset_analysis_embeddings),
         )
@@ -1707,6 +1768,10 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/training/jobs",
             post(create_training_job),
+        )
+        .route(
+            "/api/v1/training/jobs/:job_id/iris-metrics",
+            get(iris_curricula::iris_training_metrics),
         )
         .route(
             "/api/v1/projects/:project_id/files/*relative_path",
@@ -1983,6 +2048,7 @@ fn create_app_with_state_mode(
             "/api/v1/image/vectorize/prompt/jobs",
             post(create_vector_prompt_workflow),
         )
+        .route("/api/v1/image/depth/jobs", post(create_image_depth_job))
         .route("/api/v1/image/vqa/jobs", post(create_vqa_job))
         .route("/api/v1/image/interleave/jobs", post(create_interleave_job))
         .route("/api/v1/video/jobs", post(create_video_job))
@@ -2146,6 +2212,10 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/prompt-batches/:batch_id/duplicate",
             post(duplicate_prompt_batch),
+        )
+        .route(
+            "/api/v1/image-restoration/plan",
+            post(plan_image_restoration),
         )
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/jobs/claim", post(claim_job))
@@ -5089,6 +5159,18 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
             "prompt must be between 1 and 4000 characters",
         ));
     }
+    // A native prompt batch (sc-25681): every prompt obeys the single prompt's length bound. Its
+    // shape against the model (declared cap, `prompt == prompts[0]`, `prompts × count`) is judged
+    // in `create_image_job` against the canonical catalog entry.
+    if payload
+        .prompts
+        .iter()
+        .any(|prompt| prompt.is_empty() || prompt.chars().count() > MAX_PROMPT_CHARS)
+    {
+        return Err(ApiError::bad_request(
+            "each of prompts must be between 1 and 4000 characters",
+        ));
+    }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
     validate_prompt_enhancement_fields(&payload.advanced)?;
     validate_image_pose_count(&payload.advanced)?;
@@ -5147,11 +5229,36 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         )?;
     }
     if payload.upscale.enabled {
-        if ![2, 4].contains(&payload.upscale.factor) {
-            return Err(ApiError::bad_request("upscale.factor must be 2 or 4"));
-        }
         if payload.upscale.engine.trim().is_empty() {
             return Err(ApiError::bad_request("upscale.engine is required"));
+        }
+        if payload.upscale.is_iris() {
+            // Iris restoration (sc-25683) is sized by `upscale.scale` (default 4×, any positive
+            // factor), not `factor`; a non-default `factor` would be silently ignored, so refuse it.
+            if payload.upscale.factor != sceneworks_core::contracts::default_image_upscale_factor()
+            {
+                return Err(ApiError::bad_request(
+                    "upscale.factor is not a control of the Iris restoration engine; use upscale.scale",
+                ));
+            }
+            if payload.upscale.extra.contains_key("softness") {
+                return Err(ApiError::bad_request(
+                    "upscale.softness is not a control of the Iris restoration engine",
+                ));
+            }
+            payload
+                .upscale
+                .iris_params()
+                .map_err(|error| ApiError::bad_request(format!("upscale.{error}")))?;
+        } else {
+            if ![2, 4].contains(&payload.upscale.factor) {
+                return Err(ApiError::bad_request("upscale.factor must be 2 or 4"));
+            }
+            sceneworks_core::image_restoration::reject_iris_only_keys(
+                &payload.upscale.iris_controls(),
+                &payload.upscale.engine,
+            )
+            .map_err(|error| ApiError::bad_request(format!("upscale.{error}")))?;
         }
     }
     Ok(())
@@ -5330,9 +5437,21 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         validate_dimension(height, "height", MAX_VIDEO_DIMENSION)?;
     }
     match payload.mode.as_str() {
-        "image_to_video" if payload.source_asset_id.is_none() => Err(ApiError::bad_request(
-            "Image to Video requires a source image.",
-        )),
+        "image_to_video"
+            if payload.source_asset_id.is_none()
+                && !sceneworks_core::h3_keyframes::accepts_last_only_image_to_video(
+                    &payload.model,
+                    &payload.mode,
+                    payload
+                        .last_frame_asset_id
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty()),
+                ) =>
+        {
+            Err(ApiError::bad_request(
+                "Image to Video requires a source image.",
+            ))
+        }
         "first_last_frame"
             if payload.source_asset_id.is_none() || payload.last_frame_asset_id.is_none() =>
         {

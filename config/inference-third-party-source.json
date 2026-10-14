@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference feature merge 75e03b5a: 756 provenance candidates and 108 production-Rust crate prefixes. Veda selector/predictor/layout ports retain the frozen 60bfae6 MIT notice; the native INT8 arithmetic retains its SageAttention BSD-3-Clause notice, and the captured partial-sort implementation retains the LLVM Apache-2.0-with-LLVM-exceptions notice. Those exact source notices are bundled in the existing MiniMax-H3 About notice, separately from model-weight terms. The Veda source paths are explicitly mapped rather than inheriting only the model architecture disposition. Other candidate changes include the current training/body/perceptual inventory and shared checkpoint parser relocation; unresolved body/perceptual classifications and other compliance items remain advisory under sc-19751. Historical source and measurement records retain their own revisions. This mapping grants no model-weight redistribution and makes no measurement currency claim.",
-  "inferenceRevision": "75e03b5abc504d06688b75c9f7bc7a23f0873f5b",
-  "auditDigest": "d7a50159b857bc859e97404678eca63c9402cb02b7a54b83c1abf381bf4964aa",
+  "_comment": "Audit inventory rescanned at inference main revision 6eadd2f3 (inference main carrying the epic sc-25140 MiniMax-H3 Veda block-sparse attention feature and its review fixes, the Qwen-Image 2.1 work, and the Iris-3B epic sc-25678 / epic 2123 work): 772 provenance candidates and 111 production-Rust crate prefixes. The candidate added since 1e0b4c0c is crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs, covered by its crate architecture prefix. The crate prefix added since 1e0b4c0c is the vendored crates/media/candle-gen/vendor/candle-metal-kernels: upstream Hugging Face Candle candle-metal-kernels 0.10.2 plus one unmodified upstream Metal strided-reduce fix documented in its VENDORED.md, classified under the Hugging Face Candle About component alongside the vendored candle-core. Veda sources (gen-core veda/topk.rs, mlx-gen-minimax-h3 veda/mod.rs) remain routed to the veda-sparse-source area, whose frozen Veda-on-ComfyUI 60bfae6 MIT, SageAttention BSD-3-Clause and LLVM Apache-2.0-with-LLVM-exceptions notices are bundled in the existing MiniMax-H3 About notice, separately from model-weight terms. The mlx-gen-iris and candle-gen-iris crates are architecture reimplementations of speridlabs/iris-3b classified under the iris-3b About component; the gen-core iris modules fall under the existing gen-core ported-source area. The perceptual/body production crates remain unclassified open advisory items for epic 2123's compliance pass; other open compliance items remain advisory under sc-19751. Historical source and measurement records retain their own revisions. This mapping grants no model-weight redistribution, and generated inventories and digests describe this exact source with no measurement currency claim.",
+  "inferenceRevision": "6eadd2f3ba9fcc642cf86d78d3cc8fed9a1f605f",
+  "auditDigest": "01b4cec4f120908f62dc495fc142b8e7deb4d3fe534ae793fdda2b7e0edf3b13",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "75e03b5abc504d06688b75c9f7bc7a23f0873f5b",
+    "revision": "6eadd2f3ba9fcc642cf86d78d3cc8fed9a1f605f",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 756,
-    "populationSha256": "99632eeb946ae0fcd78179ed15f518038ee5ec23afc6e3d7405fcdbe021d6efd"
+    "matchedFiles": 772,
+    "populationSha256": "fccc94db02dd33f688429abd55d05ad261fa1e3a26b1aea500b797ba3a3993a0"
   },
   "portedSourceAreas": [
     {
@@ -186,7 +186,8 @@
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers.",
       "excludePaths": [
         "crates/contracts/gen-core/src/sampling/cfgpp.rs",
-        "crates/contracts/gen-core/src/sampling/solvers.rs"
+        "crates/contracts/gen-core/src/sampling/solvers.rs",
+        "crates/contracts/gen-core/src/veda/topk.rs"
       ]
     },
     {
@@ -597,11 +598,28 @@
       ]
     },
     {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-iris",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-iris/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Iris-3B provider (MLX lane, epic sc-25678 / sc-25679): an architecture reimplementation of the upstream speridlabs/iris-3b reference pipeline (pixel-space hybrid dual-/single-stream DiT with its PiT pixel head, the layerwise Qwen3-VL text adapter, the FlowDPM-Solver++ on the shifted rectified-flow schedule) and the Qwen3-VL-4B-Instruct text conditioning. The applicable terms (Apache-2.0 for both speridlabs/iris-3b and Qwen/Qwen3-VL-4B-Instruct) are mapped in the About manifest's iris-3b component; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-iris",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-iris/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Iris-3B provider (Candle/CUDA lane, epic sc-25678 / sc-25680): the Candle port of the same upstream speridlabs/iris-3b reference pipeline the MLX lane reimplements (pixel-space hybrid DiT with its PiT pixel head, the layerwise Qwen3-VL text adapter, the FlowDPM-Solver++ schedule, plus the depth and restoration task heads) and the Qwen3-VL-4B-Instruct text conditioning. The applicable terms (Apache-2.0 for both speridlabs/iris-3b and Qwen/Qwen3-VL-4B-Instruct) are mapped in the About manifest's iris-3b component; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-minimax-h3",
       "pathPrefix": "crates/media/mlx-gen/mlx-gen-minimax-h3/src/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "MiniMax-H3 (Hailuo 3.0) provider (MLX lane, epic sc-17137): an architecture reimplementation of the upstream MiniMax-H3 reference and diffusers pipeline (flow-matching DiT, transformer-decoder video VAE and its 3-D causal CNN encoder, DAC-lineage audio VAE encoder + BigVGAN decoder with the Kaiser-sinc alias-free resamplers, the Qwen3-VL text encoder, LoRA/LoKr adapter validation) and the SceneWorks tier converter and memory strategy. The applicable model terms (MiniMax H3 Community License, and Apache-2.0 for the bundled Qwen3-VL-32B text encoder) are mapped in the About manifest's minimax-h3 component; the candidate inventory pins the exact source blob and normalized provenance markers."
+      "evidence": "MiniMax-H3 (Hailuo 3.0) provider (MLX lane, epic sc-17137): an architecture reimplementation of the upstream MiniMax-H3 reference and diffusers pipeline (flow-matching DiT, transformer-decoder video VAE and its 3-D causal CNN encoder, DAC-lineage audio VAE encoder + BigVGAN decoder with the Kaiser-sinc alias-free resamplers, the Qwen3-VL text encoder, LoRA/LoKr adapter validation) and the SceneWorks tier converter and memory strategy. The applicable model terms (MiniMax H3 Community License, and Apache-2.0 for the bundled Qwen3-VL-32B text encoder) are mapped in the About manifest's minimax-h3 component; the candidate inventory pins the exact source blob and normalized provenance markers.",
+      "excludePaths": [
+        "crates/media/mlx-gen/mlx-gen-minimax-h3/src/veda/mod.rs"
+      ]
     },
     {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-mochi",
@@ -959,10 +977,10 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "75e03b5abc504d06688b75c9f7bc7a23f0873f5b",
+    "revision": "6eadd2f3ba9fcc642cf86d78d3cc8fed9a1f605f",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 108,
-    "cratePopulationSha256": "6fad70d0f24443f9fd11309c33afc84b9e6b7b70532437a7c0be6c7982af82cc"
+    "cratePrefixes": 111,
+    "cratePopulationSha256": "99015076703c1fa369041bb4f1cd1390248a7007ea79331857e1bff8552f3f03"
   },
   "crateDispositions": [
     {
@@ -1050,6 +1068,12 @@
       "prefix": "crates/media/mlx-gen/mlx-gen-joycaption",
       "disposition": "first-party-original",
       "evidence": "Thin consumer seam (story 7265): descriptor, provider registration, and gen-core contract adaptation only — `src/lib.rs` and `src/model.rs`, no `prompt.rs`. Re-verified at the pinned revision (sc-15191 review): this crate contains NO upstream JoyCaption strings; it calls `mlx_gen::caption::joycaption::{capabilities, build_prompt}`. The upstream-derived prompt map for the MLX lane lives in `crates/media/mlx-gen/src/caption/joycaption.rs` — the SAME reproduced `CAPTION_TYPE_MAP` content audited on the `crates/media/candle-gen/candle-gen-joycaption` entry — and that path is covered by the `joycaption-source` ported-source area (which names it directly since sc-15443 made it marker-bearing), not by this disposition. The JoyCaption model implementation lives in mlx-llm's `mlx-joycaption` provider, outside this repository."
+    },
+    {
+      "prefix": "crates/media/candle-gen/vendor/candle-metal-kernels",
+      "disposition": "upstream-content-existing-terms",
+      "component": "candle-transformers-source",
+      "evidence": "NOT first-party: vendored Hugging Face Candle candle-metal-kernels 0.10.2 from upstream commit 1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d (the revision vendor/candle-core is taken from) with upstream commit 2395577a43cc704e486edf5389cb14ba97eba0f8 (Metal rank-5+ strided reduce fix, #3873) applied unmodified, as documented in its VENDORED.md; the directory ships upstream's LICENSE-APACHE and LICENSE-MIT. Its production source carries no provenance marker, so it has no candidate in the inventory; its terms are the Hugging Face Candle About component already covering the vendored candle-core."
     }
   ]
 }

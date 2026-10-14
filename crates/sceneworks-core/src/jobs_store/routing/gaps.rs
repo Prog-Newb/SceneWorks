@@ -302,6 +302,7 @@ pub(crate) fn oom_remediation_hint(job_type: Option<&JobType>) -> &'static str {
             | JobType::ImageUpscale
             | JobType::ImageDetail
             | JobType::ImageSegment
+            | JobType::ImageDepth
             | JobType::ImageVqa
             | JobType::ImageInterleave,
         ) => ", likely out-of-memory — reduce the image count or resolution",
@@ -435,6 +436,10 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // worker — not a native-flow gap. Gated by the worker's capability advertisement, so it queues
         // rather than enforce-fails here.
         | JobType::DatasetFaceAnalysis
+        // sc-2126: dataset_subject_mask runs the native SAM3 person segmenter (the smart-select
+        // checkpoint) in the Rust worker — not a native-flow gap. It routes by the `image_segment`
+        // capability advertisement, so it queues rather than enforce-fails here.
+        | JobType::DatasetSubjectMask
         // sc-4415: face_likeness_compare runs the same native SCRFD+ArcFace stack to score two existing
         // assets on demand — a native Rust/MLX job, not a native-flow gap. Gated by the worker's
         // capability advertisement, so it queues rather than enforce-fails here.
@@ -515,6 +520,12 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // smart-select tool is native on Mac. The off-Mac Candle sibling is advertised and
         // dispatched separately; this oracle intentionally describes only the Mac path.
         JobType::ImageSegment => Ok(()),
+
+        // Iris-3B monocular depth (sc-25682): the `iris_3b_depth` task export runs in-process on
+        // the macOS Rust worker (`depth_jobs::run_image_depth_job`, native MLX) and on the Candle
+        // worker off-Mac. Its availability is the worker's `image_depth` advertisement plus the
+        // installed task export, so it queues by capability rather than enforce-failing here.
+        JobType::ImageDepth => Ok(()),
 
         // Pure audio synthesis (SceneWorks Audio Studio, epic 13400 / sc-13404): Kokoro TTS runs
         // in-process on the runtime's candle audio lane (`catalog().audio()`, shipped default-on in
@@ -688,6 +699,8 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::PoseDetect
         | JobType::KpsExtract
         | JobType::ImageSegment
+        // sc-25682: Iris depth on the Candle lane routes by the `image_depth` capability.
+        | JobType::ImageDepth
         | JobType::LoraTrain
         // epic 10159: control_training routes by capability (only a candle worker with the
         // krea_control trainer advertises it); candle-eligible ones already early-returned Ok via
@@ -702,6 +715,8 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::DatasetUpscale
         // sc-6538: dataset_face_analysis on the candle lane (candle-gen-face) routes by capability too.
         | JobType::DatasetFaceAnalysis
+        // sc-2126: dataset_subject_mask on the candle lane (candle SAM3) routes by `image_segment` too.
+        | JobType::DatasetSubjectMask
         // sc-4415: face_likeness_compare on the candle lane (candle-gen-face) routes by capability too.
         | JobType::FaceLikenessCompare
         // sc-13404: pure audio synthesis (Kokoro TTS) runs on the runtime's candle audio lane off-Mac
@@ -977,6 +992,22 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
                 }
             ),
             Some("epic 5480"),
+        ),
+        CandleImageRefusal::IrisSurface => UnsupportedReason::new(
+            Some(model),
+            "Iris-3B request outside plain text-to-image",
+            &format!(
+                "Iris-3B serves text-to-image only — no source/reference/mask, controls, poses, \
+                 quant tier (advanced.mlxQuantize / advanced.quantTier) or hires fix, on either \
+                 backend (generation-task LoRA / LoKr adapters do apply). This request (mode {mode:?}) carries one of those, so it is \
+                 refused rather than rendered with the carrier silently dropped.{remediation}{also}",
+                remediation = if also.is_empty() {
+                    " Re-submit as plain text_to_image without it and the same prompt routes."
+                } else {
+                    ""
+                }
+            ),
+            Some("sc-25680"),
         ),
         CandleImageRefusal::QuantTier => {
             let bits = candle_requested_quant_bits(payload).unwrap_or_default();

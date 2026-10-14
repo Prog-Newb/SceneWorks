@@ -370,6 +370,7 @@ async fn generate_flux1_dev_control_stream(
         None => memory_plan,
     };
     let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        native_batch: 1,
         width,
         height,
         count: 1,

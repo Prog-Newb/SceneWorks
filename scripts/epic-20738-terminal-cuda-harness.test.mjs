@@ -206,10 +206,19 @@ test("current and legacy Illustrious download selectors fail closed independentl
   const checked = profile();
   const evidenceBytes = await readFile("config/download-pattern-evidence.json", "utf8");
   const current = expectedCurrentArtifactFilesFromEvidenceBytes(checked, evidenceBytes);
-  // The union includes the YuE1 re-hosts, YuE2 upstream repos, and Wan-VACE entries. The
-  // Illustrious file censuses below did not move; assert them beside the digest.
+  // Re-pinned by sc-24832 alongside `CURRENT_DOWNLOAD_EVIDENCE_SHA256`: the evidence file was
+  // re-recorded when the catalog gained epic 2123's training auxiliaries — the depth-anchoring keys
+  // (sc-2125), the sc-24830 tiny decoders, the sc-24831 FaceMesh-v2 re-host, the sc-24833 FLUX.2
+  // VAE / E-LatentLPIPS weights, and sc-24832's ViTPose+ base and HybrIK / Sapiens re-hosts, plus main's
+  // YuE1 / YuE2 / Wan-VACE entries from the final main sync (135 keys), and sc-25213's ostris Z-Image-Turbo
+  // de-distill training adapter (136 keys), and the TAEQI2.1 tiny decoder of the Qwen Image 2.1 trainer's
+  // decoded-x0 losses (137 keys), the Iris-3B epic's six (sc-25678: 143 keys), and the
+  // sc-25140 MiniMax-H3 Veda sparse predictor (144 keys). The Illustrious
+  // file censuses below are
+  // the real subject of this test and did NOT move — which is the point of asserting them beside the
+  // digest.
   assert.equal(current.downloadEvidenceSha256,
-    "8d97d3e7e62ce354695aa6d22adf9bf33ff4a6cb3784f495e75aab2410ed9607");
+    "621ef5b82026590ebe91180f4226215a9034718b7c175f36926a85d85848a0f3");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 
@@ -3288,7 +3297,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
           derivedSidecarRoot: path.join(scratch, "derived-candle-device-cache"),
           missingStore: path.join(scratch, "persistent-missing-file"),
           expectedNonModelPaths: [
-            { kind: "cargoTarget", path: path.resolve(sceneworks, "target") },
+            { kind: "cargoTarget", path: path.resolve(process.env.CARGO_TARGET_DIR ?? path.join(sceneworks, "target")) },
             { kind: "cargoHome", path: path.resolve(process.env.CARGO_HOME ?? path.join(process.env.USERPROFILE ?? scratch, ".cargo")) },
             { kind: "campaignOutput", path: output },
             { kind: "pythonVenv", path: path.dirname(path.dirname(path.resolve("python"))) },

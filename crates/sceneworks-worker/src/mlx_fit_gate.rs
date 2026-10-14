@@ -1276,6 +1276,10 @@ pub(crate) struct MlxRequestInputs {
     /// [`request_batch`] for why it must never reach a geometry's `batch`. Kept here so the
     /// over-budget message can quote the request the operator actually submitted.
     pub count: u32,
+    /// Images ONE provider pass renders: `1` on every sequential lane, and `prompts × count` for a
+    /// native prompt batch (sc-25681, `image.maxPromptBatchImages`) — the genuine batched pass
+    /// [`request_batch`] admits against.
+    pub native_batch: u32,
     pub mode: String,
     pub overlay: Option<String>,
     pub adapter_count: usize,
@@ -1372,10 +1376,15 @@ pub(crate) fn add_post_load_external_delta(baseline: u64, before: u64, after: u6
 /// activation term ALONE (144 GiB) exceeded the whole budget, so that cell rejected every model at
 /// every tier on a 128 GiB Mac before a single weight byte was counted.
 ///
-/// If a provider ever renders a genuine batched pass, the fix is to thread THAT pass's batch size
-/// here — not to reinstate the job count, which cannot describe serialized work.
-fn request_batch(_inputs: &MlxRequestInputs) -> u32 {
-    1
+/// A provider that renders a genuine batched pass threads THAT pass's batch size here instead of
+/// the job count: the native prompt batch (sc-25681, Iris-3B `generate(prompts=[…])`) carries its
+/// `prompts × count` images in [`MlxRequestInputs::native_batch`]. All of them are charged, not
+/// just one `count` repetition's prompt rows: the engine renders the repetitions inside the same
+/// provider call and keeps every finished image live until it returns, and no batched run has been
+/// measured (sc-25684 owns that), so the declared estimate scales the whole activation term by the
+/// image count — conservative by construction, never a batch admitted on a one-image budget.
+fn request_batch(inputs: &MlxRequestInputs) -> u32 {
+    inputs.native_batch.max(1)
 }
 
 /// The provider-facing geometry of one forward pass. See [`request_batch`] for the `batch` rule.
@@ -4782,7 +4791,7 @@ const LENS_DENSE_HEADROOM_GB: f64 = 29.88;
 ///
 /// It applies to [`HEADROOM_GB`] ONLY. See [`HeadroomAllowance`] for why that distinction is load
 /// bearing rather than pedantic.
-const OS_APP_RESERVE_GB: f64 = 4.0;
+pub(crate) const OS_APP_RESERVE_GB: f64 = 4.0;
 
 /// A family's flat 1024² allowance, together with how much of it is fixed OS/app reserve rather than
 /// this request's area-dependent activation transient.
@@ -5335,7 +5344,7 @@ pub(crate) fn sum_text_encoder_bytes(dir: &Path) -> u64 {
 /// on the generator-cache thread, which is already blocking on the weight load, so a one-shot
 /// subprocess probe there is free. `None` off macOS or when the probe fails ⇒ the gate no-ops (a
 /// cached `None` is a deliberate fail-open, consistent with `Unknown` never blocking).
-fn probe_total_unified_memory_gib() -> Option<f64> {
+pub(crate) fn probe_total_unified_memory_gib() -> Option<f64> {
     probe_total_unified_memory_bytes().map(|bytes| bytes as f64 / BYTES_PER_GIB)
 }
 
@@ -8193,6 +8202,7 @@ mod tests {
 
     fn request_inputs(width: u32, height: u32, count: u32) -> MlxRequestInputs {
         MlxRequestInputs {
+            native_batch: 1,
             width,
             height,
             count,
@@ -8210,6 +8220,7 @@ mod tests {
     #[test]
     fn krea_raw_true_cfg_and_reference_img2img_keep_exact_public_and_provider_shapes() {
         let plain = MlxRequestInputs {
+            native_batch: 1,
             width: 1024,
             height: 1024,
             count: 4,
@@ -8233,6 +8244,7 @@ mod tests {
         assert_eq!(request_geometry(&plain).reference_count, 0);
 
         let reference = MlxRequestInputs {
+            native_batch: 1,
             overlay: Some("references:1".to_owned()),
             has_reference: true,
             reference_count: 1,
@@ -8273,6 +8285,7 @@ mod tests {
         assert_eq!(request_geometry(&reference).reference_count, 1);
 
         let reference_low_rank_pid = MlxRequestInputs {
+            native_batch: 1,
             overlay: Some("references:1+adapters:1".to_owned()),
             adapter_count: 1,
             use_pid: true,
@@ -8285,6 +8298,7 @@ mod tests {
         assert_eq!(provider_inputs.as_ref().reference_count, 1);
 
         let pid = MlxRequestInputs {
+            native_batch: 1,
             use_pid: true,
             ..plain
         };
@@ -8296,6 +8310,7 @@ mod tests {
         assert!(pid.use_pid);
 
         let edit = MlxRequestInputs {
+            native_batch: 1,
             mode: "edit_image".to_owned(),
             overlay: Some("adapters:1+pid".to_owned()),
             adapter_count: 1,
@@ -8364,6 +8379,7 @@ mod tests {
         );
 
         let text = MlxRequestInputs {
+            native_batch: 1,
             width: 1024,
             height: 1024,
             count: 1,
@@ -8379,6 +8395,7 @@ mod tests {
         for provider in ["flux1_schnell", "flux1_dev"] {
             for mode in ["text_to_image", "style_variations"] {
                 let inputs = MlxRequestInputs {
+                    native_batch: 1,
                     mode: mode.to_owned(),
                     ..text.clone()
                 };
@@ -8391,6 +8408,7 @@ mod tests {
         }
 
         let character = MlxRequestInputs {
+            native_batch: 1,
             mode: "character_image".to_owned(),
             overlay: Some("ip-adapter".to_owned()),
             has_reference: true,
@@ -8403,6 +8421,7 @@ mod tests {
         );
         for mode in ["text_to_image", "style_variations", "character_image"] {
             let control = MlxRequestInputs {
+                native_batch: 1,
                 mode: mode.to_owned(),
                 overlay: Some("control".to_owned()),
                 has_reference: true,
@@ -8420,6 +8439,7 @@ mod tests {
             provider_request_mode(
                 "flux1_schnell",
                 &MlxRequestInputs {
+                    native_batch: 1,
                     mode: "character_image".to_owned(),
                     has_reference: true,
                     reference_count: 1,
@@ -8871,6 +8891,7 @@ mod tests {
 
     fn fixture_inputs(width: u32, height: u32) -> MlxRequestInputs {
         MlxRequestInputs {
+            native_batch: 1,
             width,
             height,
             count: 1,
@@ -10009,6 +10030,7 @@ mod tests {
         );
 
         let public_base = MlxRequestInputs {
+            native_batch: 1,
             width: 1024,
             height: 1024,
             count: 1,
@@ -10034,6 +10056,7 @@ mod tests {
         );
 
         let reference = MlxRequestInputs {
+            native_batch: 1,
             has_reference: true,
             reference_count: 1,
             ..public_base.clone()
@@ -10045,6 +10068,7 @@ mod tests {
         for provider in ["flux2_klein_9b_edit", "flux2_klein_9b_kv_edit"] {
             for references in 1..=8 {
                 let edit = MlxRequestInputs {
+                    native_batch: 1,
                     mode: "character_image".to_owned(),
                     reference_count: references,
                     ..reference.clone()
@@ -10102,6 +10126,7 @@ mod tests {
 
             for (use_pid, edge, overlap) in [(false, 512, 128), (true, 2048, 256)] {
                 let inputs = MlxRequestInputs {
+                    native_batch: 1,
                     width: 1024,
                     height: 1024,
                     count: 1,
@@ -10150,6 +10175,7 @@ mod tests {
             }
 
             let low_rank = MlxRequestInputs {
+                native_batch: 1,
                 width: 1024,
                 height: 1024,
                 count: 1,
@@ -10280,6 +10306,7 @@ mod tests {
                     .with_resolved_artifact_tier(Some("bf16"))
                     .expect("Klein dense tier remains explicit");
                 let inputs = MlxRequestInputs {
+                    native_batch: 1,
                     width: 1024,
                     height: 1024,
                     count: 1,
@@ -17063,6 +17090,7 @@ mod tests {
         };
         let plan = MlxRequestPlan::for_spec_and_manifest(engine, route, &spec, Some(entry), None);
         let inputs = MlxRequestInputs {
+            native_batch: 1,
             count: 2,
             ..fixture_inputs(2048, 2048)
         };
@@ -17223,6 +17251,7 @@ mod tests {
         );
         let evaluate = |count| {
             let inputs = MlxRequestInputs {
+                native_batch: 1,
                 count,
                 ..fixture_inputs(1024, 1024)
             };
@@ -18906,6 +18935,8 @@ mod tests {
         // span is exactly what the generator's regex reads.
         let swept = [
             "sdxl",
+            // Iris-3B (sc-25679): `supports_sequential_offload` — encoder, drop, then backbone.
+            "iris_3b",
             "z_image",
             "z_image_control",
             "z_image_turbo",
@@ -21266,6 +21297,7 @@ mod declared_sequential_release_artifact_tests {
                 .with_resolved_artifact_tier(Some("bf16"))
                 .unwrap();
                 let inputs = MlxRequestInputs {
+                    native_batch: 1,
                     width: 1024,
                     height: 1024,
                     count: 2,
