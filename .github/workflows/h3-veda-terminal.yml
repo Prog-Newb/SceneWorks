@@ -1,0 +1,62 @@
+name: H3 Veda terminal owned campaign
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Explicit physical backend; no automatic host selection.
+        required: true
+        type: choice
+        options: [mlx, candle_cuda]
+      mode:
+        description: Prepare or resume the exact campaign, or export selected closed-batch media for review.
+        required: true
+        type: choice
+        options: [prepare, resume, review]
+      review_case_ids:
+        description: Review mode only; JSON array of 1-4 exact owned case IDs. Selection is never acceptance.
+        required: false
+        type: string
+      sceneworks_sha:
+        description: Exact frozen SceneWorks commit containing this workflow.
+        required: true
+        type: string
+      inference_main_sha:
+        description: Exact permanent inference main and Cargo pin commit.
+        required: true
+        type: string
+      expected_runner:
+        description: Exact runner name; Mac must be nax-macos-2, Windows must be an explicitly selected cuda-windows host.
+        required: true
+        type: string
+      manifest_path:
+        description: Absolute path to frozen host-local template (prepare) or bound manifest (resume).
+        required: true
+        type: string
+      corpus_root:
+        description: Absolute host-local staged corpus root, only used by prepare.
+        required: true
+        type: string
+      offline_cache_root:
+        description: Absolute complete host-local offline HF cache root.
+        required: true
+        type: string
+      run_dir:
+        description: Absolute external owned campaign directory, durable across bounded batches.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Register the workflow on default main. This job performs no product or GPU work.
+# The exact feature-ref workflow replaces this body when manually dispatched there.
+jobs:
+  registration_only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Confirm default-branch registration only
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          echo "S9 workflow registered; this run is not campaign evidence."
