@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:a1131af90382398883f507011a953404a48c15e4b11be218976d3027254898ef",
+    "sceneWorksRevision": "source-tree:0fa11e2d9e6c7dad0556bcadd24d94967ac01987e699d4d9338fa87772c500a7",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "1a3c2f23e1d8768468707195a34d80b070214e8652faf84a31f0902a9210c26d"
+        "sha256": "9793e34a7b2b4ef6441e196c01c1fe9a57e886394bd1a5edbb4e0ecda0b93a9f"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -29,7 +29,7 @@
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "366f8a17f30527e3e196ca4800b60087739041a2bc4e2b5203c0cfc076f7192a"
+        "sha256": "153de9e94eb7842c5aef4481456fc6358d3d1426095341cfea75e1a368295afe"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "f250526b1b2128c83ad19b36341cd6287376134d727173bee1f6c4c3c4871318"
+        "sha256": "325ae1be693828ecbd06cd057ec60dc0309f6afaeb6d892b4ac1b92171c4e85e"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -81,11 +81,11 @@
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "674254f50808bc0a2da33ca86ef9512bf083a2935065b9070a62f8ddfe418e88"
+        "sha256": "821933df9912797ac0bec76551292598d16ff638996ba0e454f9c60eb51f1a52"
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "a443ab8ad8e55f1fc7ad5db9194ff86118c2481d592c026c8e9a9e1c4230ff53"
+        "sha256": "42fb98c6fc27abf68ba4eb1a54604d1a543339609bbe4a700b1f8cf4a477532b"
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
@@ -177,7 +177,7 @@
     "anchors": 252,
     "analyticOnlyCells": 99,
     "anchoredCells": 3878,
-    "staleAnchors": 250,
+    "staleAnchors": 252,
     "attestedAnchors": 0,
     "fullModels": 0
   },
@@ -6041,7 +6041,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-25690/iris-3b-bf16-candle-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 8
     },
@@ -6059,7 +6059,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-25690/iris-3b-bf16-mlx-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 6
     },
@@ -88516,7 +88516,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88568,7 +88568,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88625,7 +88625,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88683,7 +88683,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88737,7 +88737,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88789,7 +88789,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88846,7 +88846,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88904,7 +88904,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88956,7 +88956,7 @@
         "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -89013,7 +89013,7 @@
         "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -89071,7 +89071,7 @@
         "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -89123,7 +89123,7 @@
         "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -89180,7 +89180,7 @@
         "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -89238,7 +89238,7 @@
         "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
