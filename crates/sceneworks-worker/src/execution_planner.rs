@@ -1218,6 +1218,7 @@ mod tests {
                 NonZeroU32::new(512).expect("nonzero floor"),
             ),
             cfg_batching: CfgBatchingDomain::Unsupported,
+            prefix_kv_cache: Default::default(),
         };
         assert_eq!(
             select_execution_domains(&surface),
@@ -1235,6 +1236,7 @@ mod tests {
                 CfgBatching::Batched,
                 CfgBatching::Sequential,
             ]),
+            prefix_kv_cache: Default::default(),
         };
         assert_eq!(
             select_execution_domains(&surface),
@@ -1248,6 +1250,7 @@ mod tests {
             graph_eval_cadence_blocks: ExecutionValueDomain::Candidates(vec![4]),
             ffn_chunk_rows: ExecutionValueDomain::Candidates(vec![2048]),
             cfg_batching: CfgBatchingDomain::Modes(vec![CfgBatching::Batched]),
+            prefix_kv_cache: Default::default(),
         };
         let selection = select_execution_domains(&surface);
         assert_eq!(
@@ -1265,6 +1268,7 @@ mod tests {
             graph_eval_cadence_blocks: ExecutionValueDomain::Candidates(vec![0]),
             ffn_chunk_rows: ExecutionValueDomain::Candidates(vec![0]),
             cfg_batching: CfgBatchingDomain::Unsupported,
+            prefix_kv_cache: Default::default(),
         };
         assert_eq!(
             select_execution_domains(&surface),
@@ -1283,16 +1287,19 @@ mod tests {
                 graph_eval_cadence_blocks: ExecutionValueDomain::Candidates(vec![1]),
                 ffn_chunk_rows: ExecutionValueDomain::Candidates(vec![1]),
                 cfg_batching: CfgBatchingDomain::Modes(vec![CfgBatching::Sequential]),
+                prefix_kv_cache: Default::default(),
             },
             ExecutionSurface {
                 graph_eval_cadence_blocks: ExecutionValueDomain::Candidates(vec![0]),
                 ffn_chunk_rows: ExecutionValueDomain::Candidates(vec![0]),
                 cfg_batching: CfgBatchingDomain::Unsupported,
+                prefix_kv_cache: Default::default(),
             },
             ExecutionSurface {
                 graph_eval_cadence_blocks: ExecutionValueDomain::ANY_POSITIVE,
                 ffn_chunk_rows: ExecutionValueDomain::Candidates(vec![64, 128]),
                 cfg_batching: CfgBatchingDomain::Modes(vec![CfgBatching::Batched]),
+                prefix_kv_cache: Default::default(),
             },
         ] {
             let selection = select_execution_domains(&surface);
@@ -1473,16 +1480,19 @@ mod corpus_replay_tests {
                 graph_eval_cadence_blocks: ExecutionValueDomain::ANY_POSITIVE,
                 ffn_chunk_rows: ExecutionValueDomain::ANY_POSITIVE,
                 cfg_batching: CfgBatchingDomain::Unsupported,
+                prefix_kv_cache: Default::default(),
             },
             ExecutionSurface {
                 graph_eval_cadence_blocks: ExecutionValueDomain::Unsupported,
                 ffn_chunk_rows: ExecutionValueDomain::Unsupported,
                 cfg_batching: CfgBatchingDomain::Modes(vec![CfgBatching::Batched]),
+                prefix_kv_cache: Default::default(),
             },
             ExecutionSurface {
                 graph_eval_cadence_blocks: ExecutionValueDomain::Candidates(vec![8]),
                 ffn_chunk_rows: ExecutionValueDomain::Candidates(vec![2048]),
                 cfg_batching: CfgBatchingDomain::Modes(vec![CfgBatching::Sequential]),
+                prefix_kv_cache: Default::default(),
             },
         ];
         for (label, baseline) in decode_quality_request_memories() {
