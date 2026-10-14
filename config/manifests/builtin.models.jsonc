@@ -3453,12 +3453,16 @@
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
         "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"]
       },
-      // The engine refuses adapters outright at this pin (`supports_lora`/`supports_lokr` false,
-      // typed Unsupported), so there is no LoRA family to advertise and the Studio's LoRA rail
-      // stays closed for this id.
+      // LoRA/LoKr (sc-24156, epic 24107). 2.1 is its OWN adapter family, `qwen-image-2-1`, and
+      // NEVER `qwen-image`: the 2512 entry above is a ~20B DiT over Qwen2.5-VL, this one a ~7.1B DiT
+      // over a Qwen3 tower, so an adapter for one cannot load on the other (E10). The API's
+      // `validate_lora_specs_for_model` refuses a cross-family pick with a 400 naming both
+      // families, in either direction. `types` mirror the 2512 / FLUX.2 rows. This advertisement is
+      // what makes the family KNOWN to the importer and the picker; whether a given backend serves
+      // the render is the engine descriptor's `supports_lora`/`supports_lokr` (inference half).
       "loraCompatibility": {
-        "families": [],
-        "types": []
+        "families": ["qwen-image-2-1"],
+        "types": ["style", "enhance", "character"]
       },
       // ── ADMISSION GEOMETRY (sc-24112) ────────────────────────────────────────────────────────
       //
@@ -3630,8 +3634,8 @@
           "abi": 1,
           "provider": "qwen_image_2_1",
           "implementations": [
-            {"rung":"resident","fingerprint":"qwen-image-2-1-mlx-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"},
-              {"rung":"bounded_decode","fingerprint":"qwen-image-2-1-mlx-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,384,256],"decodeOverlaps":[64]},"source":"inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"}
+            {"rung":"resident","fingerprint":"qwen-image-2-1-mlx-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"bounded_decode","fingerprint":"qwen-image-2-1-mlx-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,384,256],"decodeOverlaps":[64]},"source":"inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"}
           ]
         }
       },
@@ -3702,9 +3706,9 @@
           "abi": 1,
           "provider": "qwen_image_2_1",
           "implementations": [
-            {"rung":"resident","fingerprint":"qwen-image-2-1-candle-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"},
-              {"rung":"staged_residency","fingerprint":"qwen-image-2-1-candle-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"},
-              {"rung":"bounded_decode","fingerprint":"qwen-image-2-1-candle-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,384,256],"decodeOverlaps":[64]},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"}
+            {"rung":"resident","fingerprint":"qwen-image-2-1-candle-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"staged_residency","fingerprint":"qwen-image-2-1-candle-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"bounded_decode","fingerprint":"qwen-image-2-1-candle-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,384,256],"decodeOverlaps":[64]},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"}
           ]
         }
       },
@@ -5860,6 +5864,331 @@
             { "label": "SenseNova-U1 prompt enhancement doc", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT/blob/main/docs/prompt_enhancement.md" }
           ]
         }
+      }
+    },
+    {
+      // Iris-3B (epic sc-25678, story sc-25679) — the GENERATION task of speridlabs/iris-3b: a
+      // pixel-space (no VAE) flow-matching DiT conditioned on 12 intermediate layers of
+      // Qwen3-VL-4B-Instruct, served natively by inference's `mlx-gen-iris` (`iris_3b`).
+      //
+      // TASK IDENTITY (E4). The upstream repo ships THREE task backbones side by side — generation
+      // at the root, `depth/` and `upscaler/` — and only generation conditions on text. This entry
+      // is the generation task alone: its primary download fetches exactly the root `config.yaml` +
+      // `model.safetensors` (never `depth/*` / `upscaler/*`), and the Qwen3-VL encoder is a
+      // SEPARATE `coRequisite` component tagged `componentId: "text_encoder"`, so the depth and
+      // restoration tasks can be their own catalog entries that install and run without it.
+      // The worker stages that component as `LoadSpec::components["text_encoder"]`
+      // (gen_core::iris::TEXT_ENCODER_COMPONENT) from the pinned snapshot; it never downloads at
+      // generation time.
+      //
+      // CONTROL SURFACE (E3) — exactly what the engine honours (sc-25681): prompt, negative prompt
+      // (the CFG unconditional), size on a 16-px grid (16..=2048), count <= 8, seed, steps,
+      // guidance (= upstream cfg_scale), the FlowDPM-Solver++ order as a sampler (`dpmpp_2m` =
+      // order 2, the default; `euler` = order 1), the schedule shift (upstream `shift`, default
+      // the checkpoint's flow.shift = 4.0; there is one shifted time grid, so no scheduler menu),
+      // the CFG interval, the caption-overflow policy, and generation-task LoRA/LoKr adapters
+      // stamped family=iris + irisTask=generation. Prediction target / train timesteps come from
+      // the checkpoint (no knob). It refuses quantization by name, so there is no tier axis.
+      // A negative prompt or a CFG interval only exists under CFG: at guidance 1.0 the engine
+      // refuses either, so the API refuses them and Image Studio disables both controls there.
+      "id": "iris_3b",
+      "name": "Iris 3B",
+      "family": "iris",
+      "type": "image",
+      "adapter": "mlx_iris",
+      // Served on both lanes: `mlx-gen-iris` on Apple Silicon (sc-25679) and `candle-gen-iris` on
+      // Windows/Linux NVIDIA (sc-25680) register the same `iris_3b` engine id, so the entry is not
+      // platform-scoped and every download below applies on every OS.
+      "macOnly": false,
+      "capabilities": ["text_to_image"],
+      "image": {
+        "negativePromptRequiresGuidance": true,
+        "supportsSchedulerShift": true,
+        "supportsCfgInterval": true,
+        "captionOverflowPolicies": ["warn", "error", "silent"],
+        // The released checkpoint shows its 16-px patch grid below 1024² (upstream fp32 does too);
+        // Image Studio hints at it and never restricts the size.
+        "patchGridVisibleBelow": 1024,
+        // Upstream generate(prompts=[…]): one batched pass renders prompts × count <= 8 images
+        // (the engine's max_count), prompt-minor, image k on seed + k. Image Studio packs its prompt
+        // batch into these native jobs.
+        "maxPromptBatchImages": 8
+      },
+      "downloads": [
+        // The upstream generation backbone, pulled directly (Apache-2.0; no SceneWorks re-host).
+        // FP32 on disk; the engine casts to bf16 at load. EXACT bytes of the two pinned files.
+        {
+          "provider": "huggingface",
+          "repo": "speridlabs/iris-3b",
+          "revision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+          "default": true,
+          "files": ["config.yaml", "model.safetensors"],
+          "estimatedSizeBytes": 11950114087,
+          "footprint": { "diskSizeBytes": 11950114087, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // The generation task's Qwen3-VL-4B-Instruct text encoder (Apache-2.0), pinned to the
+        // revision the backbone was trained against: config, tokenizer and the two bf16 shards.
+        // EXACT bytes of the listed files at the pinned revision.
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen3-VL-4B-Instruct",
+          "revision": "ebb281ec70b05090aa6165b016eac8ec08e71b17",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors"
+          ],
+          "estimatedSizeBytes": 8882829131
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/speridlabs/iris-3b"
+      },
+      "gated": false,
+      "defaults": {
+        // Release sampling defaults (gen_core::iris::DEFAULT_STEPS / DEFAULT_CFG_SCALE / DEFAULT_SIZE
+        // / DEFAULT_SOLVER_ORDER, and the release config.yaml's flow.shift).
+        "resolution": "1024x1024",
+        "steps": 100,
+        "guidanceScale": 3.0,
+        "sampler": "dpmpp_2m",
+        "schedulerShift": 4.0,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344", "768x768", "512x512"],
+        "count": [1, 2, 4, 8],
+        "minDimension": 16,
+        "maxDimension": 2048,
+        "requiresDimensionsMultipleOf": 16,
+        // gen_core::iris::SAMPLERS, default first (both lanes advertise the same pair).
+        "samplers": ["dpmpp_2m", "euler"]
+      },
+      "loraCompatibility": {
+        "families": ["iris"],
+        "types": ["style", "enhance", "character"],
+        // The task backbones share one architecture: only a generation-task stamp is offered here.
+        "irisTask": "generation"
+      },
+      "mlx": {
+        // Conservative DECLARED floor (no measurement campaign): bf16 backbone (~6 GB) + Qwen3-VL-4B
+        // (~8.9 GB) resident plus pixel-space activations; the engine bring-up observed ~20 GB at
+        // 512² and ~22.6 GB at 1024². Replaced by measured evidence at the epic-end campaign.
+        "minMemoryGb": 32,
+        // sc-25690: what the pinned mlx-gen-iris contract declares beyond Resident and
+        // StagedResidency (both implemented). Bounded decode is a truth about the architecture, not
+        // undelivered work; bounded attention and bounded transformer residency are applicable but
+        // not enabled on this lane, so they stay Missing.
+        "memoryStrategyStructuralExemptions": {
+          "bounded_decode": {
+            "overlays": ["none", "lora"],
+            "evidence": [
+              { "source": "inference:crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: iris_3b denoises in pixel space, so there is no latent, no autoencoder and no decoder scratch to tile (the decode phase is the [-1, 1] to RGB8 conversion)." }
+            ]
+          }
+        }
+      },
+      "candle": {
+        // Conservative DECLARED floors (no measurement campaign), the Candle twin of the MLX value
+        // above: bf16 backbone (~6 GB) + Qwen3-VL-4B text encoder (~8.9 GB) resident plus 1024²
+        // pixel-space activations. Existing inference CUDA real-weight runs on an RTX PRO 6000
+        // (38068347300, 38075865079) recorded an overall nvidia-smi peak of 21.3–21.4 GB at 1024²,
+        // 100 steps, bf16, count 1, text encoder resident (load peak 15.7 GB); SceneWorks smoke
+        // 38106019178 ran at 512². Only the staged row below was measured (one bounded run, not a
+        // calibration), hence `measured: false`.
+        // * `minMemoryGb` — like every padded Candle floor it folds in the 2 GB allocator reserve
+        //   (21.4 + 2.0 = 23.4, rounded up to 24), because `vram_gate::predicted_peak_gb` adds no
+        //   headroom to this scalar. Without it the fit gate had no prediction and admitted a load on
+        //   any card (FitDecision::Unknown).
+        // * `sequentialPeakGb` — `candle-gen-iris` advertises sequential offload (encode with the
+        //   Qwen3-VL encoder, drop it, then denoise), so a card under the resident floor is routed to
+        //   staged residency, whose second-stage check reads this row. MEASURED ONCE (sc-25684, the
+        //   bounded dispatch-only `iris_staged_vram_measurement` — then named
+        //   `iris_worker_gpu_smoke_staged` — windows-candle run 38160084545,
+        //   RTX PRO 6000): a 1024², count-1, 30-step job routed to `OffloadPolicy::Sequential` peaked at
+        //   11.97 GB overall card memory (nvidia-smi, 100 ms sampling, 0.47 GB idle baseline) — rounded
+        //   up to 12.0. The gate adds its 2 GB reserve (14.0), so a 16 GB card runs 1024² staged
+        //   instead of being refused. One row per bits-derived key the gate can name: the single bf16
+        //   artifact has no tier subdir, so the gate names it from `advanced.mlxQuantize` (q8 by
+        //   default). The block's `measured` flag stays false: it covers the declared values too.
+        // * `imageActivationGbPerMegapixel` — the pixel-space activations of ONE image per output
+        //   megapixel (1024² = 1 MP): the recorded 1024² resident peak minus the load peak
+        //   (21.4 − 15.7 = 5.7 GB), rounded up. Both floors above carry one image at <= 1024²; the gate
+        //   (`lane_controls::declared_activation_overlay_bytes`) charges
+        //   this × (images × max(1, MP) − 1) on both predictions, so a native prompt batch
+        //   (image.maxPromptBatchImages) and an output above 1024² (limits allow 2048² = 4 MP: +18 GB)
+        //   are never admitted on a floor sized for one 1024² image. Linear in area because both
+        //   engines run fused attention (transient linear in tokens). Declared, not measured.
+        "measured": false,
+        "minMemoryGb": 24,
+        "sequentialPeakGb": { "bf16": 12.0, "q8": 12.0, "q4": 12.0 },
+        "imageActivationGbPerMegapixel": 6.0,
+        // sc-25690: what the pinned candle-gen-iris contract declares beyond Resident and
+        // StagedResidency (both implemented). Bounded attention is implemented at the one published
+        // score budget (the shared 64 Mi operating point — a derived candidate, unmeasured on Iris);
+        // bounded decode is structurally not applicable; bounded transformer residency has no
+        // block-streaming loader and stays Missing.
+        "memoryStrategyCapabilities": {
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none", "lora"]
+          }
+        },
+        "memoryStrategyStructuralExemptions": {
+          "bounded_decode": {
+            "overlays": ["none", "lora"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: iris_3b denoises in pixel space, so there is no latent, no autoencoder and no decoder scratch to tile (the decode phase is the [-1, 1] to RGB8 conversion)." }
+            ]
+          }
+        }
+      },
+      "ui": {
+        "label": "Iris 3B",
+        "description": "Speridlabs Iris-3B text-to-image: a 3B pixel-space flow-matching DiT (no VAE) conditioned on Qwen3-VL-4B. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 100-step FlowDPM-Solver++ at CFG 3.0 by default. Downloads ~12 GB backbone + ~8.9 GB text encoder; needs ~32 GB unified memory on a Mac, or ~16 GB VRAM on an NVIDIA GPU at 1024² (staged: the text encoder is dropped before denoising; ~24 GB keeps it resident).",
+        "recommendedFor": ["text_to_image"],
+        "promptGuide": {
+          "title": "Iris 3B Prompt Guide",
+          "path": "/prompt-guides/iris-3b.md",
+          "sources": [
+            { "label": "Iris-3B model card", "url": "https://huggingface.co/speridlabs/iris-3b" },
+            { "label": "Iris-3B code", "url": "https://github.com/speridlabs/iris-3b" }
+          ]
+        }
+      }
+    },
+    {
+      // sc-25689 (epic 25678, E4) — the frozen DINOv2-B/14 REPA teacher of Iris 3B generation
+      // training (upstream `repa.teacher: dinov2_vitb14`, the Hugging Face mirror of the hub
+      // checkpoint at the revision `gen_core::iris::train::repa::DINOV2_BASE_HF_REVISION` pins).
+      // TRAINING-ONLY resource: read by the `iris_3b` TRAINER only, staged as its `repa_teacher`
+      // load component after the worker re-checks the pinned size + sha256
+      // (`iris_curricula::verify_repa_teacher_file`). Never part of the generation inference
+      // closure (`iris_3b` installs and generates without it), never downloaded at training time,
+      // and never a routable `model` of any job.
+      "id": "iris_repa_teacher_dinov2_base",
+      "name": "Iris REPA Teacher — DINOv2-B/14",
+      "family": "iris",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/facebook/dinov2-base",
+      "downloads": [
+        {
+          // Upstream, pinned to an immutable revision, not re-hosted. EXACT bytes (346345912,
+          // sha256 d73036b5…0841 — the LFS pointer at this revision).
+          "provider": "huggingface",
+          "repo": "facebook/dinov2-base",
+          "revision": "f9e44c814b77203eaa57a6bdbbd535f21ede1415",
+          "files": ["model.safetensors"],
+          "estimatedSizeBytes": 346345912
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/facebook/dinov2-base"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Iris REPA Teacher — DINOv2-B/14",
+        "description": "Training-only: the frozen DINOv2-B/14 image encoder (facebook/dinov2-base, ~346 MB) that Iris 3B training aligns its features to when REPA / iREPA is on (the official stage-1 curriculum). Not needed for generating with Iris 3B. Apache-2.0.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // sc-25682 (epic 25678, E4/E5) — Iris-3B MONOCULAR DEPTH as its own TASK install. The depth
+      // task is a separate fine-tune shipped in the `depth/` folder of the same upstream repo: one
+      // forward of the widened backbone conditioned on the export's shipped empty-prompt states, so
+      // it installs and runs WITHOUT the Qwen3-VL text encoder and without the generation backbone
+      // (the engine refuses either if staged). Its resource closure is exactly the three files below
+      // at the pinned revision; the generation entry `iris_3b` owns the repo root files, and a
+      // whole-model delete of either entry is scoped so it never takes the other's files.
+      "id": "iris_3b_depth",
+      "name": "Iris 3B Depth",
+      "family": "iris",
+      "type": "utility",
+      // Served on both lanes: `mlx-gen-iris` (Apple Silicon) and `candle-gen-iris` (Windows/Linux
+      // NVIDIA) both implement the depth task, so the entry is not platform-scoped.
+      "macOnly": false,
+      "capabilities": [],
+      "downloads": [
+        {
+          // Upstream (Apache-2.0; no SceneWorks re-host). FP32 on disk; bf16 compute by default.
+          "provider": "huggingface",
+          "repo": "speridlabs/iris-3b",
+          "revision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+          "default": true,
+          "files": ["depth/config.yaml", "depth/model.safetensors", "depth/empty_prompt.safetensors"],
+          "estimatedSizeBytes": 11989604079,
+          "footprint": { "diskSizeBytes": 11989604079, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/speridlabs/iris-3b"
+      },
+      "gated": false,
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      // DECLARED (measured: false) admission for the depth job (`depth_jobs::DepthAdmission`); the
+      // epic-end campaign (sc-25684) replaces it with measured evidence. Existing real-weight
+      // evidence: a 1024x2048 photo at the default 1024 cap (model input 512x1024 = 524288 px) peaked
+      // at 9.4 GB on MLX and 8.4 GB (nvidia-smi) on CUDA. `residentGb` is the bf16 backbone + reducer
+      // (~3B parameters) the forward keeps resident; the rest of the reference peak is treated as
+      // activations that grow with the model input's pixel count (both engines run fused/budgeted
+      // attention, so the transient is linear in tokens), padded by `extrapolationFactor` above the
+      // observed area. A request over the host budget is refused before load — never downscaled.
+      // The Candle `residentGb` is the card's own reading with the model loaded and nothing running
+      // (7306 MiB = 7.13 GiB over the idle baseline, sc-25690 catalog rehearsal run 38403658578):
+      // the gate compares against device-level free VRAM, which also counts the CUDA context, so
+      // the backbone's tensor bytes alone (6.5) under-stated an input smaller than the reference.
+      "depth": {
+        "admission": {
+          "measured": false,
+          "referenceModelPixels": 524288,
+          "extrapolationFactor": 1.5,
+          "mlx": { "residentGb": 6.5, "referencePeakGb": 9.4 },
+          "candle": { "residentGb": 7.2, "referencePeakGb": 8.4 }
+        }
+      },
+      "mlx": {
+        // Catalog display floor (unified memory) for the default 1024 cap; the job's own admission
+        // above is what gates a request.
+        "minMemoryGb": 16
+      },
+      "candle": {
+        // 8.4 GB recorded peak at the reference geometry + the 2 GB allocator reserve, rounded up.
+        "measured": false,
+        "minMemoryGb": 11,
+        // sc-25690: the pinned candle-gen-iris iris_3b_depth contract classifies StagedResidency
+        // StructurallyNotApplicable — a truth about the task, not undelivered work — so this lane's
+        // memory anchor is measured at the resident rung instead of the lane's staged default.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: the depth task loads no text encoder (it runs one backbone forward on the export's shipped empty-prompt states), so the backbone is the only component and there is nothing to shed between phases." }
+            ]
+          }
+        }
+      },
+      "ui": {
+        "label": "Iris 3B Depth",
+        "description": "Monocular depth estimation from the Iris-3B depth fine-tune (Sperid Labs, Apache-2.0). Saves a raw float32 relative-log-depth map (.npy) plus a colorized preview from the Image Editor or the Library. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; downloads only the ~12 GB depth export (no text encoder).",
+        "recommendedFor": []
       }
     },
     {
@@ -24955,6 +25284,201 @@
       }
     },
     {
+      // Iris-3B RESTORATION (epic sc-25678, story sc-25683) — the `upscaler/` task of
+      // speridlabs/iris-3b, served as the `iris` engine of the image-upscale surfaces (Image Studio
+      // post-processing, Image Editor + Library restore actions) by the `iris_3b_restore` transform
+      // that BOTH native bundles register (`mlx-gen-iris` on Apple Silicon, `candle-gen-iris` on
+      // Windows/Linux NVIDIA).
+      //
+      // TASK IDENTITY (E4). Its own resource closure: EXACTLY the three files of the `upscaler/`
+      // export — the restoration backbone, its `config.yaml` (whose `task: restoration` section the
+      // engine checks) and the shipped `empty_prompt.safetensors` conditioning. No text encoder, no
+      // generation backbone (the root `config.yaml` / `model.safetensors` belong to `iris_3b`), and
+      // no `depth/` files: install state is per-file, so installing the generation model never marks
+      // restoration installed or vice versa. The worker resolves the folder cache-only at this
+      // revision (`iris_restore::resolve_restore_export_dir`, pinned to the same repo/revision by
+      // `manifest_declares_the_restore_closure_the_resolver_reads`); a missing / torn / wrong-task
+      // export is a typed refusal before anything loads, and nothing downloads at restore time.
+      //
+      // MEMORY. DECLARED conservative floors (`measured: false`, no calibration campaign — S6 /
+      // sc-25684 owns measured values) from the existing real-weight evidence for a 512x384 →
+      // 2048x1536 restore (6 tiles): MLX peak 11.7 GB, CUDA nvidia-smi peak 10.1 GB, rounded up ~20 %
+      // to 14 / 12 GB, plus each gate's 2 GB reserve (16 / 14). Tiles are a fixed 1024 px, so the
+      // model working set is per-tile bounded; on unified memory the worker adds the host output
+      // canvas beyond that reference geometry and refuses honestly rather than shrinking the request
+      // (`iris_restore::admission_error`). Mirrored by `declared_floors_match_the_catalog`.
+      "id": "iris_3b_restore",
+      "name": "Iris 3B Restoration",
+      "family": "iris",
+      "type": "utility",
+      "macOnly": false,
+      "capabilities": [],
+      "downloads": [
+        {
+          // Upstream, Apache-2.0, not re-hosted. EXACT bytes of the three pinned files.
+          "provider": "huggingface",
+          "repo": "speridlabs/iris-3b",
+          "revision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+          "files": ["upscaler/config.yaml", "upscaler/model.safetensors", "upscaler/empty_prompt.safetensors"],
+          "estimatedSizeBytes": 11986978607
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/speridlabs/iris-3b"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "mlx": {
+        // Declared, not measured (the `mlx` block carries no `measured` flag; see the note above).
+        "minMemoryGb": 16
+      },
+      "candle": {
+        "measured": false,
+        "minMemoryGb": 14,
+        // sc-25690: the pinned candle-gen-iris iris_3b_restore contract classifies StagedResidency
+        // StructurallyNotApplicable — a truth about the task, not undelivered work — so this lane's
+        // memory anchor is measured at the resident rung instead of the lane's staged default.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: the restoration task loads no text encoder (it runs one backbone forward per tile on the export's shipped empty-prompt states), so the backbone is the only component and there is nothing to shed between phases." }
+            ]
+          }
+        }
+      },
+      "ui": {
+        "label": "Iris 3B Restoration",
+        // No `promptGuide`: a utility entry never reaches a Studio prompt-guide surface.
+        "description": "Iris-3B one-step restoration and tiled upscaling (default 4×, any positive scale including 1× restore-only) behind the Iris engine of Image Studio post-processing and the Image Editor / Library restore actions. Runs natively on MLX (Apple Silicon) and Candle/CUDA (NVIDIA). Downloads only the ~12 GB `upscaler/` export — no text encoder; needs ~16 GB unified memory on a Mac or ~14 GB VRAM on an NVIDIA GPU.",
+        "recommendedFor": ["image_upscale"]
+      }
+    },
+    {
+      // sc-25688 — LPIPS VGG16 trunk (torchvision IMAGENET1K_V1 `features.*`, bit-identical in timm's safetensors).
+      "id": "iris_restore_train_vgg16",
+      "name": "Iris Restoration Training — VGG16 (LPIPS trunk)",
+      "family": "iris",
+      "type": "utility",
+      // TRAINING-ONLY resource of Iris 3B restoration training (epic sc-25678, S10 sc-25688): read by
+      // the `iris_3b_restore` TRAINER only (`gen_core::iris::restoration_train::TRAINING_RESOURCES`),
+      // staged as a trainer component after the worker re-checks the pinned size + sha256
+      // (`verify_resource`). Never part of the restoration inference closure (`iris_3b_restore`
+      // installs and runs without it) and never a routable `model` of any job.
+      "componentOnly": true,
+      "capabilities": [],
+      "license": "BSD-3-Clause",
+      "licenseUrl": "https://github.com/pytorch/vision/blob/main/LICENSE",
+      "downloads": [
+        {
+          // Upstream, pinned to an immutable revision, not re-hosted. EXACT bytes (553432986).
+          "provider": "huggingface",
+          "repo": "timm/vgg16.tv_in1k",
+          "revision": "b8d8aa2dd860af9233c8c67385a8097fd6c35d3f",
+          "files": ["model.safetensors"],
+          "estimatedSizeBytes": 553432986
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/timm/vgg16.tv_in1k"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Iris Restoration Training — VGG16 (LPIPS trunk)",
+        "description": "Training-only: the frozen torchvision ImageNet VGG16 trunk (timm safetensors, ~553 MB) of the LPIPS perceptual loss used by Iris 3B restoration training in the Training Studio. Not needed for restoration itself. torchvision BSD-3-Clause; the VGG weights are credited to Simonyan & Zisserman.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // sc-25688 — LPIPS v0.1 VGG linear heads (bit-identical to lpips==0.1.4's vgg.pth lin layers).
+      "id": "iris_restore_train_lpips_lin",
+      "name": "Iris Restoration Training — LPIPS linear heads",
+      "family": "iris",
+      "type": "utility",
+      // TRAINING-ONLY resource of Iris 3B restoration training (epic sc-25678, S10 sc-25688): read by
+      // the `iris_3b_restore` TRAINER only (`gen_core::iris::restoration_train::TRAINING_RESOURCES`),
+      // staged as a trainer component after the worker re-checks the pinned size + sha256
+      // (`verify_resource`). Never part of the restoration inference closure (`iris_3b_restore`
+      // installs and runs without it) and never a routable `model` of any job.
+      "componentOnly": true,
+      "capabilities": [],
+      "license": "BSD-2-Clause",
+      "licenseUrl": "https://github.com/richzhang/PerceptualSimilarity/blob/master/LICENSE",
+      "downloads": [
+        {
+          // Upstream, pinned to an immutable revision, not re-hosted. EXACT bytes (6264).
+          "provider": "huggingface",
+          "repo": "vivym/lpips",
+          "revision": "270571f1fb2a2c4c5f920cec96cd87838c345982",
+          "files": ["vgg_lpips_linear.safetensors"],
+          "estimatedSizeBytes": 6264
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/vivym/lpips"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Iris Restoration Training — LPIPS linear heads",
+        "description": "Training-only: the LPIPS v0.1 VGG linear heads (6 KB) of the perceptual loss used by Iris 3B restoration training. Not needed for restoration itself. BSD-2-Clause.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // sc-25688 — HYPIR's critic trunk (open_clip convnext_xxlarge, laion2b_s34b_b82k_augreg_soup); only `visual.*` is read.
+      "id": "iris_restore_train_critic_trunk",
+      "name": "Iris Restoration Training — OpenCLIP ConvNeXt-XXL critic trunk",
+      "family": "iris",
+      "type": "utility",
+      // TRAINING-ONLY resource of Iris 3B restoration training (epic sc-25678, S10 sc-25688): read by
+      // the `iris_3b_restore` TRAINER only (`gen_core::iris::restoration_train::TRAINING_RESOURCES`),
+      // staged as a trainer component after the worker re-checks the pinned size + sha256
+      // (`verify_resource`). Never part of the restoration inference closure (`iris_3b_restore`
+      // installs and runs without it) and never a routable `model` of any job.
+      "componentOnly": true,
+      "capabilities": [],
+      "license": "MIT",
+      "licenseUrl": "https://github.com/mlfoundations/open_clip/blob/main/LICENSE",
+      "downloads": [
+        {
+          // Upstream, pinned to an immutable revision, not re-hosted. EXACT bytes (4802571739).
+          "provider": "huggingface",
+          "repo": "laion/CLIP-convnext_xxlarge-laion2B-s34B-b82K-augreg-soup",
+          "revision": "9f3e8ee3f383c672388d9178afe70af9e63ac9df",
+          "files": ["open_clip_pytorch_model.bin"],
+          "estimatedSizeBytes": 4802571739
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/laion/CLIP-convnext_xxlarge-laion2B-s34B-b82K-augreg-soup"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Iris Restoration Training — OpenCLIP ConvNeXt-XXL critic trunk",
+        "description": "Training-only: the frozen OpenCLIP ConvNeXt-XXLarge image trunk (LAION laion2B-s34B-b82K-augreg-soup, ~4.8 GB) of the adversarial critic used by Iris 3B restoration training. Not needed for restoration itself. OpenCLIP / LAION model card licence: MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
       // sc-17627 / sc-17629 — SAM3 was a JOB-TIME auto-download with no install-flow
       // representation at all: the repo and its pinned revision existed only as hardcoded
       // constants in `person_segment_sam3_common.rs`, and the weights landed in
@@ -28974,6 +29498,636 @@
             { "label": "laion/clap-htsat-unfused model card", "url": "https://huggingface.co/laion/clap-htsat-unfused" }
           ]
         }
+      }
+    },
+    {
+      // TAEF1 (madebyollin) — the tiny differentiable FLUX.1-latent decoder the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-2125). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAEF1_MODEL (parity test).
+      "id": "taef1",
+      "autoDownload": false,
+      "name": "TAEF1 Tiny Decoder",
+      "family": "taef1",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/taef1",
+          "revision": "b1b2d00e9e440cfbf3dedb34266864da86016ceb",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 9848636,
+          "footprint": { "diskSizeBytes": 9848636 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/madebyollin/taef1"
+      },
+      "licenseUrl": "https://huggingface.co/madebyollin/taef1/tree/b1b2d00e9e440cfbf3dedb34266864da86016ceb",
+      "ui": {
+        "label": "TAEF1 Tiny Decoder",
+        "description": "Tiny differentiable decoder for the FLUX.1 latent family (Z-Image). Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // ostris Z-Image-Turbo de-distill training adapter v1 — the frozen LoRA the native Z-Image-Turbo trainer applies to the step-distilled base for training only (ai-toolkit assistant_lora_path, sc-25213). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::training_adapter::ZIMAGE_TURBO_TRAINING_ADAPTER_V1 (parity test).
+      "id": "zimage_turbo_training_adapter_v1",
+      "autoDownload": false,
+      "name": "Z-Image Turbo Training Adapter v1",
+      "family": "zimage_training_adapter",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "ostris/zimage_turbo_training_adapter",
+          "revision": "654cd1bf8b3589d9442cb1c5e35221879e1af4f3",
+          "files": ["zimage_turbo_training_adapter_v1.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 170128256,
+          "footprint": { "diskSizeBytes": 170128256 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/ostris/zimage_turbo_training_adapter"
+      },
+      "licenseUrl": "https://huggingface.co/ostris/zimage_turbo_training_adapter/tree/654cd1bf8b3589d9442cb1c5e35221879e1af4f3",
+      "ui": {
+        "label": "Z-Image Turbo Training Adapter v1",
+        "description": "ostris de-distill training adapter v1 (stable, smaller). Applied to Z-Image-Turbo only while training a LoRA so it learns your subject instead of fighting the step distillation; removed for previews and generation - not a generation model.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // ostris Z-Image-Turbo de-distill training adapter v2 — the frozen LoRA the native Z-Image-Turbo trainer applies to the step-distilled base for training only (ai-toolkit assistant_lora_path, sc-25213). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::training_adapter::ZIMAGE_TURBO_TRAINING_ADAPTER_V2 (parity test).
+      "id": "zimage_turbo_training_adapter_v2",
+      "autoDownload": false,
+      "name": "Z-Image Turbo Training Adapter v2",
+      "family": "zimage_training_adapter",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "ostris/zimage_turbo_training_adapter",
+          "revision": "654cd1bf8b3589d9442cb1c5e35221879e1af4f3",
+          "files": ["zimage_turbo_training_adapter_v2.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 340194488,
+          "footprint": { "diskSizeBytes": 340194488 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/ostris/zimage_turbo_training_adapter"
+      },
+      "licenseUrl": "https://huggingface.co/ostris/zimage_turbo_training_adapter/tree/654cd1bf8b3589d9442cb1c5e35221879e1af4f3",
+      "ui": {
+        "label": "Z-Image Turbo Training Adapter v2",
+        "description": "ostris de-distill training adapter v2 (heavier de-distill; the training presets' default). Applied to Z-Image-Turbo only while training a LoRA so it learns your subject instead of fighting the step distillation; removed for previews and generation - not a generation model.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // TAESDXL (madebyollin/taesdxl) — the tiny differentiable decoder for the SDXL latent family (SDXL, Illustrious, Kolors) that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAESDXL_MODEL (parity test).
+      "id": "taesdxl",
+      "autoDownload": false,
+      "name": "TAESDXL Tiny Decoder",
+      "family": "taesdxl",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/taesdxl",
+          "revision": "b20258aaef75ef61e659c1e0f14f251cf0ad153e",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 9793292,
+          "footprint": { "diskSizeBytes": 9793292 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/madebyollin/taesdxl"
+      },
+      "licenseUrl": "https://huggingface.co/madebyollin/taesdxl/tree/b20258aaef75ef61e659c1e0f14f251cf0ad153e",
+      "ui": {
+        "label": "TAESDXL Tiny Decoder",
+        "description": "Tiny differentiable decoder for the SDXL latent family (SDXL, Illustrious, Kolors). Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // TAESD3 (madebyollin/taesd3) — the tiny differentiable decoder for the SD3 latent family (SD3.5 Large / Medium) that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAESD3_MODEL (parity test).
+      "id": "taesd3",
+      "autoDownload": false,
+      "name": "TAESD3 Tiny Decoder",
+      "family": "taesd3",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/taesd3",
+          "revision": "d58dcaccd2b36fcb7a6b9e93c1cc507acab5a778",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 9848636,
+          "footprint": { "diskSizeBytes": 9848636 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/madebyollin/taesd3"
+      },
+      "licenseUrl": "https://huggingface.co/madebyollin/taesd3/tree/d58dcaccd2b36fcb7a6b9e93c1cc507acab5a778",
+      "ui": {
+        "label": "TAESD3 Tiny Decoder",
+        "description": "Tiny differentiable decoder for the SD3 latent family (SD3.5 Large / Medium). Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // TAEF2 (madebyollin/taef2) — the tiny differentiable decoder for the FLUX.2 latent family (Lens) that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAEF2_MODEL (parity test).
+      "id": "taef2",
+      "autoDownload": false,
+      "name": "TAEF2 Tiny Decoder",
+      "family": "taef2",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/taef2",
+          "revision": "bd244ebfe4398c84fbf312a2f1c868c676b500e3",
+          "files": ["taef2.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 10723524,
+          "footprint": { "diskSizeBytes": 10723524 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/madebyollin/taef2"
+      },
+      "licenseUrl": "https://huggingface.co/madebyollin/taef2/tree/bd244ebfe4398c84fbf312a2f1c868c676b500e3",
+      "ui": {
+        "label": "TAEF2 Tiny Decoder",
+        "description": "Tiny differentiable decoder for the FLUX.2 latent family (Lens). Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // TAEQI2.1 (madebyollin/taeqi2_1) — the tiny differentiable decoder for the Qwen-Image 2.1 64-channel latent family that the native Qwen Image 2.1 trainer's decoded-x0 perceptual losses run through (epic 2123). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAEQI2_1_MODEL (parity test).
+      "id": "taeqi2_1",
+      "autoDownload": false,
+      "name": "TAEQI2.1 Tiny Decoder",
+      "family": "taeqi2_1",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/taeqi2_1",
+          "revision": "379cc3f29b1fdbf3bc02781792d88f81036780da",
+          "files": ["taeqi2_1.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 30591264,
+          "footprint": { "diskSizeBytes": 30591264 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/madebyollin/taeqi2_1"
+      },
+      "licenseUrl": "https://huggingface.co/madebyollin/taeqi2_1/tree/379cc3f29b1fdbf3bc02781792d88f81036780da",
+      "ui": {
+        "label": "TAEQI2.1 Tiny Decoder",
+        "description": "Tiny differentiable decoder for the Qwen-Image 2.1 latent family. Used by LoRA training's decoded-prediction losses (depth anchoring, body, face, VAE anchor) to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // TAEW2.1 (madebyollin/taehv (Kijai re-upload)) — the tiny differentiable decoder for the Wan 2.1 latent family (Wan 2.2 A14B, and the Qwen-Image VAE of Krea 2 and Anima), run per frame that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAEW2_1_MODEL (parity test).
+      "id": "taew2_1",
+      "autoDownload": false,
+      "name": "TAEW2.1 Tiny Decoder",
+      "family": "taew2_1",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Kijai/WanVideo_comfy",
+          "revision": "8260d429d19fd7a72304cad059160b95d843913f",
+          "files": ["taew2_1.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 22642926,
+          "footprint": { "diskSizeBytes": 22642926 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Kijai/WanVideo_comfy"
+      },
+      "licenseUrl": "https://huggingface.co/Kijai/WanVideo_comfy/tree/8260d429d19fd7a72304cad059160b95d843913f",
+      "ui": {
+        "label": "TAEW2.1 Tiny Decoder",
+        "description": "Tiny differentiable decoder for the Wan 2.1 latent family (Wan 2.2 A14B, and the Qwen-Image VAE of Krea 2 and Anima), run per frame. Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // TAEW2.2 (madebyollin/taehv (Kijai re-upload)) — the tiny differentiable decoder for the Wan 2.2 TI2V-5B latent family, run per frame that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAEW2_2_MODEL (parity test).
+      "id": "taew2_2",
+      "autoDownload": false,
+      "name": "TAEW2.2 Tiny Decoder",
+      "family": "taew2_2",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Kijai/WanVideo_comfy",
+          "revision": "8260d429d19fd7a72304cad059160b95d843913f",
+          "files": ["taew2_2.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 22848080,
+          "footprint": { "diskSizeBytes": 22848080 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Kijai/WanVideo_comfy"
+      },
+      "licenseUrl": "https://huggingface.co/Kijai/WanVideo_comfy/tree/8260d429d19fd7a72304cad059160b95d843913f",
+      "ui": {
+        "label": "TAEW2.2 Tiny Decoder",
+        "description": "Tiny differentiable decoder for the Wan 2.2 TI2V-5B latent family, run per frame. Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // TAELTX2.3 (madebyollin/taehv (Kijai re-upload)) — the tiny differentiable decoder for the LTX-2.3 latent family, run per frame that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAELTX2_3_MODEL (parity test).
+      "id": "taeltx2_3",
+      "autoDownload": false,
+      "name": "TAELTX2.3 Tiny Decoder",
+      "family": "taeltx2_3",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Kijai/LTX2.3_comfy",
+          "revision": "6d980fde0d330f2fed6ff8dfdfddb06d88a004e5",
+          "files": ["vae/taeltx2_3.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 23531296,
+          "footprint": { "diskSizeBytes": 23531296 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Kijai/LTX2.3_comfy"
+      },
+      "licenseUrl": "https://huggingface.co/Kijai/LTX2.3_comfy/tree/6d980fde0d330f2fed6ff8dfdfddb06d88a004e5",
+      "ui": {
+        "label": "TAELTX2.3 Tiny Decoder",
+        "description": "Tiny differentiable decoder for the LTX-2.3 latent family, run per frame. Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // MediaPipe FaceMesh-v2 landmark detector — the frozen perceptor of the native trainer's face-landmark loss (epic 2123, sc-24831). Upstream py-feat/mp_facemesh_v2 @ 39eb85054cf76fe0f57b7e12d6765ae89d89f2b5 (Apache-2.0) lowered to the native fx-program format by inference tools/convert_mp_facemesh_v2.py (commit 1d87a8eb2; self-check max abs 0.0) and rehosted. componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::face_losses::FACEMESH_V2_MODEL (parity test).
+      "id": "mp_facemesh_v2",
+      "autoDownload": false,
+      "name": "MediaPipe FaceMesh v2",
+      "family": "mp_facemesh",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/mp-facemesh-v2",
+          "revision": "4e65de94fd007bde5eccd557bd83f067cbd3d596",
+          "files": ["face_landmarks_detector.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 4997792,
+          "footprint": { "diskSizeBytes": 4997792 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/mp-facemesh-v2"
+      },
+      "licenseUrl": "https://huggingface.co/SceneWorks/mp-facemesh-v2/tree/4e65de94fd007bde5eccd557bd83f067cbd3d596",
+      "ui": {
+        "label": "MediaPipe FaceMesh v2",
+        "description": "Face-landmark detector (478 points) used by LoRA training's face-landmark loss to keep a character's face shape - not a generation model. Apache-2.0.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // Depth-Anything-V2 Small — the frozen perceptor of the native trainer's depth-anchoring loss (epic 2123, sc-2125). componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::DEPTH_ANYTHING_V2_MODELS (parity test).
+      "id": "depth_anything_v2_small",
+      "autoDownload": false,
+      "name": "Depth Anything V2 Small",
+      "family": "depth_anything_v2",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "depth-anything/Depth-Anything-V2-Small-hf",
+          "revision": "5426e4f0f36572d16453bbda7a8389317b1bef99",
+          "files": ["model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 99173660,
+          "footprint": { "diskSizeBytes": 99173660 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/depth-anything/Depth-Anything-V2-Small-hf"
+      },
+      "licenseUrl": "https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf/tree/5426e4f0f36572d16453bbda7a8389317b1bef99",
+      "ui": {
+        "label": "Depth Anything V2 Small",
+        "description": "Monocular depth estimator (ViT-S) used by LoRA training's depth anchoring to keep a character's geometry consistent - not a generation model. Apache-2.0.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // Depth-Anything-V2 Base — the frozen perceptor of the native trainer's depth-anchoring loss (epic 2123, sc-2125). componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::DEPTH_ANYTHING_V2_MODELS (parity test).
+      "id": "depth_anything_v2_base",
+      "autoDownload": false,
+      "name": "Depth Anything V2 Base",
+      "family": "depth_anything_v2",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "depth-anything/Depth-Anything-V2-Base-hf",
+          "revision": "b1958afc87fb45a9e3746cb387596094de553ed8",
+          "files": ["model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 389916980,
+          "footprint": { "diskSizeBytes": 389916980 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/depth-anything/Depth-Anything-V2-Base-hf"
+      },
+      "licenseUrl": "https://huggingface.co/depth-anything/Depth-Anything-V2-Base-hf/tree/b1958afc87fb45a9e3746cb387596094de553ed8",
+      "ui": {
+        "label": "Depth Anything V2 Base",
+        "description": "Monocular depth estimator (ViT-B) used by LoRA training's depth anchoring - not a generation model. CC-BY-NC-4.0.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // Depth-Anything-V2 Large — the frozen perceptor of the native trainer's depth-anchoring loss (epic 2123, sc-2125). componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::DEPTH_ANYTHING_V2_MODELS (parity test).
+      "id": "depth_anything_v2_large",
+      "autoDownload": false,
+      "name": "Depth Anything V2 Large",
+      "family": "depth_anything_v2",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "depth-anything/Depth-Anything-V2-Large-hf",
+          "revision": "7581137eff8d4e94f6e796d3baea0e9fa79b22d2",
+          "files": ["model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 1341322868,
+          "footprint": { "diskSizeBytes": 1341322868 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/depth-anything/Depth-Anything-V2-Large-hf"
+      },
+      "licenseUrl": "https://huggingface.co/depth-anything/Depth-Anything-V2-Large-hf/tree/7581137eff8d4e94f6e796d3baea0e9fa79b22d2",
+      "ui": {
+        "label": "Depth Anything V2 Large",
+        "description": "Monocular depth estimator (ViT-L) used by LoRA training's depth anchoring; larger gradients, so use a much smaller weight - not a generation model. CC-BY-NC-4.0.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // ViTPose+ Base — the frozen keypoint model of the native trainer's body-proportion loss and every body loss's reference-time person detector (epic 2123, sc-24832). componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::body_losses::VITPOSE_PLUS_BASE_MODEL (parity test).
+      "id": "vitpose_plus_base",
+      "autoDownload": false,
+      "name": "ViTPose+ Base",
+      "family": "vitpose",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "usyd-community/vitpose-plus-base",
+          "revision": "92be54d7a29e42fad47b6e2ca01dd9e685a61e0d",
+          "files": ["model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 501627628,
+          "footprint": { "diskSizeBytes": 501627628 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/usyd-community/vitpose-plus-base"
+      },
+      "licenseUrl": "https://huggingface.co/usyd-community/vitpose-plus-base/tree/92be54d7a29e42fad47b6e2ca01dd9e685a61e0d",
+      "ui": {
+        "label": "ViTPose+ Base",
+        "description": "Human keypoint estimator used by LoRA training's body losses to keep a character's body proportions consistent and to detect whether a training image shows a person - not a generation model. Apache-2.0.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // HybrIK ResNet-34 (SceneWorks safetensors re-host of upstream's hybrik_resnet34.pth, keys unchanged) — the frozen beta regressor of the native trainer's body-shape loss (epic 2123, sc-24832). componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::body_losses (parity test).
+      "id": "hybrik_resnet34",
+      "autoDownload": false,
+      "name": "HybrIK ResNet-34",
+      "family": "hybrik",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/hybrik-resnet34",
+          "revision": "534e2815976bfd4bcecde552a2b863f92e0e53e0",
+          "files": ["model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 130617496,
+          "footprint": { "diskSizeBytes": 130617496 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/hybrik-resnet34"
+      },
+      "licenseUrl": "https://huggingface.co/SceneWorks/hybrik-resnet34/tree/534e2815976bfd4bcecde552a2b863f92e0e53e0",
+      "ui": {
+        "label": "HybrIK ResNet-34",
+        "description": "SMPL body-shape regressor used by LoRA training's body shape loss to keep a character's build consistent - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // Sapiens normal 0.3B (SceneWorks safetensors re-host of facebook/sapiens-normal-0.3b@ada60522, keys unchanged) — the frozen estimator of the native trainer's normal loss (epic 2123, sc-24832). componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::body_losses (parity test).
+      "id": "sapiens_normal_0_3b",
+      "autoDownload": false,
+      "name": "Sapiens Normal 0.3B",
+      "family": "sapiens",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sapiens-normal-0.3b",
+          "revision": "4cc2d8618fafb8aab1b24907dcf4c765fb70daf0",
+          "files": ["model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 1357935996,
+          "footprint": { "diskSizeBytes": 1357935996 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/sapiens-normal-0.3b"
+      },
+      "licenseUrl": "https://huggingface.co/SceneWorks/sapiens-normal-0.3b/tree/4cc2d8618fafb8aab1b24907dcf4c765fb70daf0",
+      "ui": {
+        "label": "Sapiens Normal 0.3B",
+        "description": "Human surface-normal estimator used by LoRA training's normal loss to keep a character's body surface detail consistent - not a generation model. CC-BY-NC-4.0.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // FLUX.2 VAE (the VAE inside the SceneWorks/flux2-dev-mlx re-host, same revision as the FLUX.2 [dev] entry) — the frozen encoder of the native trainer's VAE perceptual anchor loss (epic 2123, sc-24833). componentOnly: fetches only bf16/vae/ (~336 MB) into the shared snapshot; an installed FLUX.2 [dev] tier satisfies it too. repo/revision/file MUST equal sceneworks_core::training::latent_perceptual::FLUX2_VAE_MODEL (parity test).
+      "id": "flux2_vae",
+      "autoDownload": false,
+      "name": "FLUX.2 VAE",
+      "family": "flux2_vae",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux2-dev-mlx",
+          "revision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+          "files": ["bf16/vae/config.json", "bf16/vae/diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 336214326,
+          "footprint": { "diskSizeBytes": 336214326 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/flux2-dev-mlx"
+      },
+      "licenseUrl": "https://huggingface.co/SceneWorks/flux2-dev-mlx/tree/2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+      "ui": {
+        "label": "FLUX.2 VAE",
+        "description": "FLUX.2 autoencoder whose encoder the VAE anchor loss of LoRA training uses to compare the model prediction with the training image at several scales - not a generation model. FLUX Non-Commercial License.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // E-LatentLPIPS weights for SDXL latents (mingukkang/elatentlpips, ECCV 2024) — the learned latent-space perceptual metric of the native trainer's E-LatentLPIPS loss (epic 2123, sc-24833) for SDXL / Illustrious / Kolors. componentOnly. repo/revision/file MUST equal sceneworks_core::training::latent_perceptual::ELATENTLPIPS_MODELS (parity test).
+      "id": "elatentlpips_sdxl",
+      "autoDownload": false,
+      "name": "E-LatentLPIPS (SDXL)",
+      "family": "elatentlpips",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Mingguksky/elatentlpips",
+          "revision": "0ff7f3f693029324916ed2a392a20694e5f219f3",
+          "files": ["elatentlpips_ckpt/sdxl_latest_vgg16_tuned.pth"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 58969974,
+          "footprint": { "diskSizeBytes": 58969974 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Mingguksky/elatentlpips"
+      },
+      "licenseUrl": "https://huggingface.co/Mingguksky/elatentlpips/tree/0ff7f3f693029324916ed2a392a20694e5f219f3",
+      "ui": {
+        "label": "E-LatentLPIPS (SDXL)",
+        "description": "Latent-space perceptual metric for SDXL latents (SDXL / Illustrious / Kolors) used by the E-LatentLPIPS loss of LoRA training - not a generation model. CC-BY-NC.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // E-LatentLPIPS weights for SD3 latents (mingukkang/elatentlpips, ECCV 2024) — the learned latent-space perceptual metric of the native trainer's E-LatentLPIPS loss (epic 2123, sc-24833) for SD3.5. componentOnly. repo/revision/file MUST equal sceneworks_core::training::latent_perceptual::ELATENTLPIPS_MODELS (parity test).
+      "id": "elatentlpips_sd3",
+      "autoDownload": false,
+      "name": "E-LatentLPIPS (SD3)",
+      "family": "elatentlpips",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Mingguksky/elatentlpips",
+          "revision": "0ff7f3f693029324916ed2a392a20694e5f219f3",
+          "files": ["elatentlpips_ckpt/sd3_latest_vgg16_tuned.pth"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 58997522,
+          "footprint": { "diskSizeBytes": 58997522 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Mingguksky/elatentlpips"
+      },
+      "licenseUrl": "https://huggingface.co/Mingguksky/elatentlpips/tree/0ff7f3f693029324916ed2a392a20694e5f219f3",
+      "ui": {
+        "label": "E-LatentLPIPS (SD3)",
+        "description": "Latent-space perceptual metric for SD3 latents (SD3.5) used by the E-LatentLPIPS loss of LoRA training - not a generation model. CC-BY-NC.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // E-LatentLPIPS weights for FLUX.1 latents (mingukkang/elatentlpips, ECCV 2024) — the learned latent-space perceptual metric of the native trainer's E-LatentLPIPS loss (epic 2123, sc-24833) for Z-Image. componentOnly. repo/revision/file MUST equal sceneworks_core::training::latent_perceptual::ELATENTLPIPS_MODELS (parity test).
+      "id": "elatentlpips_flux",
+      "autoDownload": false,
+      "name": "E-LatentLPIPS (FLUX.1)",
+      "family": "elatentlpips",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Mingguksky/elatentlpips",
+          "revision": "0ff7f3f693029324916ed2a392a20694e5f219f3",
+          "files": ["elatentlpips_ckpt/flux_latest_vgg16_tuned.pth"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 58997622,
+          "footprint": { "diskSizeBytes": 58997622 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Mingguksky/elatentlpips"
+      },
+      "licenseUrl": "https://huggingface.co/Mingguksky/elatentlpips/tree/0ff7f3f693029324916ed2a392a20694e5f219f3",
+      "ui": {
+        "label": "E-LatentLPIPS (FLUX.1)",
+        "description": "Latent-space perceptual metric for FLUX.1 latents (Z-Image) used by the E-LatentLPIPS loss of LoRA training - not a generation model. CC-BY-NC.",
+        "recommendedFor": []
       }
     }
   ]

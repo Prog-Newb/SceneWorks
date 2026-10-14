@@ -1936,21 +1936,97 @@ fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
         );
     }
 
-    // The current provider applies LoRA and PEFT LoKr residuals on dense and packed tiers. Both
-    // are admitted by the same production scheduler gate, including with an explicit tier select.
-    for adapter in ["lora", "lokr"] {
-        for bits in [0, 4, 8] {
+    // An adapter is CLAIMED off-Mac (sc-24158, E9). The candle provider applies user LoRA/LoKr as
+    // stacked additive residuals over the dense bf16 AND the packed q8/q4 DiT (inference sc-24157),
+    // so the row sits in the combined `candle_quant_lora` column like the 2512 `qwen_image` row: a
+    // LoRA alone, and a LoRA composed with a tier select, both reach the candle lane. Before this
+    // the lane refused it as `CandleImageRefusal::UserLora`, and a Windows/Linux-only install had no
+    // worker that would claim a LoRA-carrying 2.1 job at all.
+    for payload in [
+        json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }),
+        json!({ "prompt": "p", "loras": [{ "networkType": "lokr" }] }),
+        json!({ "prompt": "p", "loras": [{ "networkType": "lora" }], "advanced": { "mlxQuantize": 4 } }),
+        json!({ "prompt": "p", "loras": [{ "networkType": "lora" }], "advanced": { "mlxQuantize": 8 } }),
+    ] {
+        assert!(
+            image_request_candle_eligible("qwen_image_2_1", &object(payload.clone())),
+            "the candle lane must claim a LoRA-carrying 2.1 job: {payload}"
+        );
+        assert_eq!(
+            candle_image_first_refusal("qwen_image_2_1", &object(payload.clone())),
+            None,
+            "{payload}"
+        );
+        let mut job_payload = object(payload.clone());
+        job_payload.insert("model".to_owned(), json!("qwen_image_2_1"));
+        let job = image_generate_job(Value::Object(job_payload));
+        assert!(
+            worker_supports_job(&gpu_worker(CANDLE_CAPS), &job),
+            "a candle worker must claim the LoRA job: {payload}"
+        );
+    }
+
+    // sc-24163 (E9 review): the adapter composes with the 1-10 ordered-reference EDIT lane too,
+    // not only text-to-image — a LoRA/LoKr edit, alone and with a q8/q4 tier select, is claimed
+    // by the bespoke `QwenImage21Edit` lane and by a candle worker, under BOTH job types the API
+    // stamps for an edit (`image_edit` for the Image Editor, `image_generate` for the rest).
+    let ids = |n: usize| -> Vec<String> { (1..=n).map(|i| format!("ref_{i}")).collect() };
+    // The Mac twin first: an MLX worker claims the same LoRA-carrying edit (the adapter is never
+    // a routing refusal on MLX; the engine applies it over the edit render).
+    let mlx_edit = json!({
+        "model": "qwen_image_2_1",
+        "prompt": "p",
+        "mode": "edit_image",
+        "referenceAssetIds": ids(2),
+        "loras": [{ "networkType": "lora" }],
+    });
+    assert!(
+        worker_supports_job(
+            &mlx_worker(&["gpu", "image_generate", "image_edit"]),
+            &image_edit_job(mlx_edit.clone())
+        ),
+        "an MLX worker must claim the LoRA-carrying 2.1 edit: {mlx_edit}"
+    );
+    for references in [1usize, 3, 10] {
+        for (loras, advanced) in [
+            (json!([{ "networkType": "lora" }]), json!({})),
+            (json!([{ "networkType": "lokr" }]), json!({})),
+            (
+                json!([{ "networkType": "lora" }]),
+                json!({ "mlxQuantize": 8 }),
+            ),
+            (
+                json!([{ "networkType": "lora" }]),
+                json!({ "mlxQuantize": 4 }),
+            ),
+            (
+                json!([{ "networkType": "lokr" }]),
+                json!({ "mlxQuantize": 4 }),
+            ),
+        ] {
             let payload = json!({
-                "model": "qwen_image_2_1", "prompt": "p",
-                "loras": [{ "id": "probe", "networkType": adapter }],
-                "advanced": { "mlxQuantize": bits }
+                "model": "qwen_image_2_1",
+                "prompt": "put the hat from image 2 on image 1",
+                "mode": "edit_image",
+                "referenceAssetIds": ids(references),
+                "loras": loras,
+                "advanced": advanced,
             });
-            assert!(
-                image_request_candle_eligible("qwen_image_2_1", &object(payload.clone())),
-                "{adapter} with Q{bits} must reach the Candle provider"
-            );
-            let job = image_generate_job(payload);
-            assert!(worker_supports_job(&gpu_worker(CANDLE_CAPS), &job));
+            for job in [
+                image_edit_job(payload.clone()),
+                image_generate_job(payload.clone()),
+            ] {
+                assert_eq!(
+                    image_job_candle_lane(&job),
+                    Some(CandleImageLane::QwenImage21Edit),
+                    "{payload}"
+                );
+                assert!(image_job_is_candle_eligible(&job), "{payload}");
+                assert!(
+                    worker_supports_job(&gpu_worker(CANDLE_CAPS), &job),
+                    "a candle worker must claim the adapter-carrying 2.1 edit: {payload}"
+                );
+            }
         }
     }
 
@@ -4038,6 +4114,28 @@ fn torch_worker_refuses_seedvr2_image_upscale_but_claims_real_esrgan() {
     ));
 }
 
+/// sc-25683: Iris-3B restoration (`engine=iris`) is registered by BOTH native bundles, so the mlx and
+/// candle workers claim it; like SeedVR2 it is native-only, so a generic GPU descriptor refuses it
+/// and it stays queued for a native worker.
+#[test]
+fn iris_image_upscale_is_claimed_by_both_native_lanes_and_refused_by_generic_workers() {
+    let job = image_upscale_job(json!({ "sourceAssetId": "a", "engine": "iris", "scale": 1.5 }));
+    assert!(upscale_job_is_mlx_eligible(&job));
+    let mlx = WorkerSnapshot {
+        gpu_id: "mlx".to_owned(),
+        ..gpu_worker(&["gpu", "image_upscale"])
+    };
+    assert!(worker_supports_job(&mlx, &job));
+    assert!(worker_supports_job(
+        &gpu_worker(&["gpu", "image_upscale", "candle"]),
+        &job
+    ));
+    assert!(!worker_supports_job(
+        &gpu_worker(&["gpu", "image_upscale"]),
+        &job
+    ));
+}
+
 // ---- Candle kps_extract lane (sc-5497, epic 5482) ----
 
 /// A queued `kps_extract` job carrying `payload`.
@@ -5584,4 +5682,118 @@ fn a_derivation_download_needs_the_audio_lane_and_an_ordinary_one_does_not() {
         &gpu_worker_with_status(utility, "idle"),
         &plain
     ));
+}
+
+/// sc-25680: Iris-3B routes to the generic Candle txt2img lane for plain text-to-image and refuses
+/// EXACTLY the list the MLX arm refuses (`iris_routes_plain_text_to_image_only` in the MLX tests) —
+/// the candle gate delegates to `iris_mlx_eligible`, and this pins both the delegation and the claim.
+#[test]
+fn iris_routes_to_candle_for_plain_text_to_image_only() {
+    use crate::jobs_store::routing::gaps::classify_candle_image_gap;
+    use crate::jobs_store::routing::mlx::image_request_mlx_eligible;
+
+    assert!(CANDLE_ROUTED_MODELS.contains(&"iris_3b"));
+    // sc-25681: generation-task adapters apply on the candle lane too; still no quant tier.
+    assert!(candle_family_serves_lora("iris_3b") && !candle_family_serves_quant("iris_3b"));
+    let eligible = |payload: Value| image_request_candle_eligible("iris_3b", &object(payload));
+    assert!(eligible(
+        json!({ "model": "iris_3b", "mode": "text_to_image" })
+    ));
+    assert!(eligible(json!({
+        "model": "iris_3b",
+        "advanced": { "steps": 100, "guidanceScale": 3.0, "resolution": "512x512" }
+    })));
+    // The API normalizes every unset carrier to null; a real submission must still route.
+    assert!(eligible(json!({
+        "model": "iris_3b",
+        "mode": "text_to_image",
+        "sourceAssetId": null,
+        "referenceAssetId": null,
+        "maskAssetId": null,
+        "loras": [],
+        "hiresFix": { "enabled": false }
+    })));
+    let candle = gpu_worker(CANDLE_CAPS);
+    assert!(worker_supports_job(
+        &candle,
+        &image_generate_job(json!({ "model": "iris_3b", "prompt": "a lighthouse at dusk" }))
+    ));
+    // sc-25681: a LoRA / LoKr stack routes to the candle lane like the MLX one.
+    let with_adapter = json!({
+        "model": "iris_3b",
+        "prompt": "a lighthouse at dusk",
+        "loras": [{ "id": "l", "weight": 0.8 }]
+    });
+    assert!(eligible(with_adapter.clone()));
+    assert!(image_request_mlx_eligible(
+        "iris_3b",
+        &object(with_adapter.clone())
+    ));
+    assert!(worker_supports_job(
+        &candle,
+        &image_generate_job(with_adapter)
+    ));
+    for refused in [
+        json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+        json!({ "referenceAssetId": "a" }),
+        json!({ "referenceAssetIds": ["a"] }),
+        json!({ "maskAssetId": "a" }),
+        json!({ "controls": [{}] }),
+        json!({ "advanced": { "poses": [{}] } }),
+        json!({ "advanced": { "mlxQuantize": 8 } }),
+        json!({ "advanced": { "quantTier": "nvfp4" } }),
+        json!({ "hiresFix": { "enabled": true } }),
+        json!({ "mode": "reference" }),
+    ] {
+        let mut payload = refused.clone();
+        payload["model"] = json!("iris_3b");
+        assert!(!eligible(payload.clone()), "candle must refuse {refused}");
+        assert!(
+            !image_request_mlx_eligible("iris_3b", &object(payload.clone())),
+            "the MLX lane refuses {refused} too — one refused list for both lanes"
+        );
+        let job = image_generate_job(payload.clone());
+        if refused.pointer("/advanced/poses").is_some() {
+            // A pose set on a candle family with no pose lane is OWNED-TO-REJECT (sc-5968): the
+            // candle worker claims it only to fail it loudly, never to render it.
+            assert!(image_job_candle_pose_reject(&job), "{refused}");
+            assert_eq!(image_job_candle_lane(&job), None, "{refused}");
+        } else {
+            assert!(
+                !worker_supports_job(&candle, &job),
+                "the candle worker must not claim {refused}"
+            );
+        }
+        // Every refusal is reported with a cause, never the unrouted-family wording.
+        let reason = classify_candle_image_gap(&object(payload));
+        assert!(
+            !reason.feature.contains("unsupported image model"),
+            "{refused}: {reason:?}"
+        );
+    }
+    // The carriers ONLY the Iris check closes are named by it.
+    for iris_only in [
+        json!({ "model": "iris_3b", "controls": [{}] }),
+        json!({ "model": "iris_3b", "advanced": { "quantTier": "nvfp4" } }),
+        json!({ "model": "iris_3b", "hiresFix": { "enabled": true } }),
+    ] {
+        assert_eq!(
+            candle_image_first_refusal("iris_3b", &object(iris_only.clone())),
+            Some(CandleImageRefusal::IrisSurface),
+            "{iris_only}"
+        );
+        let reason = classify_candle_image_gap(&object(iris_only.clone()));
+        assert!(
+            reason.feature.contains("Iris-3B") && reason.detail.contains("Re-submit"),
+            "{iris_only}: {reason:?}"
+        );
+    }
+    // The Iris check never touches another family.
+    assert_eq!(
+        candle_image_first_refusal(
+            "z_image_turbo",
+            &object(json!({ "hiresFix": { "enabled": true } }))
+        ),
+        None
+    );
 }

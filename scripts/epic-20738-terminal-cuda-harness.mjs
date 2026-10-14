@@ -178,12 +178,20 @@ const DERIVED_DISPOSITION_PROVIDER_FAILED = "provider-failed-empty";
 const REQUEST_MEMORY_STRATEGY_KEYS = [
   "requestMemoryPresent", "stageResidency", "strategy", "streamTransformerBlocks",
 ];
-// Re-pinned after the main sync: `config/download-pattern-evidence.json` retains the YuE1
-// re-hosts, YuE2's three upstream m-a-p repos, and the Wan-VACE base/transformer entries:
-// 121 repo@revision keys including the two frozen importer authorities.
+// Re-pinned by sc-24832: `config/download-pattern-evidence.json` was re-recorded
+// (`node scripts/check-download-patterns.mjs --write`) when the catalog gained epic 2123's
+// training-time auxiliary models — TAEF1, the three Depth-Anything-V2 sizes, the sc-24830 tiny
+// decoders, the sc-24831 MediaPipe FaceMesh-v2 re-host, the sc-24833 FLUX.2 VAE / E-LatentLPIPS
+// weights, ViTPose+ base and the HybrIK / Sapiens re-hosts; the epic's final main sync (sc-2124) adds
+// main's YuE1 re-hosts, YuE2's three upstream m-a-p repos and the Wan-VACE base/transformer entries
+// (137 repo@revision keys incl. the two frozen importer authorities; sc-19383 left 117).
+// The Iris-3B epic (sc-25678) merges with main's record: its two generation keys (speridlabs/iris-3b,
+// Qwen/Qwen3-VL-4B-Instruct), the three restoration TRAINING resources (timm/vgg16.tv_in1k,
+// vivym/lpips, laion/CLIP-convnext_xxlarge-…-soup) and the REPA teacher (facebook/dinov2-base) join
+// main's 137 keys: 143 keys.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "8d97d3e7e62ce354695aa6d22adf9bf33ff4a6cb3784f495e75aab2410ed9607";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "543151303524d5cdd8c01cb3ab152a33f86c1c5609d0c2e9c24b569d0ec8e96b";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

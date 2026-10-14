@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
-import { API_BASE_URL, isAbortError } from "../api.js";
+import { candleTrainingKernelBlocked } from "../candleGating.js";
+import { API_BASE_URL, checkIrisDataset, irisItemSidecar, isAbortError } from "../api.js";
 import { errorMessage } from "../errorMessage.js";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
@@ -13,18 +14,25 @@ import {
   buildJoyCaptionPrompt,
   defaultCaptionSettings,
   joyCaptionModel,
+  parseCaptionTriggerWords,
 } from "../training/joyCaptionPrompts.js";
 import { asText, boundedNumber, integerFromDraft } from "../training/drafts.js";
+import { subjectMaskFileError } from "../training/subjectMasks.js";
 import { trainingBaseState, trainingBaseTier } from "../trainingBase.js";
 import {
+  appendReferences,
   captionDraftsFromDataset,
   datasetHealth,
   datasetItemSelectionKey,
   datasetOwnedAssets,
   datasetPayload,
+  datasetReferenceAssets,
+  datasetReferenceCap,
   datasetSaveValidation,
   imageAssetName,
   normalizeDatasetAssetIds,
+  referenceDraftsDiffer,
+  referenceDraftsFromDataset,
   selectionAfterDuplicateRemoval,
 } from "../training/datasetHelpers.js";
 import {
@@ -38,6 +46,10 @@ import {
   configDraftFromTarget,
   configReseedDecision,
   configValidation,
+  draftWithResolution,
+  SUBJECT_SEGMENTER_MODEL_ID,
+  subjectMaskConsumerField,
+  subjectMaskCoverage,
   defaultGpuOptions,
   defaultOptimizerOptions,
   defaultPresetForTarget,
@@ -50,9 +62,13 @@ import {
   qualityTiersForPreset,
   rangeOptions,
   samplePromptsFromTrigger,
+  trainingAdapterModelId,
   trainingAdapterVersionOptions,
   trainingConfigSnapshot,
+  trainingLicenseAckKey,
+  trainingTargetLicense,
 } from "../training/trainingConfig.js";
+import { readLicenseAck, writeLicenseAck } from "../licenseAcknowledgment.js";
 import {
   mergeTrainedLoraOfferDecisions,
   rememberTrainedLoraOfferDecision,
@@ -62,6 +78,17 @@ import {
 import { appConfirm } from "../appConfirm.jsx";
 import { useValidation } from "../validation/useValidation.js";
 import { ConfigureJobPanel } from "./training/ConfigureJobPanel.jsx";
+import {
+  irisCaptionFieldOptions,
+  irisObjective,
+  irisPreviousRuns,
+  trainingLaneFromCapabilities,
+} from "../training/irisOptions.js";
+import { irisTrainingResourceIds } from "../training/irisTaskOptions.js";
+import { useIrisDataWalk } from "../training/useIrisDataWalk.js";
+import { useIrisMetrics, useIrisPlanCheck, useIrisStagePresets } from "../training/useIrisCurricula.js";
+import { IrisRunMetrics } from "./training/IrisCurriculaOptions.jsx";
+import { collectCaptionSidecars, isJsonCaptionSidecar } from "../training/captionSidecars.js";
 import { DatasetEditorPanel } from "./training/DatasetEditorPanel.jsx";
 
 // Re-exported for callers/tests that import the pure config builders from the
@@ -139,9 +166,16 @@ function resolveSavedItemId(dataset, member) {
 
 
 function trainingCaptionJobPayload(settings) {
-  const captionPrompt = String(settings.captionPrompt || buildJoyCaptionPrompt(settings)).trim();
+  const mode = settings.mode || "default";
+  // Only the default mode sends a prompt: subject-only uses the worker's own prompt (the API
+  // refuses a caller prompt alongside it) and trigger-only runs no captioner.
+  const captionPrompt = mode === "default" ? String(settings.captionPrompt || buildJoyCaptionPrompt(settings)).trim() : "";
   return {
     captioner: "joy_caption",
+    mode,
+    // The dialog's trigger words (sc-24829): the API fills them into every item without its own,
+    // so trigger-only has words to write and default/subject-only captions get them prepended.
+    triggerWords: parseCaptionTriggerWords(settings.triggerWords),
     modelNameOrPath: String(settings.modelNameOrPath ?? "").trim() || joyCaptionModel,
     recaption: Boolean(settings.recaption),
     requestedGpu: settings.requestedGpu || "auto",
@@ -257,7 +291,12 @@ export function trainingSampleGroups(job, projectId) {
     .filter((group) => group.assets.length);
 }
 
-function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview }) {
+// A live Iris run's holdout validation (sc-25689), re-read while it trains.
+function LiveIrisMetrics({ job, token }) {
+  return <IrisRunMetrics metrics={useIrisMetrics(job.id, token, { live: true })} />;
+}
+
+function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview, token }) {
   if (!jobs.length) {
     return null;
   }
@@ -277,15 +316,17 @@ function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview }) {
           // through the whole run rather than just the clicked group.
           const sampleScope = sampleGroups.flatMap((group) => group.assets);
           return (
-            <WorkerProgressCard
-              key={job.id}
-              job={job}
-              thumbnailsVariant="image-grid"
-              thumbnailGroups={sampleGroups}
-              expectedThumbnailCount={4}
-              onCancel={onCancel}
-              onThumbnailClick={onPreview ? (asset) => onPreview(asset, sampleScope) : undefined}
-            />
+            <React.Fragment key={job.id}>
+              <WorkerProgressCard
+                job={job}
+                thumbnailsVariant="image-grid"
+                thumbnailGroups={sampleGroups}
+                expectedThumbnailCount={4}
+                onCancel={onCancel}
+                onThumbnailClick={onPreview ? (asset) => onPreview(asset, sampleScope) : undefined}
+              />
+              {job.payload?.plan?.target?.kernel === "iris_train" ? <LiveIrisMetrics job={job} token={token} /> : null}
+            </React.Fragment>
           );
         })}
       </div>
@@ -331,6 +372,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const datasetLibraryMode = mode === "datasets";
   const {
     activeProject,
+    token,
     authenticated = true,
     assets = [],
     attachCharacterLora,
@@ -359,6 +401,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
     createTrainingDatasetUpscaleJob,
     createTrainingDatasetAnalysisJob,
     createTrainingDatasetFaceAnalysisJob,
+    createTrainingDatasetSubjectMaskJob,
+    loadTrainingDatasetSubjectMasks,
+    uploadTrainingDatasetSubjectMask,
     smartCropTrainingDataset,
     stripExifTrainingDataset,
     createTrainingJob,
@@ -454,6 +499,18 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // caption or imports a .txt sidecar, and threaded into the dataset payload on
   // save. Replaces the old importedCaptions + rename-caption draft split.
   const [captionDraftById, setCaptionDraftById] = useState({});
+  // Per-item named captions (`{ field: text }`) parsed from freshly imported `.json` sidecars,
+  // keyed by selection id and threaded into the save payload (sc-25685). Saved items carry theirs
+  // on the item itself.
+  const [namedCaptionsById, setNamedCaptionsById] = useState({});
+  // sc-25689: per-item holdout overrides (`{ [selectionId]: boolean }`) until the dataset is saved.
+  const [holdoutById, setHoldoutById] = useState({});
+  // Instruction-edit pairs (sc-24161): each item's ORDERED reference images, keyed by item
+  // selection id -> [reference selection id, ...]. Seeded from the saved dataset like captions and
+  // threaded into the save payload; the item image is the edit target and its caption the
+  // instruction. `editPairsMode` reveals the per-item reference rails for a dataset with none yet.
+  const [referenceDraftById, setReferenceDraftById] = useState({});
+  const [editPairsMode, setEditPairsMode] = useState(false);
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
   const [renamePrefix, setRenamePrefix] = useState("");
   const [captionTriggerWords, setCaptionTriggerWords] = useState("");
@@ -475,6 +532,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // until the user edits them (sc-8671), mirroring configTriggerFollowsCaptions.
   const [configPromptsFollowTrigger, setConfigPromptsFollowTrigger] = useState(true);
   const [submittingJob, setSubmittingJob] = useState(false);
+  // Subject masks (sc-2126): the saved dataset's /subject-masks report (coverage + per-image status),
+  // refetched on dataset version / mask-job completion, replaced by an upload's response.
+  const [subjectMasks, setSubjectMasks] = useState(null);
   // The config-draft basis, keyed on (target, dataset, default-preset). Value-preserving
   // across an async trainingPresets load (sc-11970): a preset-only basis flip no longer
   // wipes the user's config edits. See the basis effect below.
@@ -485,7 +545,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
   customizedConfigFieldsRef.current = customizedConfigFields;
 
   const datasetAssets = useMemo(
-    () => datasetOwnedAssets(activeDataset, activeProject?.id, assets),
+    () => [
+      ...datasetOwnedAssets(activeDataset, activeProject?.id, assets),
+      // Stored edit-pair references that are not library assets render (and re-save) through
+      // synthetic dataset-owned assets, exactly like dataset-owned items (sc-24161).
+      ...datasetReferenceAssets(activeDataset, activeProject?.id, assets),
+    ],
     [activeDataset, activeProject?.id, assets],
   );
   const imageAssets = useMemo(() => {
@@ -548,13 +613,22 @@ export function TrainingStudio({ mode = "training" } = {}) {
       }),
     [activeDataset, captionDraftById],
   );
+  // Reference edits (add / remove / reorder, sc-24161) also make the dataset dirty.
+  const savedReferenceDrafts = useMemo(
+    () => referenceDraftsFromDataset(activeDataset),
+    [activeDataset],
+  );
+  const referencesDirty =
+    Boolean(activeDataset) && referenceDraftsDiffer(referenceDraftById, savedReferenceDrafts, selectedAssetIds);
   const dirty =
     Boolean(activeDataset) &&
     (draftName.trim() !== activeDataset.name ||
       associatedCharacterId !== (activeDataset.characterId ?? "") ||
       selectedAssetIds.length !== originalAssetIds.length ||
       selectedAssetIds.some((id, index) => id !== originalAssetIds[index]) ||
-      captionsDirty);
+      captionsDirty ||
+      referencesDirty ||
+      Object.keys(holdoutById).length > 0);
   // Refresh awaits the catalog request. Read the current draft state after that
   // await so a rename begun while refresh is in flight is never overwritten by
   // the freshly loaded dataset object.
@@ -564,7 +638,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   activeDatasetIdRef.current = activeDataset?.id ?? "";
   useEffect(() => {
     datasetDraftRevisionRef.current += 1;
-  }, [activeDataset?.id, draftName, selectedAssetIds, associatedCharacterId, captionDraftById]);
+  }, [activeDataset?.id, draftName, selectedAssetIds, associatedCharacterId, captionDraftById, referenceDraftById]);
   const completedParquetImport = useMemo(
     () =>
       jobs.find(
@@ -573,6 +647,18 @@ export function TrainingStudio({ mode = "training" } = {}) {
           job.status === "completed" &&
           job.payload?.datasetId === activeDataset?.id,
       ) ?? null,
+    [jobs, activeDataset?.id],
+  );
+  // The newest completed subject-mask job for this dataset (sc-2126): its id keys the mask-report
+  // refetch, so the editor picks up masks the moment the worker finishes.
+  const completedSubjectMaskJobId = useMemo(
+    () =>
+      jobs.find(
+        (job) =>
+          job.type === "dataset_subject_mask" &&
+          job.status === "completed" &&
+          job.payload?.datasetId === activeDataset?.id,
+      )?.id ?? "",
     [jobs, activeDataset?.id],
   );
   const completedParquetImportId = completedParquetImport?.id ?? "";
@@ -615,7 +701,17 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const firstTarget = trainingTargets[0] ?? null;
   // Mac UI gating (sc-3486): a target whose kernel has no native mlx-gen Rust trainer
   // (kolors_lora / lens_lora) can't train on a gated Mac — disable it and snap off it.
-  const macTargetBlocked = (target) => macTrainingKernelBlocked(macCapabilities, target?.kernel);
+  // sc-24161: off-Mac the twin gate disables a target whose kernel has no candle trainer — from
+  // the server's candle-routed set — so it is neither selectable nor drives the dataset editor's
+  // edit-pair affordances.
+  const targetBlockReason = (target) => {
+    if (macTrainingKernelBlocked(macCapabilities, target?.kernel)) return "mac";
+    if (candleTrainingKernelBlocked(macCapabilities, target?.kernel)) return "candle";
+    return null;
+  };
+  const macTargetBlocked = (target) => Boolean(targetBlockReason(target));
+  const targetBlockedLabel = (target) =>
+    targetBlockReason(target) === "candle" ? " — Apple Silicon only" : " — not on Mac (Cuda only)";
   // Model-availability gate (sc-5947): training needs a trainable target whose base model is
   // downloaded. A target's base counts as missing only when it's present in the catalog AND
   // installState === "missing" (so a thin test context with no `models` stays ready, and a real
@@ -650,6 +746,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
     () => (jobs ?? []).filter((job) => job.type === "model_download"),
     [jobs],
   );
+  // The most ordered references one edit-pair item may carry across the trainable targets (the
+  // model's own `maxReferenceAssets`, capped by the target contract — Qwen Image 2.1: 10). 0 hides
+  // the dataset editor's edit-pair affordances (sc-24161).
+  const datasetReferenceLimit = datasetReferenceCap(usableTrainingTargets, models);
   const selectedTarget = useMemo(
     () => trainingTargets.find((target) => target.id === selectedTargetId) ?? firstTarget,
     [firstTarget, selectedTargetId, trainingTargets],
@@ -752,16 +852,131 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
     return missingRequiredModels(models, [POSE_DETECT_MODEL_ID]);
   }, [models, selectedTarget?.outputKind, controlType]);
+  // The de-distill training adapter the selected version needs (sc-25213). The worker resolves it
+  // from the installed library only, so a missing one gates Start and the panel offers the download.
+  const trainingAdapterId = showTrainingAdapter ? trainingAdapterModelId(configDraft) : null;
+  const missingTrainingAdapterModels = useMemo(
+    () => (trainingAdapterId ? missingRequiredModels(models, [trainingAdapterId]) : []),
+    [models, trainingAdapterId],
+  );
+  // sc-2124: images without a subject mask are segmented with SAM3 when a masked run starts, so a
+  // run that must generate any needs the SAM3 Person Segmenter installed — the API refuses it
+  // otherwise. It gates Start (on the mask technique's field) and the panel offers the download.
+  const subjectMasksToGenerate =
+    Boolean(subjectMaskConsumerField(configDraft, selectedTarget)) &&
+    Boolean(subjectMaskCoverage(subjectMasks)?.ungenerated);
+  const missingSubjectSegmenterModels = useMemo(
+    () => (subjectMasksToGenerate ? missingRequiredModels(models, [SUBJECT_SEGMENTER_MODEL_ID]) : []),
+    [models, subjectMasksToGenerate],
+  );
+  // A base whose licence binds the adapters trained from it (Qwen Image 2.1, epic 24107 E12) shows
+  // its notice in the panel and holds Start training until the user accepts it. The acceptance is
+  // remembered per target (fails closed when storage is unavailable) and asserted on the submit.
+  const selectedTargetLicense = trainingTargetLicense(selectedTarget);
+  const [licenseAcks, setLicenseAcks] = useState({});
+  const licenseTargetId = selectedTarget?.id ?? "";
+  const licenseAcknowledged = Boolean(
+    selectedTargetLicense &&
+      (licenseAcks[licenseTargetId] ?? readLicenseAck(trainingLicenseAckKey(licenseTargetId))),
+  );
+  const setLicenseAcknowledged = (acknowledged) => {
+    if (!licenseTargetId) return;
+    writeLicenseAck(trainingLicenseAckKey(licenseTargetId), acknowledged);
+    setLicenseAcks((acks) => ({ ...acks, [licenseTargetId]: acknowledged }));
+  };
   const configContext = useMemo(
     () => ({
       activeDataset,
       selectedTarget,
       datasetNotReady: readinessBlocksTraining,
       missingControlModels,
+      missingTrainingAdapterModels,
+      // Subject-masked loss (sc-24828) needs a mask on every image: an empty one gates Start, and
+      // ungenerated ones do while the segmenter that generates them is missing.
+      subjectMaskReport: subjectMasks,
+      subjectSegmenterMissing: missingSubjectSegmenterModels.length > 0,
+      licenseAcknowledged,
+      models,
     }),
-    [activeDataset, selectedTarget, readinessBlocksTraining, missingControlModels],
+    [
+      activeDataset,
+      selectedTarget,
+      readinessBlocksTraining,
+      missingControlModels,
+      missingTrainingAdapterModels,
+      subjectMasks,
+      missingSubjectSegmenterModels,
+      licenseAcknowledged,
+      models,
+    ],
   );
   const configValidity = useValidation(configValidation, configDraft, configContext);
+
+  // Iris-3B (sc-25685): the previous runs a new run can resume / start from, the dataset's caption
+  // field names, the active lane for the declared memory floor, and the data-walk preflight.
+  const irisObjectiveSelected = irisObjective(selectedTarget);
+  const irisSelected = irisObjectiveSelected === "generation";
+  const irisDataWalk = useIrisDataWalk({
+    enabled: irisSelected,
+    targetId: selectedTarget?.id,
+    items: activeDataset?.items?.length ?? 0,
+    batchSize: Number(configDraft.batchSize),
+    token,
+  });
+  // sc-25689: the official stage presets, the pre-launch plan check of the config as it would be
+  // submitted, and the parent run's holdout validation.
+  const irisPresets = useIrisStagePresets(irisSelected, token);
+  const irisPlanConfig = useMemo(() => {
+    if (!irisSelected || !activeDataset || !selectedTarget) return null;
+    try {
+      return trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, trainingLane: trainingLaneFromCapabilities(macCapabilities) }).config;
+    } catch {
+      return null;
+    }
+  }, [irisSelected, activeDataset, configDraft, selectedPreset, selectedTarget, macCapabilities]);
+  const irisPlanCheck = useIrisPlanCheck({ enabled: irisSelected, targetId: selectedTarget?.id, config: irisPlanConfig, token });
+  const irisResumeMetrics = useIrisMetrics(irisSelected ? configDraft.resumeFromJobId : "", token);
+  const irisContext = useMemo(() => {
+    if (irisSelected) {
+      return {
+        previousRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id }),
+        fullRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id, fullOnly: true }),
+        captionFieldOptions: irisCaptionFieldOptions(activeDataset),
+        trainingLane: trainingLaneFromCapabilities(macCapabilities),
+        dataWalk: irisDataWalk,
+        presets: irisPresets,
+        planCheck: irisPlanCheck,
+        resumeMetrics: irisResumeMetrics,
+        applyPreset: (preset) =>
+          preset &&
+          setConfigDraft((current) =>
+            configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, current.triggerWord ?? "", preset, current),
+          ),
+      };
+    }
+    // Depth / restoration (sc-25687 / sc-25688): previous runs of the same task, the restoration
+    // training-only resources still to install, and the pre-launch dataset check of THIS config.
+    if (!irisObjectiveSelected) return {};
+    return {
+      previousRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id, baseModel: selectedTarget.baseModel }),
+      trainingLane: trainingLaneFromCapabilities(macCapabilities),
+      missingResources: missingRequiredModels(models, irisTrainingResourceIds(selectedTarget)),
+      checkDataset: () =>
+        checkIrisDataset(
+          {
+            projectId: activeProject?.id,
+            datasetId: activeDataset?.id,
+            targetId: selectedTarget.id,
+            config: trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, trainingLane: trainingLaneFromCapabilities(macCapabilities) }).config,
+          },
+          { token },
+        ),
+    };
+  }, [
+    irisSelected, irisObjectiveSelected, jobs, activeProject?.id, activeDataset, macCapabilities, irisDataWalk,
+    models, selectedTarget, selectedPreset, configDraft, token,
+    irisPresets, irisPlanCheck, irisResumeMetrics, gpuOptions,
+  ]);
 
   // The dataset's character kind (person/style/object) — refines the readiness kind
   // and thus the blur floor. "" when the dataset isn't tied to a character.
@@ -822,6 +1037,36 @@ export function TrainingStudio({ mode = "training" } = {}) {
     loadTrainingDatasetReadiness,
   ]);
 
+  // Subject-mask report for the SAVED dataset (sc-2126). Advisory like readiness: a failed fetch
+  // drops back to "no masks yet" rather than blocking editing.
+  useEffect(() => {
+    const projectId = activeProject?.id;
+    const datasetId = activeDataset?.id;
+    if (!projectId || !datasetId || typeof loadTrainingDatasetSubjectMasks !== "function") {
+      setSubjectMasks(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    loadTrainingDatasetSubjectMasks(datasetId, projectId, { signal: controller.signal })
+      .then((report) => {
+        if (!controller.signal.aborted) {
+          setSubjectMasks(report ?? null);
+        }
+      })
+      .catch((err) => {
+        if (!isAbortError(err) && !controller.signal.aborted) {
+          setSubjectMasks(null);
+        }
+      });
+    return () => controller.abort();
+  }, [
+    activeProject?.id,
+    activeDataset?.id,
+    activeDataset?.version,
+    completedSubjectMaskJobId,
+    loadTrainingDatasetSubjectMasks,
+  ]);
+
   // Dismiss/undo a single quality finding on an image (sc-6534). The endpoint replaces the item's
   // full dismissed-check set, so we send the next set derived from the readiness entry, then refetch.
   async function toggleItemQualityAck(entry, check, dismissed) {
@@ -856,6 +1101,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setRenamePrefix("");
     setCaptionTriggerWords("");
     setCaptionDraftById({});
+    setReferenceDraftById({});
+    setEditPairsMode(false);
     setCaptionSettings(defaultCaptionSettings);
     setSelectedPresetId("");
     setCustomizedConfigFields(new Set());
@@ -887,9 +1134,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
     // Seed caption drafts from the (re)loaded dataset; switching datasets or
     // saving (which swaps activeDataset) resets edits to the persisted state.
     setCaptionDraftById(captionDraftsFromDataset(activeDataset));
+    setReferenceDraftById(referenceDraftsFromDataset(activeDataset));
     setRenamePrefix(safeSlug(activeDataset?.name, "item"));
     setCaptionTriggerWords(datasetTriggerPhrase);
-    setCaptionSettings((current) => ({ ...current, nameInput: datasetTriggerPhrase }));
+    setCaptionSettings((current) => ({ ...current, nameInput: datasetTriggerPhrase, triggerWords: datasetTriggerPhrase }));
   }, [activeDataset]);
 
   useEffect(() => {
@@ -1363,6 +1611,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setAssociatedCharacterId("");
     setUploadedDatasetAssets([]);
     setSelectedDatasetId("");
+    setReferenceDraftById({});
+    setEditPairsMode(false);
   }
 
   // Starting a new dataset abandons the current draft — confirm before discarding unsaved
@@ -1393,6 +1643,55 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setSelectedAssetIds(normalizeDatasetAssetIds(activeDataset, assets));
     setAssociatedCharacterId(activeDataset.characterId ?? "");
     setCaptionDraftById(captionDraftsFromDataset(activeDataset));
+    setReferenceDraftById(referenceDraftsFromDataset(activeDataset));
+  }
+
+  // Replace one item's ordered reference list (reorder / remove from the reference rail, sc-24161).
+  function setItemReferences(selectionId, referenceIds) {
+    setDatasetMessage("");
+    setReferenceDraftById((current) => ({ ...current, [selectionId]: [...(referenceIds ?? [])] }));
+  }
+
+  // Append picked references to an item, never past the reference cap — the picker cannot hand
+  // the item more than the model accepts, and the user is told how many did not fit.
+  function addItemReferences(selectionId, pickedIds) {
+    const { next, dropped } = appendReferences(referenceDraftById[selectionId] ?? [], pickedIds, {
+      cap: datasetReferenceLimit,
+      itemId: selectionId,
+    });
+    setItemReferences(selectionId, next);
+    if (dropped > 0) {
+      setDatasetMessage(
+        `Maximum ${datasetReferenceLimit} references; ${dropped} not added.`,
+      );
+    }
+  }
+
+  // Upload dropped files as dataset-only images, then attach them as references (sc-24161) —
+  // the same upload path dataset items use, so they re-save by project path like those do.
+  async function importItemReferences(selectionId, fileList) {
+    const files = Array.from(fileList ?? []).filter(isImageUpload);
+    if (!files.length) {
+      return;
+    }
+    setImportingAssets(true);
+    setDatasetError("");
+    try {
+      const imported = [];
+      for (const file of files) {
+        const asset = await uploadDatasetItem(file);
+        if (asset?.id) {
+          const datasetAsset = { ...asset, datasetOnly: true };
+          imported.push(datasetAsset.id);
+          setUploadedDatasetAssets((current) => [datasetAsset, ...current.filter((item) => item.id !== datasetAsset.id)]);
+        }
+      }
+      addItemReferences(selectionId, imported);
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setImportingAssets(false);
+    }
   }
 
   // Editing a caption marks it as manually authored (sc-2025) — caption source
@@ -1423,7 +1722,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
       }
     }
     setCustomizedConfigFields((current) => new Set([...current, field]));
-    setConfigDraft((current) => ({ ...current, [field]: value }));
+    // sc-2124: a preset's bucket ladder follows the Resolution field (draftWithResolution).
+    setConfigDraft((current) =>
+      field === "resolution" ? draftWithResolution(current, selectedTarget, value) : { ...current, [field]: value },
+    );
   }
 
   function applyTrainingPreset(preset, { message = "Preset applied" } = {}) {
@@ -1564,19 +1866,23 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setDatasetMessage("");
     try {
       const imageFiles = files.filter(isImageUpload);
-      const captionFiles = files.filter((file) => !isImageUpload(file) && isCaptionUpload(file));
+      const captionFiles = files.filter(
+        (file) => !isImageUpload(file) && (isCaptionUpload(file) || isJsonCaptionSidecar(file)),
+      );
 
-      // Pair each caption with an image by filename stem (`Mira_01.txt` → `Mira_01.png`).
-      const captionByStem = new Map();
+      // Pair each caption with an image by filename stem (`Mira_01.txt` → `Mira_01.png`). A
+      // `<stem>.json` sidecar (sc-25685) carries named caption fields, and its `caption`/`text`
+      // fills the caption when the stem has no `.txt`.
+      const sidecarEntries = [];
       for (const file of captionFiles) {
-        const text = (await file.text()).trim();
-        if (text) {
-          captionByStem.set(uploadFileStem(file.name), text);
-        }
+        const jsonByTypeOnly = isJsonCaptionSidecar(file) && uploadFileExtension(file.name) !== "json";
+        sidecarEntries.push({ name: jsonByTypeOnly ? `${file.name}.json` : file.name, text: await file.text() });
       }
+      const { byStem: sidecarByStem, ignored: ignoredSidecars } = collectCaptionSidecars(sidecarEntries);
 
       const imported = [];
       const captionsByAssetId = {};
+      const namedCaptionsByAssetId = {};
       for (const file of imageFiles) {
         const asset = await uploadDatasetItem(file);
         if (asset?.id) {
@@ -1586,9 +1892,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
           const datasetAsset = { ...asset, datasetOnly: true };
           imported.push(datasetAsset.id);
           setUploadedDatasetAssets((current) => [datasetAsset, ...current.filter((item) => item.id !== datasetAsset.id)]);
-          const caption = captionByStem.get(uploadFileStem(file.name));
-          if (caption) {
-            captionsByAssetId[asset.id] = { source: "imported", text: caption };
+          const sidecar = sidecarByStem.get(uploadFileStem(file.name));
+          if (sidecar?.text) {
+            captionsByAssetId[asset.id] = { source: "imported", text: sidecar.text };
+          }
+          if (sidecar?.captions && Object.keys(sidecar.captions).length) {
+            namedCaptionsByAssetId[asset.id] = sidecar.captions;
           }
         }
       }
@@ -1598,15 +1907,28 @@ export function TrainingStudio({ mode = "training" } = {}) {
         if (Object.keys(captionsByAssetId).length) {
           setCaptionDraftById((current) => ({ ...current, ...captionsByAssetId }));
         }
+        if (Object.keys(namedCaptionsByAssetId).length) {
+          setNamedCaptionsById((current) => ({ ...current, ...namedCaptionsByAssetId }));
+        }
         const imageStems = new Set(imageFiles.map((file) => uploadFileStem(file.name)));
-        const unmatchedCaptions = captionFiles.filter((file) => !imageStems.has(uploadFileStem(file.name))).length;
+        const ignoredNames = new Set(ignoredSidecars);
+        const unmatchedCaptions = captionFiles.filter(
+          (file) => !imageStems.has(uploadFileStem(file.name)) && !ignoredNames.has(uploadFileBaseName(file.name)),
+        ).length;
         const matchedCaptions = Object.keys(captionsByAssetId).length;
+        const matchedNamed = Object.keys(namedCaptionsByAssetId).length;
         const captionNote = matchedCaptions ? ` with ${matchedCaptions} caption${matchedCaptions === 1 ? "" : "s"}` : "";
+        const namedNote = matchedNamed
+          ? ` ${matchedNamed} image${matchedNamed === 1 ? "" : "s"} got named caption fields.`
+          : "";
         const unmatchedNote = unmatchedCaptions
           ? ` ${unmatchedCaptions} caption file${unmatchedCaptions === 1 ? "" : "s"} had no matching image.`
           : "";
+        const ignoredNote = ignoredSidecars.length
+          ? ` Ignored ${ignoredSidecars.length} caption .json file${ignoredSidecars.length === 1 ? "" : "s"} that ${ignoredSidecars.length === 1 ? "is" : "are"} not an object of text fields: ${ignoredSidecars.join(", ")}.`
+          : "";
         setDatasetMessage(
-          `Imported ${imported.length} image${imported.length === 1 ? "" : "s"}${captionNote}. Save the dataset to keep them.${unmatchedNote}`,
+          `Imported ${imported.length} image${imported.length === 1 ? "" : "s"}${captionNote}. Save the dataset to keep them.${namedNote}${unmatchedNote}${ignoredNote}`,
         );
       } else {
         setDatasetError("No images were imported.");
@@ -1625,7 +1947,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     // `baseOverride` lets a follow-up save (e.g. dedupe's second persist) act on a just-saved dataset
     // whose React state hasn't flushed yet — without it, `activeDataset`/`assetsById` are stale and a
     // re-materialized item key can miss `assetsById`, silently dropping kept images. Rebuild the
-    // asset map from the override so every kept item resolves.
+    // item and reference asset maps from the override so every kept item and ordered reference
+    // resolves under the server-assigned keys returned by the first save.
     const base = baseOverride ?? activeDataset;
     const baseAssetsById = baseOverride
       ? new Map([
@@ -1634,13 +1957,23 @@ export function TrainingStudio({ mode = "training" } = {}) {
             asset.id,
             asset,
           ]),
+          ...datasetReferenceAssets(baseOverride, activeProject?.id, assets).map((asset) => [
+            asset.id,
+            asset,
+          ]),
         ])
       : assetsById;
+    const baseReferenceDraftById = baseOverride
+      ? referenceDraftsFromDataset(baseOverride)
+      : referenceDraftById;
     const payload = datasetPayload({
       activeDataset: base,
       assetsById: baseAssetsById,
       associatedCharacterId,
       captionDraftById,
+      namedCaptionsById,
+      holdoutById,
+      referenceDraftById: baseReferenceDraftById,
       name: draftName,
       selectedAssetIds: selectionOverride ?? selectedAssetIds,
     });
@@ -1651,6 +1984,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setActiveDataset(dataset);
       setDraftName(dataset.name ?? draftName.trim());
       setUploadedDatasetAssets([]);
+      setNamedCaptionsById({});
+      setHoldoutById({});
       setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
       setAssociatedCharacterId(dataset.characterId ?? "");
       setSelectedDatasetId(dataset.id ?? "");
@@ -1695,6 +2030,18 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setDatasetError(error.message);
       throw error;
     }
+  }
+
+  // Iris depth / restoration sidecars (sc-25687 / sc-25688): attach (file) or remove (null) one
+  // saved item's depth map / mask / degraded input; the API answers with the updated dataset.
+  async function irisSidecar(item, kind, file, fields) {
+    const dataset = await irisItemSidecar(
+      { projectId: activeProject?.id, datasetId: activeDataset?.id, itemId: item.id, kind, file, fields },
+      { token },
+    );
+    setActiveDataset(dataset);
+    setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
+    return dataset;
   }
 
   async function importParquetDataset(settings) {
@@ -1898,6 +2245,50 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
   }
 
+  // Subject masks (sc-2126): enqueue SAM3 person segmentation over the whole dataset. Saves first so
+  // the job sees the live items; async (GPU), the mask report refreshes when the job completes.
+  async function generateSubjectMasks() {
+    if (savingDataset) {
+      return;
+    }
+    setSavingDataset(true);
+    setDatasetError("");
+    setDatasetMessage("");
+    try {
+      const saved = await persistDataset();
+      if (!saved?.id) {
+        setDatasetError("Save the dataset before generating subject masks.");
+        return;
+      }
+      const job = await createTrainingDatasetSubjectMaskJob(saved.id, {});
+      setDatasetMessage(
+        `Subject mask job queued${job?.id ? ` (${job.id})` : ""}. Track it in the Queue; the masks appear when it finishes.`,
+      );
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setSavingDataset(false);
+    }
+  }
+
+  // Replace one image's subject mask with an uploaded file (sc-2126). The file is checked against the
+  // same limits the API enforces first; a server field error is rethrown for the card to show.
+  async function uploadSubjectMask(member, file) {
+    const fileError = subjectMaskFileError(file);
+    if (fileError) {
+      throw new Error(fileError);
+    }
+    const itemId = resolveSavedItemId(activeDataset, member);
+    if (!activeDataset?.id || !itemId || typeof uploadTrainingDatasetSubjectMask !== "function") {
+      throw new Error("Save this dataset item before uploading its subject mask.");
+    }
+    const report = await uploadTrainingDatasetSubjectMask(activeDataset.id, itemId, file);
+    // The upload answers with the updated report — authoritative, so no refetch.
+    setSubjectMasks(report ?? null);
+    setDatasetMessage(`Subject mask replaced for ${member.displayName ?? imageAssetName(member)}.`);
+    return report;
+  }
+
   // One-tap smart-crop (sc-6539): synchronously crop the crop-loss-flagged items toward a trainable
   // aspect, then reload the dataset (re-derives selection — re-pointed items become dataset-owned).
   async function smartCropItems(itemIds) {
@@ -1960,7 +2351,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
       // The dry-run mode selector is gone (sc-10492); the studio only ever queues a
       // real training job. The API still accepts dryRun, so send it explicitly.
       const dryRun = false;
-      const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun });
+      const snapshot = trainingConfigSnapshot({
+        activeDataset,
+        configDraft,
+        selectedPreset,
+        selectedTarget,
+        dryRun,
+        trainingLane: trainingLaneFromCapabilities(macCapabilities),
+      });
       const job = await createTrainingJob({
         targetId: snapshot.targetId,
         datasetId: snapshot.datasetId,
@@ -1970,6 +2368,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
         outputName: snapshot.outputName,
         dryRun,
         config: snapshot.config,
+        // Only reachable once the licence notice was accepted (configValidity holds Start until
+        // then); the API refuses an unacknowledged real run against a licence-bound base.
+        ...(selectedTargetLicense ? { licenseAcknowledged: licenseAcknowledged === true } : {}),
       });
       setConfigSnapshot(snapshot);
       setConfigMessage(`Queued training job ${job?.id ?? ""}`.trim() + ". Track it in the Queue.");
@@ -2069,8 +2470,13 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   removeUnavailableAsset, onImportParquet: importParquetDataset,
                   onDeleteDataset: handleDeleteDataset, deletingDataset,
                 }}
+                editPairSession={{
+                  referenceCap: datasetReferenceLimit, referenceDraftById, setItemReferences,
+                  addItemReferences, importItemReferences, editPairsMode, setEditPairsMode,
+                }}
                 captionSession={{
-                  captionDraftById, onPreview, updateCaption, captioning, addDialogOpen,
+                  captionDraftById, namedCaptionsById, holdoutById,
+                  onToggleHoldout: irisSelected ? (id, on) => setHoldoutById((current) => ({ ...current, [id]: on })) : undefined, onPreview, updateCaption, captioning, addDialogOpen,
                   selectedAssetIds, addAssets, handleImport, captionDialog,
                   updateCaptionSetting, runCaptionJob, toggleCaptionExtraOption,
                   displayedCaptionPrompt, captionSettings, captionModelMissing,
@@ -2083,6 +2489,13 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 config={{
                   imageAssets, characters, associatedCharacterId, setActiveView,
                   importingAssets, gpuOptions, onUploadPreparedBundle: uploadPreparedBundle,
+                  onIrisSidecar: activeDataset?.id ? irisSidecar : undefined,
+                }}
+                maskSession={{
+                  projectId: activeProject?.id,
+                  report: subjectMasks,
+                  onGenerateMasks: generateSubjectMasks,
+                  onUploadMask: uploadSubjectMask,
                 }}
               />
             ) : (
@@ -2101,6 +2514,11 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 <ConfigureJobPanel
                   setActiveView={setActiveView}
                   missingControlModels={missingControlModels}
+                  missingTrainingAdapterModels={missingTrainingAdapterModels}
+                  missingSubjectSegmenterModels={missingSubjectSegmenterModels}
+                  targetLicense={selectedTargetLicense}
+                  licenseAcknowledged={licenseAcknowledged}
+                  onLicenseAcknowledgedChange={setLicenseAcknowledged}
                   controlModelDownloadJobs={trainingDownloadJobs}
                   onDownloadModel={createModelDownloadJob}
                   onOpenModels={() => setActiveView("Models")}
@@ -2115,6 +2533,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   setSelectedTargetId={setSelectedTargetId}
                   trainingTargets={trainingTargets}
                   macTargetBlocked={macTargetBlocked}
+                  targetBlockedLabel={targetBlockedLabel}
                   updateSelectedPreset={updateSelectedPreset}
                   updateQualityTier={updateQualityTier}
                   selectedPreset={selectedPreset}
@@ -2144,10 +2563,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   submitTrainingJob={submitTrainingJob}
                   configSnapshot={configSnapshot}
                   datasetDoctor={datasetDoctor}
+                  irisContext={irisContext}
+                  subjectMaskReport={subjectMasks}
+                  onGenerateSubjectMasks={generateSubjectMasks}
                 />
                 <TrainingLiveProgress
                   jobs={activeTrainingJobs}
                   projectId={activeProject?.id}
+                  token={token}
                   onCancel={jobAction ? (job) => jobAction(job, "cancel") : undefined}
                   onPreview={setPreviewAsset}
                 />

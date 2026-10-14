@@ -489,6 +489,17 @@ pub(crate) struct TrainingCaptionJobRequest {
     pub(crate) captioner: String,
     #[serde(default = "default_training_caption_model")]
     pub(crate) model_name_or_path: String,
+    /// Caption mode (sc-24829): `default` (the full-scene JoyCaption prompt), `subjectOnly` (the
+    /// worker's subject-only prompt) or `triggerOnly` (exactly the trigger words, no captioner).
+    /// Unknown strings deserialize to `CaptionMode::Unknown` and are refused by validation.
+    #[serde(default = "default_training_caption_mode")]
+    pub(crate) mode: sceneworks_core::training::CaptionMode,
+    /// Trigger words for the job (sc-24829): filled into every captioned item that carries none of
+    /// its own, in every mode — so a trigger-only caption has words to write, and default /
+    /// subject-only captions get them prepended. Limits mirror the caption dialog
+    /// (`captionTriggerWordLimits` in `joyCaptionPrompts.js`).
+    #[serde(default)]
+    pub(crate) trigger_words: Vec<String>,
     #[serde(default)]
     pub(crate) recaption: bool,
     #[serde(default = "default_requested_gpu")]
@@ -544,6 +555,10 @@ pub(crate) struct DatasetParquetImportJobRequest {
     /// Case-insensitive caption substrings. A matching row is always rejected.
     #[serde(default)]
     pub(crate) caption_excludes: Vec<String>,
+    /// Extra columns imported as per-item named captions (`captions: {column: text}`), the
+    /// HF-style multi-field caption source the Iris trainer's `caption_field(s)` read (sc-25685).
+    #[serde(default)]
+    pub(crate) caption_field_columns: Vec<String>,
 }
 
 fn default_parquet_url_column() -> String {
@@ -577,6 +592,36 @@ pub(crate) struct DatasetFaceAnalysisJobRequest {
     /// Restrict the pass to these dataset item ids; when absent, every item is analyzed.
     #[serde(default)]
     pub(crate) item_ids: Option<Vec<String>>,
+}
+
+/// Request to generate SAM3 subject masks over a training dataset (sc-2126). The segmenter is fixed
+/// (SAM3 "person"), so the request only carries GPU routing and an optional item subset.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetSubjectMaskJobRequest {
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    /// Restrict the pass to these dataset item ids; when absent, every item is masked.
+    #[serde(default)]
+    pub(crate) item_ids: Option<Vec<String>>,
+}
+
+/// The subject-mask worker POSTs its generated masks here (sc-2126). Each mask is a base64 PNG keyed
+/// by its image's content hash.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetSubjectMasksBody {
+    /// The segmentation space the masks came from (e.g. `sam3-person`). Recorded for diagnostics.
+    pub(crate) space: String,
+    pub(crate) items: Vec<DatasetSubjectMaskRecordBody>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetSubjectMaskRecordBody {
+    pub(crate) content_hash: String,
+    /// Standard-alphabet base64 of the mask PNG.
+    pub(crate) mask_png: String,
 }
 
 /// The analysis worker POSTs its computed CLIP embeddings here to persist the sidecar (sc-6535) —
@@ -720,6 +765,11 @@ pub(crate) struct ImageJobRequest {
     #[serde(default = "default_image_mode")]
     pub(crate) mode: String,
     pub(crate) prompt: String,
+    /// A NATIVE prompt batch (sc-25681): prompts the model renders together in one pass, only for a
+    /// model declaring `image.maxPromptBatchImages` (Iris-3B). `prompt` must equal `prompts[0]`.
+    /// Typed so serde forwards it; empty (and omitted from the job payload) for an ordinary request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) prompts: Vec<String>,
     #[serde(default)]
     pub(crate) negative_prompt: String,
     #[serde(default = "default_image_model")]
@@ -1536,6 +1586,10 @@ pub(crate) struct LoraUpdateRequest {
     pub(crate) trigger_words: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) notes: Option<String>,
+    /// User-assigned architecture family (sc-24163). Accepted ONLY when the adapter file's own
+    /// header does not resolve a family — a detected family always wins.
+    #[serde(default)]
+    pub(crate) family: Option<String>,
 }
 
 /// Query params identifying a single catalog LoRA across scopes, shared by the

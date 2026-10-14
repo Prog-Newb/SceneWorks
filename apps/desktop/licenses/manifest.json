@@ -1291,6 +1291,69 @@
       ]
     },
     {
+      "id": "iris-3b",
+      "models": [
+        "iris_3b",
+        "iris_3b_depth",
+        "iris_3b_restore"
+      ],
+      "name": "Iris-3B (speridlabs/iris-3b) + Qwen3-VL-4B-Instruct text encoder",
+      "publisher": "Sperid Labs; Alibaba Qwen Team",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/speridlabs/iris-3b",
+      "usage": "Native MLX (Apple Silicon) and Candle/CUDA (NVIDIA) text-to-image from the speridlabs/iris-3b generation backbone, conditioned on the Qwen/Qwen3-VL-4B-Instruct text encoder, and one-step image restoration / tiled upscaling from the repository's upscaler/ task export (which uses no text encoder); all are Apache-2.0 and are downloaded on install from their upstream repositories (NOT re-hosted by SceneWorks). Also covers the Rust source ports of the speridlabs/iris-3b reference pipeline (pixel-space DiT, layerwise text adapter, FlowDPM-Solver++ and the restoration tiling / colour-fix path). The Iris 3B Depth install (iris_3b_depth) downloads only the depth/ task export of speridlabs/iris-3b (Apache-2.0) and the Rust MLX/Candle port of its depth head.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "iris-3b-apache"
+        }
+      ]
+    },
+    {
+      "id": "iris-repa-teacher",
+      "models": [
+        "iris_repa_teacher_dinov2_base"
+      ],
+      "name": "DINOv2-B/14 (facebook/dinov2-base) — Iris REPA training teacher",
+      "publisher": "Meta AI (FAIR)",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/facebook/dinov2-base",
+      "usage": "Training-only resource of Iris 3B generation training (Training Studio, sc-25689): the frozen DINOv2-B/14 image encoder whose patch features REPA / iREPA aligns the trained backbone to. Its own Model Manager install, pinned to an immutable Hugging Face revision, checked against its pinned size and sha256 before every training run, downloaded from its upstream repository (NOT re-hosted by SceneWorks), and never used for generation or any other inference. Apache-2.0.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "iris-repa-teacher-apache"
+        }
+      ]
+    },
+    {
+      "id": "iris-restore-training",
+      "models": [
+        "iris_restore_train_vgg16",
+        "iris_restore_train_lpips_lin",
+        "iris_restore_train_critic_trunk"
+      ],
+      "name": "Iris restoration TRAINING resources: VGG16 (torchvision ImageNet, timm/vgg16.tv_in1k), LPIPS v0.1 linear heads (vivym/lpips), OpenCLIP ConvNeXt-XXLarge (laion/CLIP-convnext_xxlarge-laion2B-s34B-b82K-augreg-soup)",
+      "publisher": "PyTorch / torchvision (VGG16 ImageNet weights, Simonyan & Zisserman); Richard Zhang et al. (LPIPS); LAION / OpenCLIP (ConvNeXt-XXLarge)",
+      "license": "BSD-3-Clause AND BSD-2-Clause AND MIT",
+      "homepage": "https://github.com/mlfoundations/open_clip",
+      "usage": "Training-only resources of Iris 3B restoration training (Training Studio, sc-25688): the frozen VGG16 trunk and LPIPS v0.1 linear heads of the perceptual loss, and the frozen OpenCLIP ConvNeXt-XXLarge trunk of the adversarial critic. Each is its own Model Manager install pinned to an immutable Hugging Face revision, checked against its pinned size and sha256 before every training run, downloaded from its upstream repository (NOT re-hosted by SceneWorks), and never used for restoration or any other inference. VGG16: torchvision's BSD-3-Clause code licence; the ImageNet VGG weights are credited to Simonyan & Zisserman (published under CC BY 4.0). LPIPS: BSD-2-Clause. OpenCLIP code and the LAION ConvNeXt-XXLarge checkpoint (model card licence: MIT): MIT.",
+      "documents": [
+        {
+          "label": "torchvision BSD 3-Clause License (VGG16)",
+          "key": "iris-restore-training-torchvision-bsd-3-clause"
+        },
+        {
+          "label": "LPIPS BSD 2-Clause License",
+          "key": "iris-restore-training-lpips-bsd-2-clause"
+        },
+        {
+          "label": "OpenCLIP MIT License (ConvNeXt-XXLarge critic trunk)",
+          "key": "iris-restore-training-open-clip-mit"
+        }
+      ]
+    },
+    {
       "id": "cmudict",
       "models": [],
       "name": "CMU Pronouncing Dictionary",
@@ -1638,6 +1701,30 @@
         {
           "label": "InsightFace Model License Notice (verbatim upstream terms)",
           "key": "insightface-model-notice"
+        }
+      ]
+    },
+    {
+      "id": "ai-toolkit-perceptual-source",
+      "models": [],
+      "name": "Perceptual LoRA Toolkit body-loss source",
+      "publisher": "Ostris, LLC; ai-toolkit-perceptual fork contributors",
+      "license": "MIT (source only)",
+      "homepage": "https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/tree/6e01a6e3a75dab3d4567fe885e148df9161daba7",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Native Rust/Candle and Rust/MLX implementations of the body-loss architectures and formulas documented in toolkit/body_id.py,body_shape.py,normal_id.py at the pinned fork revision. The source MIT license and Ostris copyright notice are retained. This source attribution does not license or claim redistribution rights for ViTPose+,HybrIK,Sapiens or other optional model weights.",
+      "documents": [
+        {
+          "label": "MIT License (source)",
+          "key": "ai-toolkit-perceptual-source-mit"
+        },
+        {
+          "label": "Body-loss source provenance",
+          "key": "ai-toolkit-perceptual-source-notice"
         }
       ]
     }

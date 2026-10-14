@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "11319984d0c5aa7ff63bffa0760d93aec823aeea",
+    "inferenceRevision": "6e402df8f4fddcb5affde6e6955e170c1d99bff9",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -479,6 +479,11 @@
           "identity": "flux2-batchnorm-v1"
         }
       }
+    },
+    {
+      "id": "iris_3b",
+      "modality": "image",
+      "supportsPreview": true
     },
     {
       "id": "kolors",
@@ -5032,6 +5037,117 @@
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "iris_3b",
+      "composed": false,
+      "selectorDigest": "sha256:9dc34c16562e2cd09bc9fb8ea4df32086b11144500be3f85f5ce23a1ba7a8ec9",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode"
+          ],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "iris_3b_depth",
+      "composed": true,
+      "selectorDigest": "sha256:5bb34abbb2b96c7da7dae1f530e72eed26c4848b38197fa0c1177a12bdae9783",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "iris_3b_restore",
+      "composed": true,
+      "selectorDigest": "sha256:5bb34abbb2b96c7da7dae1f530e72eed26c4848b38197fa0c1177a12bdae9783",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
           "deferredMaterializationRungs": []
         }
       ]
@@ -15494,9 +15610,23 @@
     {
       "provider": "qwen_image_2_1",
       "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "bf16",
       "mode": "edit_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_2_1",
@@ -15508,9 +15638,23 @@
     {
       "provider": "qwen_image_2_1",
       "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "bf16",
       "mode": "character_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_2_1",
@@ -15522,9 +15666,23 @@
     {
       "provider": "qwen_image_2_1",
       "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q4",
       "mode": "edit_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_2_1",
@@ -15536,9 +15694,23 @@
     {
       "provider": "qwen_image_2_1",
       "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q4",
       "mode": "character_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_2_1",
@@ -15550,9 +15722,23 @@
     {
       "provider": "qwen_image_2_1",
       "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q8",
       "mode": "edit_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_2_1",
@@ -15564,9 +15750,23 @@
     {
       "provider": "qwen_image_2_1",
       "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q8",
       "mode": "character_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_edit",

@@ -77,6 +77,7 @@ fn synthetic_plan(route: &'static str, assets_gib: f64, headroom_gib: f64) -> Ml
 
 fn inputs(width: u32, height: u32, count: u32) -> MlxRequestInputs {
     MlxRequestInputs {
+        native_batch: 1,
         width,
         height,
         count,

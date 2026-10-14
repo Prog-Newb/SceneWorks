@@ -1321,9 +1321,16 @@ test("the candle SCAIL-2 rows plan the resident composition through the strategy
     assert.deepEqual(plan.anchors[key].strategy, { rung: "resident", engagedRungs: ["resident"] }, key);
     assert.deepEqual(planAnchor(plan, key).strategy, { rung: "resident", engagedRungs: ["resident"], parameters: {} }, key);
   }
-  // …and no other candle row overrides on contract grounds today: SenseNova's six ride the manifest exemption.
+  // …and no other candle row overrides on contract grounds today: SenseNova's six ride the manifest
+  // exemption, and so do the two Iris-3B task routes (sc-25690: depth and restoration load no text
+  // encoder, so their manifest candle blocks declare staged residency structurally not applicable).
   const residentCandle = Object.keys(plan.anchors).filter((key) => key.endsWith(":candle") && plan.anchors[key].strategy?.rung === "resident").sort();
-  assert.deepEqual(residentCandle.filter((key) => !key.startsWith("sensenova_u1_8b")), [
+  const ridesManifestExemption = (key) =>
+    key.startsWith("sensenova_u1_8b") || key.startsWith("iris_3b_depth:") || key.startsWith("iris_3b_restore:");
+  for (const key of ["iris_3b_depth:bf16:candle", "iris_3b_restore:bf16:candle"]) {
+    assert.deepEqual(planAnchor(plan, key).strategy, { rung: "resident", engagedRungs: ["resident"], parameters: {} }, key);
+  }
+  assert.deepEqual(residentCandle.filter((key) => !ridesManifestExemption(key)), [
     "bernini:bf16:candle", "bernini:q4:candle", "bernini:q8:candle",
     "bernini_image:bf16:candle", "bernini_image:q4:candle", "bernini_image:q8:candle",
     "ltx_2_3:q4:candle", "ltx_2_3:q8:candle",

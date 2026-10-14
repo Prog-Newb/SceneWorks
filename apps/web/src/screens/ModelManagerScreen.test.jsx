@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { click } from "../testUtils/dom.js";
+import { click, setSelect } from "../testUtils/dom.js";
 
 // sc-12068: model / LoRA / tier deletes confirm through the shared desktop-safe appConfirm
 // dialog rather than the raw window.confirm, which silently no-ops inside the Tauri WebView.
@@ -1152,12 +1152,14 @@ describe("ModelManagerScreen type-grouped layout", () => {
     jobs = [],
     createModelDownloadJob = () => {},
     createLoraDownloadJob = () => {},
+    updateLora,
   } = {}) {
     const value = {
       activeProject: null,
       jobs,
       loras,
       models,
+      updateLora,
       presets: [],
       workersById: new Map(),
       visibleWorkers: [],
@@ -1341,6 +1343,80 @@ describe("ModelManagerScreen type-grouped layout", () => {
     );
   });
 
+  // sc-25684 (E4): the three Iris-3B TASK installs share one upstream repo but are three catalog
+  // entries with their own closures. Each card reports its OWN state off the API row — the
+  // generation card is incomplete when only its Qwen3-VL text encoder is missing and its Fix
+  // re-fetches the generation entry; the depth card stays installed (it needs no encoder); the
+  // restoration card is a plain Download — and all three resolve to the one Apache-2.0 Iris licence
+  // component the About → Licenses screen lists.
+  it("reports each Iris task install on its own card and repairs only the incomplete one (sc-25684)", async () => {
+    const createModelDownloadJob = vi.fn();
+    await render({
+      createModelDownloadJob,
+      models: [
+        {
+          id: "iris_3b",
+          name: "Iris 3B",
+          type: "image",
+          family: "iris",
+          capabilities: ["text_to_image"],
+          installState: "missing",
+          cacheState: "incomplete",
+          repairAvailable: true,
+          missingRequiredFiles: ["Qwen/Qwen3-VL-4B-Instruct@ebb281e/config.json"],
+          downloadable: true,
+        },
+        {
+          id: "iris_3b_depth",
+          name: "Iris 3B Depth",
+          type: "utility",
+          family: "iris",
+          capabilities: [],
+          installState: "installed",
+          cacheState: "complete",
+          downloadable: true,
+        },
+        {
+          id: "iris_3b_restore",
+          name: "Iris 3B Restoration",
+          type: "utility",
+          family: "iris",
+          capabilities: [],
+          installState: "missing",
+          cacheState: "missing",
+          downloadable: true,
+        },
+      ],
+    });
+    const card = (name) =>
+      [...container.querySelectorAll(".model-card")].find(
+        (candidate) => candidate.querySelector(".model-card-title")?.textContent.includes(name),
+      );
+    const buttons = (element) => [...element.querySelectorAll("button")].map((button) => button.textContent);
+
+    const generation = card("Iris 3B");
+    expect(generation.textContent).toContain("incomplete");
+    expect(generation.textContent).toContain("Qwen3-VL-4B-Instruct");
+    const fix = [...generation.querySelectorAll("button")].find((button) => button.textContent === "Fix");
+    expect(fix, "the generation card offers a repair").toBeTruthy();
+    await click(fix);
+    expect(createModelDownloadJob).toHaveBeenCalledTimes(1);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "iris_3b" }));
+
+    await selectTab(container, "Utility Models");
+    const depth = card("Iris 3B Depth");
+    const restore = card("Iris 3B Restoration");
+    expect(depth.querySelector(".model-card-status").textContent).toContain("installed");
+    expect(buttons(depth)).not.toContain("Fix");
+    expect(restore.querySelector(".model-card-status").textContent).toContain("missing");
+    expect(buttons(restore)).not.toContain("Fix");
+
+    const { licenseComponentForModel } = await import("../data/bundledLicenses.js");
+    const components = ["iris_3b", "iris_3b_depth", "iris_3b_restore"].map((id) => licenseComponentForModel(id));
+    expect(new Set(components.map((component) => component?.id))).toEqual(new Set(["iris-3b"]));
+    expect(components[0].license).toBe("Apache-2.0");
+  });
+
   // On the LoRAs tab, User LoRAs are grouped by family into `.models-subsection`s
   // (h4 heading); the Built-In / User scope sections are `.models-section`s (h3).
   function userFamilyHeadings() {
@@ -1381,6 +1457,66 @@ describe("ModelManagerScreen type-grouped layout", () => {
     });
     await selectTab(container, "LoRAs");
     expect(userFamilyHeadings()).toEqual(["flux", "Other / compatible"]);
+  });
+
+  // sc-24163 (epic 24107 E10): a stored LoRA whose family could not be resolved is assigned one
+  // in place — the row offers "Choose family", the editor lists the catalog's LoRA families, and
+  // Save sends `family`; once assigned, the matching model's picker offers it and the other does not.
+  it("lets the user choose the family of an unresolved LoRA, which the matching picker then offers", async () => {
+    const { loraMatchesModel } = await import("../presetUtils.js");
+    const qwen21 = { id: "qwen_image_2_1", name: "Qwen Image 2.1", type: "image", family: "qwen-image-2-1", loraCompatibility: { families: ["qwen-image-2-1"] }, capabilities: ["text_to_image"], installState: "installed" };
+    const qwen2512 = { id: "qwen_image", name: "Qwen Image", type: "image", family: "qwen-image", loraCompatibility: { families: ["qwen-image"] }, capabilities: ["text_to_image"], installState: "installed" };
+    const unresolved = { id: "mystery", name: "Mystery", scope: "global", installState: "installed" };
+    const updateLora = vi.fn(async (lora, updates) => ({ ...lora, ...updates }));
+    await render({
+      models: [qwen21, qwen2512],
+      loras: [unresolved, { id: "known", name: "Known", family: "qwen-image", scope: "global", installState: "installed" }],
+      updateLora,
+    });
+    await selectTab(container, "LoRAs");
+    const rowFor = (name) => [...container.querySelectorAll(".lora-row")].find((row) => row.textContent.includes(name));
+    const buttonIn = (row, text) => [...row.querySelectorAll("button")].find((node) => node.textContent.trim() === text);
+    // A resolved LoRA keeps the plain Edit, and its editor has no family control.
+    expect(buttonIn(rowFor("Known"), "Choose family")).toBeUndefined();
+    await click(buttonIn(rowFor("Known"), "Edit"));
+    expect(rowFor("Known").textContent).not.toContain("Unresolved family");
+    await click(buttonIn(rowFor("Known"), "Cancel"));
+
+    expect(loraMatchesModel(unresolved, qwen21)).toBe(false);
+    await click(buttonIn(rowFor("Mystery"), "Choose family"));
+    const select = [...rowFor("Mystery").querySelectorAll("label")]
+      .find((label) => label.textContent.startsWith("Unresolved family — choose"))
+      ?.querySelector("select");
+    expect([...select.options].map((option) => option.value)).toEqual(["", "qwen-image", "qwen-image-2-1"]);
+    await act(async () => setSelect(select, "qwen-image-2-1"));
+    await click(buttonIn(rowFor("Mystery"), "Save"));
+
+    expect(updateLora).toHaveBeenCalledTimes(1);
+    expect(updateLora.mock.calls[0][0]).toMatchObject({ id: "mystery" });
+    expect(updateLora.mock.calls[0][1]).toEqual({ triggerWords: [], notes: "", family: "qwen-image-2-1" });
+    const assigned = await updateLora.mock.results[0].value;
+    expect(loraMatchesModel(assigned, qwen21)).toBe(true);
+    expect(loraMatchesModel(assigned, qwen2512)).toBe(false);
+  });
+
+  // sc-24163 (round 2): an external (ComfyUI-folder) row has no manifest to write the family to —
+  // the API refuses it — so it never offers the chooser; it says to import a copy instead.
+  it("points an unresolved external LoRA at importing a copy instead of offering the chooser", async () => {
+    const updateLora = vi.fn();
+    await render({
+      models: [{ id: "qwen_image_2_1", name: "Qwen Image 2.1", type: "image", family: "qwen-image-2-1", loraCompatibility: { families: ["qwen-image-2-1"] }, capabilities: ["text_to_image"], installState: "installed" }],
+      loras: [{ id: "external_mystery", name: "Comfy Mystery", scope: "external", installState: "installed" }],
+      updateLora,
+    });
+    await selectTab(container, "LoRAs");
+    const row = [...container.querySelectorAll(".lora-row")].find((node) => node.textContent.includes("Comfy Mystery"));
+    expect(row.textContent).toContain("Import a copy to choose its family.");
+    expect([...row.querySelectorAll("button")].some((node) => node.textContent.trim() === "Choose family")).toBe(false);
+    const edit = [...row.querySelectorAll("button")].find((node) => node.textContent.trim() === "Edit");
+    if (edit) {
+      await click(edit);
+      expect(row.textContent).not.toContain("Unresolved family");
+    }
   });
 
   it("separates built-in LoRAs from user LoRAs into their own sections", async () => {

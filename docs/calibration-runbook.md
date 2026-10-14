@@ -807,6 +807,34 @@ SCENEWORKS_QWEN_IMAGE_2_1_BF16_REPOSITORY=Qwen/Qwen-Image-2.1       # fixed; val
 SCENEWORKS_QWEN_IMAGE_2_1_BF16_REVISION=<exact artifact revision>
 SCENEWORKS_QWEN_IMAGE_2_1_BF16_ROOT=/abs/path/.../snapshots/<rev>       # the snapshot ROOT — no tier subdir
 
+# BOTH adapters — the three Iris-3B TASK routes (sc-25690): generation (iris_3b), monocular depth
+# (iris_3b_depth) and restoration (iris_3b_restore). Three fine-tunes in ONE upstream repository at
+# one revision, never re-hosted, bf16 only (no route quantizes, so there is exactly one cell per
+# route per lane and no tier sub-directory anywhere): the generation backbone at the snapshot ROOT,
+# the depth export in `depth/`, the restoration export in `upscaler/` — the directories the worker's
+# generation arm, `depth_jobs::resolve_depth_export` and `iris_restore::resolve_restore_export_dir`
+# hand the engine. One env family per task; a root that is another task's folder is refused.
+SCENEWORKS_IRIS_3B_REPOSITORY=speridlabs/iris-3b                 # fixed; validated against IRIS_3B_REPOSITORY
+SCENEWORKS_IRIS_3B_REVISION=<exact artifact revision>
+SCENEWORKS_IRIS_3B_ROOT=/abs/path/.../snapshots/<rev>            # the snapshot ROOT (config.yaml, model.safetensors)
+SCENEWORKS_IRIS_3B_COMPONENT_TEXT_ENCODER=/abs/path/.../models--Qwen--Qwen3-VL-4B-Instruct/snapshots/<rev>
+                                                                 # generation ONLY: the staged text encoder
+SCENEWORKS_IRIS_3B_DEPTH_REPOSITORY=speridlabs/iris-3b
+SCENEWORKS_IRIS_3B_DEPTH_REVISION=<exact artifact revision>
+SCENEWORKS_IRIS_3B_DEPTH_ROOT=/abs/path/.../snapshots/<rev>/depth       # config.yaml, model.safetensors, empty_prompt.safetensors
+SCENEWORKS_IRIS_3B_RESTORE_REPOSITORY=speridlabs/iris-3b
+SCENEWORKS_IRIS_3B_RESTORE_REVISION=<exact artifact revision>
+SCENEWORKS_IRIS_3B_RESTORE_ROOT=/abs/path/.../snapshots/<rev>/upscaler  # same three files
+# Depth and restoration are NOT generators (a provider-specific estimator and a `Transform`), so the
+# Iris arm drives each itself: depth runs ONE estimate whose model-input grid is the plan geometry,
+# restoration ONE tiled pass whose processing size is the plan geometry (a 4x upscale of a source a
+# quarter that size; a geometry that fits one tile is refused, because the anchor measures the tiled
+# path). Both load resident with no text encoder — their contracts declare staged residency
+# structurally not applicable, which is why their candle plan rows override the lane's staged default
+# — and their "conditioning" phase is the resident model with its shipped empty-prompt states.
+# `measure-memory-catalog.mjs` exports all of the above itself; it inventories only the generation
+# root's own two files, because that root is the snapshot root the two task folders also live in.
+
 # BOTH adapters — the SenseNova-U1 family (sc-22734). SIX catalog ids on TWO engine ids, and SIX
 # env families: each id ships its OWN independently pinned tiered rehost, so the arm resolves the
 # family from `(provider, modelId)` and NOT from the provider alone. Binding an infographic id to
