@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference main revision 25bd55cd: 745 provenance candidates and 104 production-Rust crate prefixes. The new vendored candle-core crate is upstream Hugging Face Candle 0.10.2 with the exact upstream base, cherry-picks, and local CUDA quantized-padding change documented in its VENDORED.md; its source is classified under the existing Hugging Face Candle About license component. The new speculative benchmark baseline driver is a first-party testkit copy, classified separately from upstream model source. Other candidate changes reflect the current inference main source inventory; historical YuE2 source and measurement records remain attributed to their own revisions. This mapping grants no model-weight redistribution. Other open compliance items remain advisory under sc-19751. Generated inventories and digests describe this exact source; this audit makes no measurement currency claim.",
-  "inferenceRevision": "25bd55cdb6a56c78b07584a12150c9f5d46be439",
-  "auditDigest": "3e4090fb200d833b9661535d745ea10b541b9a53cf5f8f3541a9a4ade4bfe95e",
+  "_comment": "Audit inventory rescanned at inference feature merge 75e03b5a: 756 provenance candidates and 108 production-Rust crate prefixes. Veda selector/predictor/layout ports retain the frozen 60bfae6 MIT notice; the native INT8 arithmetic retains its SageAttention BSD-3-Clause notice, and the captured partial-sort implementation retains the LLVM Apache-2.0-with-LLVM-exceptions notice. Those exact source notices are bundled in the existing MiniMax-H3 About notice, separately from model-weight terms. The Veda source paths are explicitly mapped rather than inheriting only the model architecture disposition. Other candidate changes include the current training/body/perceptual inventory and shared checkpoint parser relocation; unresolved body/perceptual classifications and other compliance items remain advisory under sc-19751. Historical source and measurement records retain their own revisions. This mapping grants no model-weight redistribution and makes no measurement currency claim.",
+  "inferenceRevision": "75e03b5abc504d06688b75c9f7bc7a23f0873f5b",
+  "auditDigest": "d7a50159b857bc859e97404678eca63c9402cb02b7a54b83c1abf381bf4964aa",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,14 +17,30 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "25bd55cdb6a56c78b07584a12150c9f5d46be439",
+    "revision": "75e03b5abc504d06688b75c9f7bc7a23f0873f5b",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 745,
-    "populationSha256": "d37d590c3b64b27157fec35bedb9144dd13e54aa56992d529b6be92a75c37143"
+    "matchedFiles": 756,
+    "populationSha256": "99632eeb946ae0fcd78179ed15f518038ee5ec23afc6e3d7405fcdbe021d6efd"
   },
   "portedSourceAreas": [
+    {
+      "id": "veda-sparse-source",
+      "paths": [
+        "crates/contracts/gen-core/src/veda/contract.rs",
+        "crates/contracts/gen-core/src/veda/topk.rs",
+        "crates/contracts/gen-core/src/veda/workspace.rs",
+        "crates/media/mlx-gen/mlx-gen-minimax-h3/src/veda/contract.rs",
+        "crates/media/mlx-gen/mlx-gen-minimax-h3/src/veda/mod.rs",
+        "crates/media/candle-gen/candle-gen-minimax-h3/src/veda.rs",
+        "crates/kernels/candle-quant-kernels/src/veda_int8.rs",
+        "crates/kernels/candle-quant-kernels/src/veda_int8.cu"
+      ],
+      "provenance": "Native modified ports of Veda-on-ComfyUI at 60bfae688897dc41bc8685ca9f3130d7ed8f3b0c, its SageAttention 1.0.6 arithmetic, and LLVM partial-sort selection; source attribution and modification notices are retained in inference.",
+      "disposition": "about-license",
+      "component": "minimax-h3"
+    },
     {
       "id": "architecture:crates/audio/candle-audio-acestep",
       "pathPrefix": "crates/audio/candle-audio-acestep/src/",
@@ -943,10 +959,10 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "25bd55cdb6a56c78b07584a12150c9f5d46be439",
+    "revision": "75e03b5abc504d06688b75c9f7bc7a23f0873f5b",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 104,
-    "cratePopulationSha256": "5e4ba59e61486beb49342068681d613d19d3d47eb3332360d0f2503540230f21"
+    "cratePrefixes": 108,
+    "cratePopulationSha256": "6fad70d0f24443f9fd11309c33afc84b9e6b7b70532437a7c0be6c7982af82cc"
   },
   "crateDispositions": [
     {

@@ -3322,5 +3322,97 @@ const fn rung_of(strategy: MemoryStrategy) -> StrategyRung {
     }
 }
 
+/// Sparse admission never treats a dense-only curve as a measured sparse outcome. Retain the
+/// conservative native dense floor and add the complete request/predictor/fallback bound. The
+/// same-moment budget is consulted after computing the problem bound, never to enlarge it.
+pub(crate) fn admit_veda_workspace(
+    contract: Option<&MemoryProviderContract>,
+    bound: &gen_core::veda::workspace::WorkspaceBound,
+    runtime: Option<VideoRuntimeMemoryState>,
+    headroom_bytes: u64,
+) -> crate::WorkerResult<()> {
+    let contract = contract.ok_or_else(|| {
+        crate::WorkerError::InvalidPayload(
+            "Veda admission requires the native H3 memory contract".into(),
+        )
+    })?;
+    let runtime = runtime.ok_or_else(|| {
+        crate::WorkerError::InvalidPayload(
+            "Veda admission could not read the live device/unified memory budget".into(),
+        )
+    })?;
+    // H3 releases conditioning, DiT and VAE phases on both native backends even at
+    // default settings. Preserve that structural staging in the dense baseline.
+    let base = crate::mlx_fit_gate::estimate_floor_weights_bytes(
+        contract,
+        &[MemoryStrategy::StagedResidency],
+    );
+    let credit = runtime
+        .provider_resident_bytes
+        .min(runtime.budget.committed_bytes)
+        .min(base);
+    let need = base
+        .checked_sub(credit)
+        .and_then(|n| n.checked_add(headroom_bytes))
+        .and_then(|n| n.checked_add(bound.total_bytes))
+        .ok_or_else(|| crate::WorkerError::InvalidPayload("Veda admission size overflow".into()))?;
+    let available = runtime
+        .budget
+        .total_bytes
+        .saturating_sub(runtime.budget.committed_bytes);
+    if available < need {
+        return Err(crate::WorkerError::InvalidPayload(format!(
+            "Veda {:?} plan {} needs {} bytes (dense native floor plus complete sparse/fallback workspace {}), but {} bytes are available",
+            bound.backend,bound.plan,need,bound.total_bytes,available)));
+    }
+    Ok(())
+}
+
+/// Dense measured evidence is only the baseline; enabled sparse adds its explicit complete
+/// predictor/workspace/fallback bound. Shared with the Candle pre-load gate and CPU fixtures.
+#[cfg(any(not(target_os = "macos"), test))]
+pub(crate) fn veda_cold_peak_gb(
+    dense_baseline_gb: f64,
+    sparse: Option<&gen_core::veda::workspace::WorkspaceBound>,
+) -> f64 {
+    sparse.map_or(dense_baseline_gb, |bound| {
+        dense_baseline_gb + bound.total_bytes as f64 / (1024. * 1024. * 1024.)
+    })
+}
+
+/// CUDA host residency must fit independently of the device pool. Scorer/selector/gather
+/// categories contain both host and device temporaries; retaining their complete bounds here
+/// is conservative for the host, without charging device-only QKV/output/dense-score buffers.
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+pub(crate) fn veda_host_workspace_bytes(bound: &gen_core::veda::workspace::WorkspaceBound) -> u64 {
+    [
+        bound.predictor_host_bytes,
+        bound.predictor_load_bytes,
+        bound.layout_host_bytes,
+        bound.position_rows_bytes,
+        bound.scorer_bytes,
+        bound.selector_bytes,
+        bound.gather_bytes,
+        bound.predictor_device_bytes,
+        bound.self_test_bytes,
+    ]
+    .iter()
+    .sum()
+}
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+pub(crate) fn admit_veda_host_workspace(
+    bound: &gen_core::veda::workspace::WorkspaceBound,
+    available: Option<u64>,
+) -> crate::WorkerResult<()> {
+    let needed = veda_host_workspace_bytes(bound);
+    let available=available.ok_or_else(||crate::WorkerError::InvalidPayload(
+        "Veda admission could not read available host RAM; refusing predictor/scorer allocation".into()))?;
+    if needed > available {
+        return Err(crate::WorkerError::InvalidPayload(format!(
+        "Veda predictor/scorer host workspace needs {needed} bytes, but host RAM has {available} bytes available")));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

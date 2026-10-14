@@ -1,0 +1,366 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "epic-25140-input.schema.json",
+  "title": "Epic25140 source-frozen ordinary-product evidence intake",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "scope",
+    "campaignId",
+    "projectId",
+    "sourceFreeze",
+    "artifactInventory",
+    "artifacts",
+    "turboArtifacts",
+    "styles",
+    "assets",
+    "prompts",
+    "bindings",
+    "runners",
+    "proofRoutes",
+    "productProofCases",
+    "limits"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "scope": {
+      "const": "named-required"
+    },
+    "campaignId": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "projectId": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "const": "UNBOUND"
+      }
+    },
+    "sourceFreeze": {
+      "type": "object",
+      "required": [
+        "stage",
+        "inferencePin",
+        "sceneworks",
+        "inference",
+        "files",
+        "artifactInventorySha256",
+        "resourceContract"
+      ],
+      "properties": {
+        "stage": {
+          "const": "permanent-inference-main-pin"
+        },
+        "inferencePin": {
+          "$ref": "#/$defs/head"
+        },
+        "sceneworks": {
+          "$ref": "#/$defs/repo"
+        },
+        "inference": {
+          "$ref": "#/$defs/repo"
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/sha"
+          }
+        },
+        "artifactInventorySha256": {
+          "$ref": "#/$defs/sha"
+        },
+        "resourceContract": {
+          "type": "object",
+          "required": [
+            "mlx",
+            "candle_cuda"
+          ]
+        }
+      }
+    },
+    "artifactInventory": {
+      "$ref": "#/$defs/file"
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/file"
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "repo",
+              "revision",
+              "file",
+              "coverage"
+            ],
+            "properties": {
+              "revision": {
+                "$ref": "#/$defs/head"
+              },
+              "coverage": {
+                "type": "array",
+                "minItems": 1
+              }
+            }
+          }
+        ]
+      }
+    },
+    "turboArtifacts": {
+      "type": "object",
+      "required": [
+        "minimax_h3_turbo_4step_768p",
+        "minimax_h3_turbo_8step",
+        "minimax_h3_turbo_4step_v01",
+        "minimax_h3_ref2v_turbo_4step"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/file"
+      }
+    },
+    "styles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/file"
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "source",
+              "licenseEvidence",
+              "compatibilityEvidence",
+              "models",
+              "weight",
+              "trigger"
+            ],
+            "properties": {
+              "weight": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "compatibilityEvidence": {
+                "$ref": "#/$defs/file"
+              },
+              "models": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "enum": [
+                    "minimax_h3",
+                    "minimax_h3_ref"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/file"
+          },
+          {
+            "type": "object",
+            "required": [
+              "assetId",
+              "normalized"
+            ],
+            "properties": {
+              "assetId": {
+                "type": "string",
+                "not": {
+                  "const": "UNBOUND"
+                }
+              },
+              "normalized": {
+                "$ref": "#/$defs/file"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "prompts": {
+      "type": "object",
+      "required": [
+        "t2va",
+        "fl2va_first",
+        "fl2va_last",
+        "fl2va_both",
+        "r2va_mixed"
+      ],
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "required": [
+        "t2va",
+        "fl2va_first",
+        "fl2va_last",
+        "fl2va_both",
+        "r2va_mixed"
+      ],
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "seed"
+        ],
+        "properties": {
+          "seed": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        }
+      }
+    },
+    "runners": {
+      "type": "object",
+      "required": [
+        "mlx",
+        "candle_cuda"
+      ],
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "apiUrl",
+          "requestedGpu",
+          "workerId",
+          "reportedBackend",
+          "kernel",
+          "physicalGpuId",
+          "leasePath",
+          "admissionPath",
+          "apiBinary",
+          "workerBinary",
+          "attestation",
+          "physicalGuardAdapter"
+        ],
+        "properties": {
+          "physicalGuardAdapter": {
+            "$ref": "#/$defs/file"
+          }
+        }
+      }
+    },
+    "proofRoutes": {
+      "type": "object",
+      "required": [
+        "off_identity",
+        "exact_frozen_masks",
+        "kernel_reference_not_dense",
+        "missing_predictor",
+        "corrupt_predictor",
+        "unsupported_kernel",
+        "failed_self_test",
+        "independent_budgets",
+        "full_layer_step_controls",
+        "global_reference_denominator",
+        "persistence_replay",
+        "managed_digest",
+        "bounded_admission_peaks",
+        "published_input_boundaries",
+        "final_ci_refs_pin_tracker"
+      ],
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "route",
+          "requirement"
+        ],
+        "properties": {
+          "route": {
+            "enum": [
+              "product_job",
+              "native_source_contract",
+              "integration_receipt"
+            ]
+          }
+        }
+      }
+    },
+    "productProofCases": {
+      "type": "array"
+    },
+    "limits": {
+      "type": "object",
+      "required": [
+        "maxJobs",
+        "jobTimeoutMs",
+        "maxMediaBytes"
+      ],
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 1
+      }
+    }
+  },
+  "$defs": {
+    "file": {
+      "type": "object",
+      "required": [
+        "path",
+        "bytes",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "head": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "repo": {
+      "type": "object",
+      "required": [
+        "root",
+        "head"
+      ],
+      "properties": {
+        "root": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "head": {
+          "$ref": "#/$defs/head"
+        }
+      }
+    }
+  }
+}

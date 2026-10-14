@@ -5480,3 +5480,98 @@ fn the_packaged_cuda_encode_profile_prices_each_engines_encode_on_every_rung() {
         assert!(refused.contains("encodes conditioning"), "{refused}");
     }
 }
+
+#[test]
+fn veda_queued_admission_uses_complete_bound_and_current_budget() {
+    let contract = fixture_contract(4, 1, &[MemoryStrategy::StagedResidency]);
+    let req = gen_core::GenerationRequest {
+        width: 576,
+        height: 320,
+        frames: Some(124),
+        veda: Some(gen_core::VedaRequest {
+            enabled: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    for backend in [
+        gen_core::veda::workspace::Backend::Mlx,
+        gen_core::veda::workspace::Backend::Cuda,
+    ] {
+        let bound = gen_core::veda::workspace::for_request(&req, backend)
+            .unwrap()
+            .unwrap();
+        let floor = crate::mlx_fit_gate::estimate_floor_weights_bytes(
+            &contract,
+            &[MemoryStrategy::StagedResidency],
+        );
+        let make = |available| VideoRuntimeMemoryState {
+            budget: MemoryBudget {
+                total_bytes: available + GIB,
+                committed_bytes: GIB,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            cache_state: MemoryCacheState::Warm,
+            load_policy: OffloadPolicy::Resident,
+            provider_resident_bytes: GIB,
+        };
+        let need = floor - GIB + bound.total_bytes + GIB;
+        assert!(admit_veda_workspace(Some(&contract), &bound, Some(make(need)), GIB).is_ok());
+        assert!(admit_veda_workspace(Some(&contract), &bound, Some(make(need - 1)), GIB).is_err());
+        // The next queued request must be regraded against its own snapshot, not cached admission.
+        assert!(admit_veda_workspace(Some(&contract), &bound, Some(make(0)), GIB).is_err());
+        assert!(admit_veda_workspace(Some(&contract), &bound, None, GIB).is_err());
+        assert!(admit_veda_workspace(None, &bound, Some(make(need)), GIB).is_err());
+    }
+}
+
+#[test]
+fn veda_cold_admission_adds_full_bound_and_preserves_off_baseline() {
+    let dense = 43.25f64;
+    assert_eq!(veda_cold_peak_gb(dense, None).to_bits(), dense.to_bits());
+    let req = gen_core::GenerationRequest {
+        width: 576,
+        height: 320,
+        frames: Some(124),
+        veda: Some(gen_core::VedaRequest {
+            enabled: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bound =
+        gen_core::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Cuda)
+            .unwrap()
+            .unwrap();
+    let sparse = veda_cold_peak_gb(dense, Some(&bound));
+    assert_eq!(sparse, dense + bound.total_bytes as f64 / GIB as f64);
+    assert!(
+        dense < sparse,
+        "a free budget at the dense baseline must refuse sparse"
+    );
+    assert!(bound.dense_fallback_bytes > 0);
+}
+
+#[test]
+fn veda_cuda_host_pool_is_checked_independently_and_fail_closed() {
+    let req = gen_core::GenerationRequest {
+        width: 576,
+        height: 320,
+        frames: Some(124),
+        veda: Some(gen_core::VedaRequest {
+            enabled: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let b = gen_core::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Cuda)
+        .unwrap()
+        .unwrap();
+    let host = veda_host_workspace_bytes(&b);
+    assert!(host >= b.predictor_host_bytes + b.predictor_load_bytes);
+    assert!(host <= b.total_bytes);
+    assert!(admit_veda_host_workspace(&b, Some(host)).is_ok());
+    assert!(admit_veda_host_workspace(&b, Some(host - 1)).is_err());
+    assert!(admit_veda_host_workspace(&b, None).is_err());
+}
