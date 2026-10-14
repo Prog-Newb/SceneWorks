@@ -3322,12 +3322,64 @@ const fn rung_of(strategy: MemoryStrategy) -> StrategyRung {
     }
 }
 
+/// Admit one video request, sparse or dense (sc-25777). A Veda sparse request runs the SAME dense
+/// ladder selection a dense request does — so it receives the memory strategy and run context
+/// dense admission would choose — graded with the complete sparse workspace bound charged on top
+/// of the activation headroom, so the selected rung must fit dense peak plus sparse bytes. The
+/// native floor at the selected composition plus that bound is then checked against the same
+/// snapshot, which still refuses when no packaged evidence routes the request.
+pub(crate) fn admit_video_generation_with_veda(
+    generator: &dyn gen_core::Generator,
+    request: VideoAdmissionInputs<'_>,
+    sparse: Option<&gen_core::veda::workspace::WorkspaceBound>,
+    floor_headroom_bytes: u64,
+) -> crate::WorkerResult<VideoAdmissionOutcome> {
+    admit_with_veda_bound(
+        generator,
+        request,
+        sparse,
+        floor_headroom_bytes,
+        admit_video_generation,
+    )
+}
+
+fn admit_with_veda_bound(
+    generator: &dyn gen_core::Generator,
+    mut request: VideoAdmissionInputs<'_>,
+    sparse: Option<&gen_core::veda::workspace::WorkspaceBound>,
+    floor_headroom_bytes: u64,
+    dense: impl FnOnce(&dyn gen_core::Generator, VideoAdmissionInputs<'_>) -> VideoAdmissionOutcome,
+) -> crate::WorkerResult<VideoAdmissionOutcome> {
+    let Some(bound) = sparse else {
+        return Ok(dense(generator, request));
+    };
+    let runtime = request.runtime;
+    request.headroom_bytes = request
+        .headroom_bytes
+        .checked_add(bound.total_bytes)
+        .ok_or_else(|| crate::WorkerError::InvalidPayload("Veda admission size overflow".into()))?;
+    let outcome = dense(generator, request);
+    if outcome.refusal.is_some() {
+        return Ok(outcome);
+    }
+    admit_veda_workspace(
+        generator.memory_strategy_contract(),
+        bound,
+        outcome.context.as_ref().map(|context| &context.selection),
+        runtime,
+        floor_headroom_bytes,
+    )?;
+    Ok(outcome)
+}
+
 /// Sparse admission never treats a dense-only curve as a measured sparse outcome. Retain the
-/// conservative native dense floor and add the complete request/predictor/fallback bound. The
-/// same-moment budget is consulted after computing the problem bound, never to enlarge it.
+/// conservative native dense floor at the selected composition and add the complete
+/// request/predictor/fallback bound. The same-moment budget is consulted after computing the
+/// problem bound, never to enlarge it.
 pub(crate) fn admit_veda_workspace(
     contract: Option<&MemoryProviderContract>,
     bound: &gen_core::veda::workspace::WorkspaceBound,
+    selection: Option<&gen_core::MemorySelection>,
     runtime: Option<VideoRuntimeMemoryState>,
     headroom_bytes: u64,
 ) -> crate::WorkerResult<()> {
@@ -3342,11 +3394,15 @@ pub(crate) fn admit_veda_workspace(
         )
     })?;
     // H3 releases conditioning, DiT and VAE phases on both native backends even at
-    // default settings. Preserve that structural staging in the dense baseline.
-    let base = crate::mlx_fit_gate::estimate_floor_weights_bytes(
-        contract,
-        &[MemoryStrategy::StagedResidency],
-    );
+    // default settings. Preserve that structural staging in the dense baseline, composed with
+    // whatever rung dense admission selected.
+    let mut engaged = selection
+        .map(|selection| contract.engaged_composition_for_selection(selection))
+        .unwrap_or_default();
+    if !engaged.contains(&MemoryStrategy::StagedResidency) {
+        engaged.push(MemoryStrategy::StagedResidency);
+    }
+    let base = crate::mlx_fit_gate::estimate_floor_weights_bytes(contract, &engaged);
     let credit = runtime
         .provider_resident_bytes
         .min(runtime.budget.committed_bytes)

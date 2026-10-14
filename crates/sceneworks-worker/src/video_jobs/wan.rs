@@ -2988,23 +2988,22 @@ pub(super) async fn generate_video_using(
                 };
                 admission_inputs.runtime = admission_runtime;
                 admission_inputs.headroom_bytes = admission_headroom_bytes;
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 if let Some(bound) = &sparse_bound {
-                    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                     crate::video_admission::admit_veda_host_workspace(
                         bound,
                         host_probe_runtime.block_on(crate::yue2_admission::host_available_bytes()),
                     )?;
-                    crate::video_admission::admit_veda_workspace(
-                        generator.memory_strategy_contract(),
-                        bound,
-                        admission_runtime,
-                        spec_headroom_bytes,
-                    )?;
-                } else {
-                    let outcome =
-                        crate::video_admission::admit_video_generation(generator, admission_inputs);
-                    apply_video_admission_outcome(&mut input, outcome)?;
                 }
+                // Sparse requests take the dense ladder's strategy, graded with the sparse
+                // workspace bound on top (sc-25777).
+                let outcome = crate::video_admission::admit_video_generation_with_veda(
+                    generator,
+                    admission_inputs,
+                    sparse_bound.as_ref(),
+                    spec_headroom_bytes,
+                )?;
+                apply_video_admission_outcome(&mut input, outcome)?;
                 let mut on_progress = |progress: Progress| {
                     // A closed channel means the consumer loop returned early (POST failure /
                     // 409); trip the engine flag so the denoise bails instead of running unheard

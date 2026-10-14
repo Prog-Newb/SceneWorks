@@ -5517,13 +5517,102 @@ fn veda_queued_admission_uses_complete_bound_and_current_budget() {
             provider_resident_bytes: GIB,
         };
         let need = floor - GIB + bound.total_bytes + GIB;
-        assert!(admit_veda_workspace(Some(&contract), &bound, Some(make(need)), GIB).is_ok());
-        assert!(admit_veda_workspace(Some(&contract), &bound, Some(make(need - 1)), GIB).is_err());
+        assert!(admit_veda_workspace(Some(&contract), &bound, None, Some(make(need)), GIB).is_ok());
+        assert!(
+            admit_veda_workspace(Some(&contract), &bound, None, Some(make(need - 1)), GIB).is_err()
+        );
         // The next queued request must be regraded against its own snapshot, not cached admission.
-        assert!(admit_veda_workspace(Some(&contract), &bound, Some(make(0)), GIB).is_err());
-        assert!(admit_veda_workspace(Some(&contract), &bound, None, GIB).is_err());
-        assert!(admit_veda_workspace(None, &bound, Some(make(need)), GIB).is_err());
+        assert!(admit_veda_workspace(Some(&contract), &bound, None, Some(make(0)), GIB).is_err());
+        assert!(admit_veda_workspace(Some(&contract), &bound, None, None, GIB).is_err());
+        assert!(admit_veda_workspace(None, &bound, None, Some(make(need)), GIB).is_err());
     }
+}
+
+/// sc-25777: a sparse request is admitted through the dense ladder with its workspace bound on
+/// top, so it carries the selected strategy and run context. 20 GiB weights + 18 GiB headroom
+/// fits resident on this host; the extra 4 GiB sparse workspace forces the staged rung.
+#[test]
+fn veda_sparse_admission_selects_the_dense_strategy_with_the_bound_on_top() {
+    let generator = fixture_generator(Some(fixture_contract(
+        20,
+        4,
+        &[MemoryStrategy::StagedResidency],
+    )));
+    let req = gen_core::GenerationRequest {
+        width: 576,
+        height: 320,
+        frames: Some(124),
+        veda: Some(gen_core::VedaRequest {
+            enabled: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut bound =
+        gen_core::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Mlx)
+            .unwrap()
+            .unwrap();
+    bound.total_bytes = 4 * GIB;
+    let sparse_activation_gib = FIXTURE_HEADROOM_GIB + 4;
+    let host_gb = mlx_widened_floor_gb(34 + 4, sparse_activation_gib, 0.5);
+    assert!(
+        host_gb >= mlx_widened_gb(38, 0.0),
+        "dense alone must fit resident"
+    );
+    assert!(
+        host_gb < mlx_widened_floor_gb(38 + 4, sparse_activation_gib, 0.0),
+        "resident plus the sparse bound must not fit"
+    );
+    let dense = |generator: &dyn gen_core::Generator, request: VideoAdmissionInputs<'_>| {
+        admit_video_generation_with_curves(generator, request, None)
+    };
+
+    let dense_only = admit_with_veda_bound(
+        &generator,
+        inputs(241, budget(host_gb), 18 * GIB),
+        None,
+        18 * GIB,
+        dense,
+    )
+    .unwrap();
+    assert_eq!(
+        dense_only.context.unwrap().selection.strategy,
+        MemoryStrategy::Resident
+    );
+
+    let sparse = admit_with_veda_bound(
+        &generator,
+        inputs(241, budget(host_gb), 18 * GIB),
+        Some(&bound),
+        18 * GIB,
+        dense,
+    )
+    .unwrap();
+    assert!(sparse.refusal.is_none(), "{sparse:?}");
+    let memory = sparse
+        .memory
+        .expect("sparse runs receive the dense strategy");
+    assert!(memory.stage_residency, "{memory:?}");
+    assert_eq!(
+        sparse
+            .context
+            .expect("sparse runs carry the run context")
+            .selection
+            .strategy,
+        MemoryStrategy::StagedResidency
+    );
+
+    // Without packaged evidence the ladder abstains, and the sparse floor still refuses a host
+    // that cannot hold the staged floor plus the bound.
+    let no_evidence = fixture_generator(None);
+    assert!(admit_with_veda_bound(
+        &no_evidence,
+        inputs(241, budget(host_gb), 18 * GIB),
+        Some(&bound),
+        18 * GIB,
+        dense,
+    )
+    .is_err());
 }
 
 #[test]
