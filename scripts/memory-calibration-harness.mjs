@@ -9,6 +9,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { providerClosureDigest } from "./inference-closure-digest.mjs";
+import { connectWatchdogCompletion } from "./lib/watchdog-completion.mjs";
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -2754,16 +2755,34 @@ async function main() {
     ));
   }
   if (command === "capture") {
-    return void await atomicWrite(outputPath(), await captureAnchor({
-      plan: await readJson(value("--plan") ?? ANCHOR_PLAN_PATH),
-      anchorKey: value("--anchor"),
-      providerCommand: JSON.parse(value("--provider-command")),
-      sceneWorksRepo: path.resolve(value("--sceneworks-repo")),
-      inferenceRepo: path.resolve(value("--inference-repo")),
-      rawLogDir: value("--raw-log-dir") ? path.resolve(value("--raw-log-dir")) : null,
-      sourcePathPrefix: value("--source-path-prefix"),
-      ltx25SnapshotRoot: value("--ltx25-snapshot-root") ?? null,
-    }));
+    // Under the catalog's guard (sc-26246) this root may exit only after the guard has committed a
+    // final sample — on failure too, so a refusal still exits with its own status. Without a guard
+    // socket in the environment the completion client is a no-op.
+    const output = path.resolve(ROOT, outputPath());
+    const completion = await connectWatchdogCompletion();
+    try {
+      let failure = null;
+      try {
+        await atomicWrite(output, await captureAnchor({
+          plan: await readJson(value("--plan") ?? ANCHOR_PLAN_PATH),
+          anchorKey: value("--anchor"),
+          providerCommand: JSON.parse(value("--provider-command")),
+          sceneWorksRepo: path.resolve(value("--sceneworks-repo")),
+          inferenceRepo: path.resolve(value("--inference-repo")),
+          rawLogDir: value("--raw-log-dir") ? path.resolve(value("--raw-log-dir")) : null,
+          sourcePathPrefix: value("--source-path-prefix"),
+          ltx25SnapshotRoot: value("--ltx25-snapshot-root") ?? null,
+        }));
+      } catch (error) {
+        failure = error;
+      }
+      await mkdir(path.dirname(output), { recursive: true });
+      await completion.complete(path.dirname(output));
+      if (failure) throw failure;
+      return;
+    } finally {
+      completion.close();
+    }
   }
   if (command === "record-exceeded") {
     return void await atomicWrite(outputPath(), await recordExceededBound({
