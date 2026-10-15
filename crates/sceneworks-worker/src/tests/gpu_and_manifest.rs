@@ -364,6 +364,8 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         // sc-6105: smart-select segmentation uses native-MLX SAM3 box prompts here; the Candle GPU
         // descriptor advertises the sibling route off-Mac.
         WorkerCapability::ImageSegment,
+        // sc-25682: Iris-3B monocular depth (native-MLX `mlx-gen-iris` depth task).
+        WorkerCapability::ImageDepth,
         WorkerCapability::VideoUpscale,
         WorkerCapability::PersonDetect,
         WorkerCapability::PersonTrack,
@@ -518,6 +520,8 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("mage_flow_edit_base", true, true),
         ("mage_flow_edit", true, true),
         ("mage_flow_edit_turbo", false, false),
+        // Iris-3B (sc-25679): CFG against a negative prompt (default ""), cfg_scale = guidance.
+        ("iris_3b", true, true),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());
@@ -2989,6 +2993,7 @@ fn an_unusable_gpu_withholds_every_candle_capability() {
         WorkerCapability::PersonReplace,
         WorkerCapability::ImageDetail,
         WorkerCapability::ImageSegment,
+        WorkerCapability::ImageDepth,
         WorkerCapability::DatasetAnalysis,
     ] {
         assert!(

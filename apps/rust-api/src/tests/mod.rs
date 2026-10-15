@@ -16,6 +16,7 @@ mod film_harness_fixes;
 mod film_harness_references;
 mod film_harness_review;
 mod films;
+mod image_restoration;
 mod jobs;
 mod mcp;
 mod media;
@@ -30,6 +31,9 @@ mod subject_masks;
 // `pub(crate)` so the inline `#[cfg(test)]` test modules that live OUTSIDE this `tests`
 // tree (e.g. `crate::models::variant_install_tests`) can reuse the ONE crate-wide
 // `isolate_hf_cache` / `HF_ENV_LOCK` guard rather than adding a second lock (sc-13835).
+mod iris_curricula;
+mod iris_task_training;
+mod iris_training;
 pub(crate) mod support;
 mod training;
 mod uploads;

@@ -97,7 +97,7 @@ pub(crate) async fn create_job(
             payload.job_type.as_str()
         )));
     }
-    validate_raw_job_payload(&state, &payload.job_type, &payload.payload).await?;
+    validate_raw_job_payload(&state, &payload.job_type, &mut payload.payload).await?;
     canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
     crate::model_sources::ensure_runtime_model_sources(
         &state,
@@ -406,6 +406,7 @@ pub(crate) async fn retry_job(
     request: AxumRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     let mut payload = retry_job_request_from_body(request).await?;
+    guard_iris_training_rerun(&state, &job_id, false).await?;
     apply_training_retry_resume(
         &state,
         &job_id,
@@ -445,6 +446,27 @@ pub(crate) async fn retry_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
+/// The Iris training rerun guard (S9a, [`crate::iris_training::guard_iris_training_rerun`]): a
+/// retry of a run another job still writes, or that already checkpointed / exported, is refused
+/// typed; a duplicate gets its own output id — the returned payload changes. Every other job is
+/// untouched (`None`).
+async fn guard_iris_training_rerun(
+    state: &AppState,
+    job_id: &str,
+    duplicate: bool,
+) -> Result<Option<JsonObject>, ApiError> {
+    let source = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await;
+    match source {
+        Ok(job) => crate::iris_training::guard_iris_training_rerun(state, &job, duplicate).await,
+        // A missing job is the store's own 404 on the retry/duplicate below.
+        Err(_) => Ok(None),
+    }
+}
+
 /// sc-25785: fold a retry's `resume` choice (when given) into the training plan the retry will run, so a caller
 /// resumes (or restarts) a training job in one call without resending the plan. The plan is the
 /// caller's `payloadChanges.plan` when supplied, else the persisted one, with `advanced.resume`
@@ -478,6 +500,23 @@ async fn apply_training_retry_resume(
         .and_then(Value::as_object)
         .cloned()
         .ok_or_else(|| ApiError::bad_request("Training job has no plan to retry."))?;
+    // An Iris run (epic 25678) checkpoints into its own `<stem>.checkpoints` tree, never the generic
+    // resume bundles this fold scans for, and resumes only through the Training Studio's Resume / New
+    // phase (`advanced.resumeFromJobId`); the Iris rerun guard has already vetted this retry.
+    if plan
+        .get("target")
+        .and_then(|target| target.get("kernel"))
+        .and_then(Value::as_str)
+        .is_some_and(sceneworks_core::training::iris::is_iris_training_kernel)
+    {
+        return match resume {
+            Some(true) => Err(ApiError::bad_request(
+                "An Iris training run resumes from the Training Studio (Resume or New phase), not \
+                 from a retry.",
+            )),
+            _ => Ok(()),
+        };
+    }
     if resume == Some(true)
         && !matches!(
             job.status,
@@ -594,6 +633,7 @@ pub(crate) async fn duplicate_job(
     Path(job_id): Path<String>,
     ApiJson(mut payload): ApiJson<DuplicateJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let fresh_output = guard_iris_training_rerun(&state, &job_id, true).await?;
     if let Some(job) = crate::generation::replay_vector_prompt_workflow(
         state.clone(),
         &job_id,
@@ -612,6 +652,10 @@ pub(crate) async fn duplicate_job(
         false,
     )
     .await?;
+    // An Iris training duplicate trains under its own output id (merged last: never overridable).
+    if let Some(fresh_output) = fresh_output {
+        payload.payload_changes.extend(fresh_output);
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
         store.duplicate_job(
             &job_id,
@@ -821,10 +865,17 @@ async fn validate_and_canonicalize_merged_generation_payload(
             .await?;
         }
     } else {
-        validate_raw_job_payload(state, &job_type, &merged).await?;
+        validate_raw_job_payload(state, &job_type, &mut merged).await?;
     }
     let canonical_model_entry =
         canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
+    // The store SHALLOW-merges this object over the persisted payload, so a recorded checkpoint
+    // alias the canonicalizer dropped (the replay picked another model) must be cleared explicitly
+    // or the persisted value would survive the merge.
+    let checkpoint_key = crate::iris_training::CHECKPOINT_MODEL_ID_KEY;
+    if persisted.contains_key(checkpoint_key) && !merged.contains_key(checkpoint_key) {
+        merged.insert(checkpoint_key.to_owned(), Value::Null);
+    }
     if matches!(
         job_type,
         JobType::VideoGenerate
@@ -845,6 +896,9 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // arrays must not be cleaned by VideoRequest's tolerant parser, and a legacy multi-ref row
         // must not bypass today's descriptor gate simply because its stored entry is rebuilt here.
         validate_video_reference_asset_ids_payload(&merged, &model_manifest_entry)?;
+        sceneworks_core::video_request::VideoRequest::from_payload(&merged)
+            .h3_veda_settings()
+            .map_err(ApiError::bad_request)?;
         crate::generation::ensure_video_model_available_on_platform(
             model_id,
             &model_manifest_entry,
@@ -1022,9 +1076,54 @@ pub(crate) async fn canonicalize_image_model_payload(
     };
     validate_model_id(&model_id)?;
 
-    let model_manifest_entry = project_image_manifest_for_worker(
-        crate::models::resolve_model_manifest_entry(state, &model_id).await?,
-    );
+    // A retried/duplicated request for a trained checkpoint was aliased onto its engine model at
+    // create time; re-resolve from the checkpoint the user picked so the alias is re-derived from
+    // the catalog (never trusted from the stored payload). The recorded checkpoint is honoured ONLY
+    // while `model` is still that checkpoint's engine: a duplicate that picked another model, or a
+    // client-authored key naming something that is not a trained checkpoint of `model`, drops the
+    // key and resolves `model` itself.
+    let requested_checkpoint = payload
+        .get(crate::iris_training::CHECKPOINT_MODEL_ID_KEY)
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut honoured_checkpoint = None;
+    if let Some(checkpoint) = requested_checkpoint {
+        validate_model_id(&checkpoint)?;
+        let entry = project_image_manifest_for_worker(
+            crate::models::resolve_model_manifest_entry(state, &checkpoint).await?,
+        );
+        let engine = entry
+            .as_object()
+            .and_then(crate::iris_training::trained_checkpoint_engine_model);
+        if engine == Some(model_id.as_str()) {
+            honoured_checkpoint = Some((checkpoint, entry));
+        } else {
+            payload.remove(crate::iris_training::CHECKPOINT_MODEL_ID_KEY);
+        }
+    }
+    let (model_id, mut model_manifest_entry) = match honoured_checkpoint {
+        Some(resolved) => resolved,
+        None => {
+            let entry = project_image_manifest_for_worker(
+                crate::models::resolve_model_manifest_entry(state, &model_id).await?,
+            );
+            (model_id, entry)
+        }
+    };
+    // A trained Iris full-model export renders through the `iris_3b` generation engine on its own
+    // backbone directory (sc-25685/sc-25686).
+    if let Some(engine_entry) = crate::iris_training::alias_trained_checkpoint(
+        state,
+        &model_id,
+        &model_manifest_entry,
+        payload,
+    )
+    .await?
+    {
+        model_manifest_entry = engine_entry;
+    } else {
+        payload.remove(crate::iris_training::CHECKPOINT_MODEL_ID_KEY);
+    }
     if matches!(job_type, JobType::ImageDetail)
         && !model_manifest_entry
             .as_object()
@@ -1059,7 +1158,7 @@ pub(crate) async fn canonicalize_image_model_payload(
 ///
 /// Keep every other soft component: selected decoders and other request-specific features resolve
 /// their own authored component ids from this worker-private entry.
-fn project_image_manifest_for_worker(mut entry: Value) -> Value {
+pub(crate) fn project_image_manifest_for_worker(mut entry: Value) -> Value {
     if let Some(downloads) = entry.get_mut("downloads").and_then(Value::as_array_mut) {
         downloads.retain(|download| {
             !(download.get("coRequisite").and_then(Value::as_bool) == Some(true)
@@ -1165,19 +1264,80 @@ fn dense_image_detail_error() -> ApiError {
 async fn validate_raw_job_payload(
     state: &AppState,
     job_type: &JobType,
-    payload: &JsonObject,
+    payload: &mut JsonObject,
 ) -> Result<(), ApiError> {
+    if matches!(
+        job_type,
+        JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace
+    ) {
+        sceneworks_core::video_request::VideoRequest::from_payload(payload)
+            .h3_veda_settings()
+            .map_err(ApiError::bad_request)?;
+    }
     if matches!(
         job_type,
         JobType::ImageUpscale | JobType::ImageDetail | JobType::PromptRefine
     ) {
         validate_payload_model(payload)?;
     }
+    if matches!(job_type, JobType::ImageUpscale) {
+        validate_image_upscale_engine_controls(payload)?;
+    }
     if matches!(
         job_type,
         JobType::ModelDownload | JobType::ModelImport | JobType::ModelConvert
     ) {
         validate_payload_model_id(payload)?;
+    }
+    if matches!(job_type, JobType::ModelDownload) {
+        if let Some(identity) = sceneworks_core::managed_file::authoritative_job_identity(payload)
+            .map_err(ApiError::bad_request)?
+        {
+            identity.stamp(payload);
+        }
+    }
+    if matches!(job_type, JobType::ImageDepth) {
+        crate::depth_jobs::validate_raw_image_depth_payload(payload)?;
+    }
+    // A trained Iris depth / restoration model named by `irisModel` (sc-25687 / sc-25688) must be a
+    // registered model of that task.
+    let trained = match job_type {
+        JobType::ImageDepth => {
+            sceneworks_core::depth_map::ImageDepthJobPayload::from_job_payload(payload)
+                .ok()
+                .and_then(|request| request.trained_model().map(str::to_owned))
+                .map(|model| (model, sceneworks_core::training::iris::IrisObjective::Depth))
+        }
+        JobType::ImageUpscale => {
+            sceneworks_core::image_restoration::parse_iris_restore_model(payload)
+                .map_err(ApiError::bad_request)?
+                .map(|model| {
+                    (
+                        model,
+                        sceneworks_core::training::iris::IrisObjective::Restoration,
+                    )
+                })
+        }
+        JobType::ImageGenerate | JobType::ImageEdit => payload
+            .get("upscale")
+            .and_then(Value::as_object)
+            .map(sceneworks_core::image_restoration::parse_iris_restore_model)
+            .transpose()
+            .map_err(ApiError::bad_request)?
+            .flatten()
+            .map(|model| {
+                (
+                    model,
+                    sceneworks_core::training::iris::IrisObjective::Restoration,
+                )
+            }),
+        _ => None,
+    };
+    if let Some((model, objective)) = trained {
+        crate::iris_training::validate_trained_task_model(state, &model, objective).await?;
     }
     // Licence-acknowledgment gate for the FETCHING job types (sc-17227), keyed on the payload's
     // `repo`/`sourceUrl` rather than on a model id.
@@ -1244,6 +1404,34 @@ async fn validate_raw_job_payload(
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
     }
     Ok(())
+}
+
+/// The engine-specific controls of a raw `image_upscale` job (sc-25683). The Iris restoration engine
+/// is sized by `scale` (with `inputSizing` / `colorFix`) and refuses the other engines' `factor` /
+/// `softness` / `seed`; every other engine refuses the Iris-only keys. Refusing at submission keeps a
+/// control from being silently ignored by the worker (which applies the same rules).
+fn validate_image_upscale_engine_controls(payload: &JsonObject) -> Result<(), ApiError> {
+    use sceneworks_core::image_restoration::{
+        is_iris_engine, parse_iris_restore_params, reject_iris_only_keys,
+    };
+    let engine = payload
+        .get("engine")
+        .and_then(Value::as_str)
+        .unwrap_or("real-esrgan");
+    if is_iris_engine(engine) {
+        if let Some(key) = ["factor", "softness", "seed"]
+            .into_iter()
+            .find(|key| payload.get(*key).is_some_and(|value| !value.is_null()))
+        {
+            return Err(ApiError::bad_request(format!(
+                "{key} is not a control of the Iris restoration engine; it is sized by scale"
+            )));
+        }
+        parse_iris_restore_params(payload).map_err(ApiError::bad_request)?;
+        Ok(())
+    } else {
+        reject_iris_only_keys(payload, engine).map_err(ApiError::bad_request)
+    }
 }
 
 /// Generation kinds whose `model` selects weights and therefore reaches worker path resolution.
@@ -1578,7 +1766,25 @@ async fn apply_progress_side_effects(
     // On a completing real training run, register the produced adapter as a
     // SceneWorks LoRA after authoritative completion acceptance, then fold the
     // registration outcome into the persisted result (story 1418).
-    if matches!(job.status, JobStatus::Completed) {
+    // A trainer that finishes a cancel durably (Iris after its first optimizer step) has published
+    // a checkpoint AND an export; the worker marks that result `trainedArtifactExported`, and the
+    // export registers exactly as a completed run's would (the registrars still verify the files).
+    // Only the Iris trainer finishes a cancel durably; any other trainer's canceled run registers
+    // nothing even if a result claims an export (E8: existing trainers keep their behaviour).
+    let canceled_with_export = matches!(job.status, JobStatus::Canceled)
+        && matches!(job.job_type, JobType::LoraTrain)
+        && job
+            .payload
+            .get("plan")
+            .and_then(|plan| plan.get("target"))
+            .and_then(|target| target.get("kernel"))
+            .and_then(Value::as_str)
+            .is_some_and(sceneworks_core::training::iris::is_iris_training_kernel)
+        && accepted_result
+            .get("trainedArtifactExported")
+            .and_then(Value::as_bool)
+            == Some(true);
+    if matches!(job.status, JobStatus::Completed) || canceled_with_export {
         if let Some(status) = register_completed_training_lora(state, &job_id).await {
             result.extend(status);
         }
@@ -2177,6 +2383,62 @@ pub(crate) async fn register_trained_base_checkpoint(
         .to_owned();
     validate_lora_id_component(&model_id)?;
     let (output_dir, manifest_path) = resolve_finetune_output_location(state, &model_id);
+
+    // Iris-3B (sc-25685/sc-25686): the full-model export is `<output_dir>/<stem>/{config.yaml,
+    // model.safetensors}` — upstream's export layout, which the generation engine loads as its
+    // backbone resource unchanged — not Mage's diffusers transformer tree.
+    if manifest_entry.get("family").and_then(Value::as_str)
+        == Some(sceneworks_core::training::iris::IRIS_FAMILY)
+    {
+        let entry = crate::iris_training::iris_full_checkpoint_entry(
+            job,
+            manifest_entry,
+            &output_dir,
+            &model_id,
+        )?;
+        let export = entry
+            .get("paths")
+            .and_then(|paths| paths.get("model"))
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .ok_or_else(|| ApiError::internal("Iris export path missing"))?;
+        tokio::fs::write(
+            export.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec_pretty(&json!({
+                "modelId": model_id,
+                "provider": "training",
+                "jobId": job.id,
+                "completedAt": now_rfc3339(),
+            }))
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+        )
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!(
+                "Could not mark the Iris export at {} as installed: {error}",
+                export.display()
+            ))
+        })?;
+        let upsert_id = model_id.clone();
+        mutate_manifest_entries(state, &manifest_path, "models", move |entries| {
+            let created_at = entries
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(upsert_id.as_str()))
+                .and_then(|item| item.get("createdAt").cloned());
+            let mut entries = entries
+                .into_iter()
+                .filter(|item| item.get("id").and_then(Value::as_str) != Some(upsert_id.as_str()))
+                .collect::<Vec<_>>();
+            let mut entry = entry;
+            if let Some(created_at) = created_at {
+                entry.insert("createdAt".to_owned(), created_at);
+            }
+            entries.push(Value::Object(entry));
+            Ok((entries, ()))
+        })
+        .await?;
+        return Ok(Some((model_id, manifest_path)));
+    }
 
     let Some(files) = trusted_base_checkpoint_files(&output_dir) else {
         return Err(ApiError::internal(format!(

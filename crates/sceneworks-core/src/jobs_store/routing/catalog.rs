@@ -582,6 +582,29 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         },
     );
     features.insert(
+        // Iris-3B restoration (`engine=iris`, sc-25683, epic 25678): the `iris_3b_restore` transform
+        // is registered by BOTH native bundles (`mlx-gen-iris` on Mac, `candle-gen-iris` on
+        // Windows/Linux NVIDIA), so — exactly like SeedVR2 — the flag is platform-intrinsic: a
+        // backend exists on Mac/Windows/Linux regardless of the gating rollout flag. Whether the
+        // restoration task is INSTALLED is a separate, per-host fact the web reads from the model
+        // catalog (`iris_3b_restore.installState`); this flag only says a lane exists. Must agree with
+        // the routing oracle (mlx OR candle claims `engine=iris`; every other descriptor refuses it).
+        "imageUpscaleIris".to_owned(),
+        MacFeatureSupport {
+            supported: seedvr2_supported,
+            reason: if seedvr2_supported {
+                None
+            } else {
+                Some(UnsupportedReason::new(
+                    None,
+                    "image_upscale (Iris restoration)",
+                    "Iris restoration runs on Mac (native MLX) and Windows/Linux (the Candle CUDA/NVIDIA backend); this platform has no Iris backend.",
+                    Some("sc-25683"),
+                ))
+            },
+        },
+    );
+    features.insert(
         // DWPose pose detection is ported to the Rust worker (sc-3487): RTMW whole-body
         // via `ort`/CoreML on the macOS MLX worker, so the Pose Library "create from
         // photo" flow runs Python-free. This must agree with the PoseDetect arm of
@@ -621,6 +644,26 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
                     "image_segment (SAM3 smart-select)",
                     "smart-select segmentation requires the native MLX backend on macOS or the Candle backend on Windows/Linux.",
                     Some("sc-18480"),
+                ))
+            },
+        },
+    );
+    features.insert(
+        // Iris-3B monocular depth (sc-25682): the `iris_3b_depth` task export runs in-process on
+        // the native MLX worker on Mac and the Candle worker on Windows/Linux (same native-backend
+        // footprint as smart-select). Platform-intrinsic: whether the task export is INSTALLED is
+        // the model catalog's `installState`, not this flag.
+        "imageDepth".to_owned(),
+        MacFeatureSupport {
+            supported: image_segment_supported,
+            reason: if image_segment_supported {
+                None
+            } else {
+                Some(UnsupportedReason::new(
+                    None,
+                    "image_depth (Iris-3B depth)",
+                    "Iris-3B depth requires the native MLX backend on macOS or the Candle backend on Windows/Linux.",
+                    Some("sc-25682"),
                 ))
             },
         },
@@ -1109,6 +1152,14 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("anima_base", true, true, false, true, false),
     ModelCaps::new("anima_aesthetic", true, true, false, true, false),
     ModelCaps::new("anima_turbo", true, true, false, true, false),
+    // Iris-3B generation (sc-25679 MLX / sc-25680 Candle, epic 25678): the native Candle/CUDA port
+    // (`candle-gen-iris`) registers the SAME engine id `iris_3b`, so the one plain text-to-image
+    // contract that routes to MLX on a Mac routes off-Mac too, through the generic candle txt2img
+    // lane. No quant tier; generation-task LoRA / LoKr adapters apply on both lanes (sc-25681 —
+    // `candle-gen-iris` advertises `supports_lora` / `supports_lokr` like the MLX twin), and
+    // `CandleImageRefusal::IrisSurface` holds the candle gate to exactly the MLX arm's shape
+    // (`iris_mlx_eligible`).
+    ModelCaps::new("iris_3b", true, true, false, true, false),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -2151,6 +2202,8 @@ pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "anima_lora",
     // Mage-Flow adapters and full base fine-tunes have native MLX and Candle trainers.
     "mage_flow_lora",
+    // Iris-3B generation (epic 25678, sc-25685): the native `mlx-gen-iris` LoRA/LoKr/full trainer.
+    "iris_train",
     // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S11, sc-24159): the native `mlx-gen-qwen-image-2-1`
     // trainer. The Candle twin (sc-24160) is in the candle set too.
     "qwen_image_2_1_lora",
@@ -2181,6 +2234,8 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "wan_moe_lora",
     "anima_lora",
     "mage_flow_lora",
+    // Iris-3B generation (epic 25678, sc-25686): the native `candle-gen-iris` trainer.
+    "iris_train",
     // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S12, sc-24160): the `candle-gen-qwen-image-2-1`
     // trainer, registered under the same engine id (`qwen_image_2_1`) as the MLX one. Base-gated to
     // `qwen_image_2_1` by [`training_job_is_candle_eligible`].
@@ -2211,6 +2266,7 @@ pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     "anima_lora",
     "krea_control",
     "mage_flow_lora",
+    "iris_train",
     // Qwen Image 2.1 (sc-24159/sc-24160): native MLX + Candle trainers and no generic one, so a
     // generic worker refuses it while the candle exception admits it (it is candle-routed).
     "qwen_image_2_1_lora",
@@ -2355,6 +2411,7 @@ mod tests {
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
+        "iris_3b",
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
@@ -2416,6 +2473,7 @@ mod tests {
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
+        "iris_3b",
     ];
 
     // sc-9983: Krea joins Lens as a BOTH-quant-and-LoRA candle family (sc-9607 flipped its
@@ -2505,6 +2563,8 @@ mod tests {
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
+        // sc-25681: Iris-3B generation-task LoRA / LoKr, no candle quant tier.
+        "iris_3b",
     ];
 
     const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
@@ -2565,6 +2625,8 @@ mod tests {
         // kernel was in `MLX_ONLY_TRAINING_KERNELS` but in NO routed set, so every worker refused it
         // and Mage training jobs queued forever.
         "mage_flow_lora",
+        // sc-25685: the native Iris-3B generation trainer.
+        "iris_train",
         // sc-24159: Qwen Image 2.1 T2I LoRA/LoKr on the native MLX trainer.
         "qwen_image_2_1_lora",
         // sc-24161: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native MLX trainer.
@@ -2584,6 +2646,8 @@ mod tests {
         "wan_moe_lora",
         "anima_lora",
         "mage_flow_lora",
+        // sc-25686: the native Iris-3B generation trainer (Candle/CUDA).
+        "iris_train",
         // sc-24160: Qwen Image 2.1 T2I LoRA/LoKr on the native Candle trainer.
         "qwen_image_2_1_lora",
         // sc-24162: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native Candle trainer.
@@ -2597,6 +2661,7 @@ mod tests {
         "anima_lora",
         "krea_control",
         "mage_flow_lora",
+        "iris_train",
         // sc-24160: native-Rust-only (MLX + Candle trainers, no generic trainer), like Anima/Mage —
         // so it stays here even though it is now candle-routed: a generic worker must still refuse it.
         "qwen_image_2_1_lora",

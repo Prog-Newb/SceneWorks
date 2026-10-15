@@ -400,3 +400,61 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
     expect(addButton().disabled, "nine references + the working image is the cap of ten").toBe(true);
   });
 });
+
+describe("ImageEditorToolPanel upscale tool with Iris restoration (sc-25683)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("swaps the factor buttons for the Iris controls + planner preview and gates Restore on the plan", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ items: [{ assetId: null, plan: { summary: "4×: 640x480 → 2560x1920 (processed at 2560x1920 in 12 tiles)" }, error: null }] }),
+    });
+    const { IrisRestoreControls } = await import("../../components/IrisRestoreControls.jsx");
+    const runUpscale = vi.fn();
+    function Harness() {
+      const [irisRestore, setIrisRestore] = React.useState({ scale: 4, inputSizing: "budgeted", colorFix: true });
+      const [irisPlanStatus, setIrisPlanStatus] = React.useState({ ready: false, blocked: false, error: null });
+      return (
+        <ImageEditorToolPanel
+          panelKey="upscale"
+          scope={{
+            IrisRestoreControls,
+            UPSCALE_ENGINE_DESC: {},
+            aiOp: null,
+            availableUpscaleEngines: [
+              { key: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] },
+              { key: "iris", label: "Iris restore", factors: [4], restoration: true },
+            ],
+            irisPlanStatus,
+            irisRestore,
+            runUpscale,
+            setIrisPlanStatus,
+            setIrisRestore,
+            setTool: vi.fn(),
+            setUpscaleEngine: vi.fn(),
+            setUpscaleFactor: vi.fn(),
+            setUpscaleSoftness: vi.fn(),
+            token: "t",
+            upscaleEngine: "iris",
+            upscaleEngineHasSoftness: () => false,
+            upscaleEngineIsRestoration: (key) => key === "iris",
+            upscaleFactor: 4,
+            upscaleFactorsForEngine: () => [4],
+            upscaleSoftness: 0,
+            working: { width: 640, height: 480 },
+          }}
+        />
+      );
+    }
+    await act(async () => root.render(<Harness />));
+    const restore = () => Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Restore image");
+    expect(container.textContent).not.toContain("Scale factor");
+    expect(restore().disabled).toBe(true);
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 260)));
+    expect(container.querySelector(".iris-restore-preview").textContent).toContain("4×: 640x480 → 2560x1920");
+    expect(restore().disabled).toBe(false);
+    await act(async () => restore().dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(runUpscale).toHaveBeenCalledTimes(1);
+  });
+});

@@ -248,6 +248,62 @@ pub(crate) async fn create_image_job(
                 return Err(ApiError::bad_request(message));
             }
         }
+        // The remaining sampling controls (sc-25681): schedule shift without a scheduler menu,
+        // guidance interval, caption-overflow policy, and the CFG-bound negative prompt. An
+        // undeclared control, a malformed value, or one that would be accepted and ignored at the
+        // resolved guidance (interval / bound negative prompt at CFG 1.0) is refused here, before
+        // a job exists — the same core function the worker re-applies before load.
+        {
+            let empty = JsonObject::new();
+            let advanced = job_payload
+                .get("advanced")
+                .and_then(Value::as_object)
+                .unwrap_or(&empty);
+            let negative_prompt = job_payload
+                .get("negativePrompt")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Some(message) =
+                sceneworks_core::image_sampling_controls::image_sampling_control_error(
+                    &model_id,
+                    advanced,
+                    negative_prompt,
+                    entry,
+                )
+            {
+                return Err(ApiError::bad_request(message));
+            }
+        }
+        // A native prompt batch (sc-25681): only for a model that renders one in a single pass,
+        // `prompts × count` within its declared cap, and `prompt` (after every server-side fold
+        // above) still `prompts[0]`. Refused here, before a job exists.
+        {
+            let prompts: Vec<String> = job_payload
+                .get(sceneworks_core::image_sampling_controls::PROMPTS_KEY)
+                .and_then(Value::as_array)
+                .map(|prompts| {
+                    prompts
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let prompt = job_payload
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let count = job_payload
+                .get("count")
+                .and_then(Value::as_u64)
+                .and_then(|count| u32::try_from(count).ok())
+                .unwrap_or(1);
+            if let Some(message) = sceneworks_core::image_sampling_controls::prompt_batch_error(
+                &model_id, prompt, &prompts, count, entry,
+            ) {
+                return Err(ApiError::bad_request(message));
+            }
+        }
         // The model's declared ORDERED reference ceiling, `limits.maxReferenceAssets`
         // (sc-24113 introduced the key and this call; sc-24110 corrected what is counted).
         //
@@ -2375,6 +2431,9 @@ pub(crate) async fn create_video_job(
             }
         }
     }
+    sceneworks_core::video_request::VideoRequest::from_payload(&job_payload)
+        .h3_veda_settings()
+        .map_err(ApiError::bad_request)?;
     // The model's declared `limits.hardMinSteps` AND `limits.steps`, enforced at enqueue (sc-19426,
     // sc-19502 — one call, because `steps_limit_error` owns both). A FOURTH axis: the
     // three gates around it bound how long the clip is and how much conditioning media it carries,

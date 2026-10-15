@@ -3610,7 +3610,14 @@ def test_guidance_taking_image_models_declare_nothing():
     `advanced.guidanceScale` as `true_cfg` (base.rs `uses_true_cfg`/`resolve_true_cfg`). Declaring
     an `image` block for Chroma would break a working knob."""
     models = _image_models_by_id()
-    declared = {model_id for model_id, model in models.items() if model.get("image") is not None}
+    # Only the two AXIS keys hide a control; `negativePromptRequiresGuidance` (sc-25679) keeps both
+    # axes live and is policed by its own guard below.
+    axis_keys = {"supportsGuidance", "supportsNegativePrompt"}
+    declared = {
+        model_id
+        for model_id, model in models.items()
+        if axis_keys & set(model.get("image") or {})
+    }
     expected = IMAGE_MODELS_WITHOUT_EITHER_AXIS | IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY
     assert declared == expected, (
         "unexpected `image` declarations — every other image entry must stay silent so it keeps "
@@ -3620,6 +3627,24 @@ def test_guidance_taking_image_models_declare_nothing():
         assert models[model_id].get("image") is None, (
             f"{model_id} takes both axes (Chroma via true_cfg) and must declare no `image` block"
         )
+
+
+def test_negative_prompt_requires_guidance_keeps_both_axes_live():
+    """sc-25679: `image.negativePromptRequiresGuidance` says the negative prompt IS the CFG
+    unconditional (the engine refuses one at guidance 1.0). It only makes sense on an engine that
+    has BOTH axes, so a declaring entry must not also declare either axis absent; Iris-3B declares
+    it because `mlx-gen-iris` refuses a negative prompt with CFG off."""
+    models = _image_models_by_id()
+    declaring = {
+        model_id
+        for model_id, model in models.items()
+        if (model.get("image") or {}).get("negativePromptRequiresGuidance") is True
+    }
+    assert "iris_3b" in declaring
+    for model_id in sorted(declaring):
+        block = models[model_id]["image"]
+        assert block.get("supportsGuidance") is not False, model_id
+        assert block.get("supportsNegativePrompt") is not False, model_id
 
 
 def test_cfg_free_image_models_carry_no_default_negative_prompt():
@@ -4484,3 +4509,33 @@ def _qwen_image_2_1_entry() -> dict:
         for model in _load_builtin_models_manifest()["models"]
         if model["id"] == "qwen_image_2_1"
     )
+
+
+def test_minimax_h3_managed_veda_predictor_exact_identity_and_soft_policy():
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+    for model_id in ("minimax_h3", "minimax_h3_ref"):
+        rows = [row for row in models[model_id]["downloads"] if row.get("componentId") == "veda_predictor"]
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["repo"] == "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview"
+        assert row["revision"] == "9a1fd3a41b4a754a7886e64e82edbddf599fd1bd"
+        assert row["files"] == ["minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors"]
+        assert row["expectedSizeBytes"] == 275415648
+        assert row["expectedSha256"] == "2a8d8845c5342756a2781e8e69563940e4bb573c9a40ebb534915ff8fd76573a"
+        assert row["coRequisite"] is True and row["required"] == "soft"
+        assert set(row["platforms"]) == {"macos", "windows", "linux"}
+
+
+def test_managed_file_schema_rejects_partial_or_unpinned_identity():
+    schema = json.loads(SCHEMA_PATH.read_text())
+    manifest = _load_builtin_models_manifest()
+    model = next(model for model in manifest["models"] if model["id"] == "minimax_h3")
+    index = next(index for index, row in enumerate(model["downloads"]) if row.get("componentId") == "veda_predictor")
+    for key, value in (("expectedSha256", "wrong"), ("expectedSizeBytes", 0), ("revision", "main"), ("files", ["*.safetensors"])):
+        invalid = copy.deepcopy(manifest)
+        next(model for model in invalid["models"] if model["id"] == "minimax_h3")["downloads"][index][key] = value
+        assert list(jsonschema.Draft202012Validator(schema).iter_errors(invalid)), key
+    for key in ("expectedSha256", "expectedSizeBytes", "revision"):
+        invalid = copy.deepcopy(manifest)
+        del next(model for model in invalid["models"] if model["id"] == "minimax_h3")["downloads"][index][key]
+        assert list(jsonschema.Draft202012Validator(schema).iter_errors(invalid)), key

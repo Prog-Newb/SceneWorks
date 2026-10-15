@@ -140,6 +140,12 @@ import insightfaceModelNotice from "../../../desktop/licenses/insightface/Insigh
 // Production third-party source/data compiled into the inference runtimes (sc-14403).
 import cephesBsd3Clause from "../../../desktop/licenses/cephes/BSD-3-Clause.txt?url&no-inline";
 import mageMit from "../../../desktop/licenses/mage/MIT.txt?url&no-inline";
+import iris3bApache20 from "../../../desktop/licenses/iris-3b/Apache-2.0.txt?url&no-inline";
+import irisRepaTeacherApache20 from "../../../desktop/licenses/iris-repa-teacher/Apache-2.0.txt?url&no-inline";
+// Iris restoration TRAINING-only resources (sc-25688): VGG16 / LPIPS / OpenCLIP critic trunk.
+import irisRestoreTrainingTorchvisionBsd3 from "../../../desktop/licenses/iris-restore-training/torchvision-BSD-3-Clause.txt?url&no-inline";
+import irisRestoreTrainingLpipsBsd2 from "../../../desktop/licenses/iris-restore-training/LPIPS-BSD-2-Clause.txt?url&no-inline";
+import irisRestoreTrainingOpenClipMit from "../../../desktop/licenses/iris-restore-training/OpenCLIP-MIT.txt?url&no-inline";
 import cmudictBsd2Clause from "../../../desktop/licenses/cmudict/BSD-2-Clause.txt?url&no-inline";
 // Upstream CONTENT (not an algorithm port) reproduced in the native captioners: the JoyCaption
 // prompt taxonomy. This is fpgaminer/joycaption's own LICENSE file, kept verbatim because it
@@ -258,6 +264,11 @@ const DOCUMENT_URL = {
   "insightface-model-notice": insightfaceModelNotice,
   "cephes-bsd-3-clause": cephesBsd3Clause,
   "mage-mit": mageMit,
+  "iris-3b-apache": iris3bApache20,
+  "iris-repa-teacher-apache": irisRepaTeacherApache20,
+  "iris-restore-training-torchvision-bsd-3-clause": irisRestoreTrainingTorchvisionBsd3,
+  "iris-restore-training-lpips-bsd-2-clause": irisRestoreTrainingLpipsBsd2,
+  "iris-restore-training-open-clip-mit": irisRestoreTrainingOpenClipMit,
   "cmudict-bsd-2-clause": cmudictBsd2Clause,
   "joycaption-source-apache": joycaptionApache20,
   "ai-toolkit-perceptual-source-mit": aiToolkitPerceptualSourceMit,

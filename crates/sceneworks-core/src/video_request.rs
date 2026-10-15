@@ -17,6 +17,8 @@
 
 use serde_json::Value;
 
+pub use crate::h3_veda::{requested_h3_veda, H3VedaBudget, H3VedaSettings};
+
 use crate::contracts::JsonObject;
 // The memory-ladder rung vocabulary (sc-18814). `sceneworks-core` already owns this enum — the
 // worker's `memory_strategy` bridges it to gen-core's `MemoryStrategy` — so the video gate can
@@ -405,6 +407,18 @@ impl VideoRequest {
             advanced: object_or_empty(payload, "advanced"),
             model_manifest_entry,
         }
+    }
+
+    /// Shared API/worker controls, bounded by the actual selected H3 schedule.
+    pub fn h3_veda_settings(&self) -> Result<Option<H3VedaSettings>, String> {
+        if !self.advanced.contains_key("veda") {
+            return Ok(None);
+        }
+        let recipe = crate::minimax_h3_turbo::resolve_turbo_recipe(&self.model, &self.loras)?;
+        let steps = requested_steps(&self.advanced)
+            .or_else(|| recipe.map(|r| r.steps))
+            .unwrap_or(50);
+        requested_h3_veda(&self.model, &self.advanced, steps)
     }
 
     /// Raw frame count from `duration * fps` (Python `round(duration * fps)`), at
@@ -2557,15 +2571,27 @@ mod tests {
                 // The blanket bounds still apply — the gate narrows the GRID check, not the range.
                 assert!(image_dimension_error(&id, 200, 1024, &entry, 256, 4096).is_some());
             } else {
-                // A model that declares the full envelope DOES get the grid enforced.
-                assert_eq!(
-                    id, "qwen_image_2_1",
-                    "a new envelope-declaring model appeared"
+                // A model that declares the full envelope DOES get its declared grid enforced
+                // (shape, not a population: qwen_image_2_1 at 32 px, iris_3b at 16 px, ...).
+                assert!(
+                    declares_envelope,
+                    "{id} declares a stride without its envelope"
                 );
-                assert!(declares_envelope);
-                let message = image_dimension_error(&id, 1000, 1000, &entry, 256, 4096)
-                    .expect("2.1 enforces its declared grid");
-                assert!(message.contains("32-pixel grid"), "{message}");
+                let multiple = model["limits"]["requiresDimensionsMultipleOf"]
+                    .as_u64()
+                    .expect("integer stride") as u32;
+                let off_grid = 1024 + multiple / 2;
+                let message = image_dimension_error(&id, off_grid, 1024, &entry, 256, 4096)
+                    .unwrap_or_else(|| panic!("{id} enforces its declared grid"));
+                assert!(
+                    message.contains(&format!("{multiple}-pixel grid")),
+                    "{id}: {message}"
+                );
+                assert_eq!(
+                    image_dimension_error(&id, 1024, 1024, &entry, 256, 4096),
+                    None,
+                    "{id} admits an on-grid size"
+                );
             }
         }
     }

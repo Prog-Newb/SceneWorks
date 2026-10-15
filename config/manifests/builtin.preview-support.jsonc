@@ -7,10 +7,10 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "c1f5989ec88596b7a9b171cb2862e5a12c5cb8ff"
+      "inferenceRevision": "6bfe5f364dd2fe5727dc46e029888fe8ea4ac0b5"
     },
     "mlx": {
-      "inferenceRevision": "c1f5989ec88596b7a9b171cb2862e5a12c5cb8ff"
+      "inferenceRevision": "6bfe5f364dd2fe5727dc46e029888fe8ea4ac0b5"
     }
   },
   "models": {
@@ -97,6 +97,10 @@
       "mlx": true
     },
     "illustrious_xl_v2": {
+      "candle": true,
+      "mlx": true
+    },
+    "iris_3b": {
       "candle": true,
       "mlx": true
     },
