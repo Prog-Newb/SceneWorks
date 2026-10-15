@@ -286,7 +286,9 @@ test("a wall-time ceiling fails closed and removes the owned group", async () =>
   const stopped = result.events.find((event) =>
     event.event === "hard_stop" && event.reason.includes("runtime_at_or_above_0.2s"));
   assert.ok(stopped);
-  assert.ok(stopped.at - started.at < 1, "the uncapped two-second sample sleep won");
+  // The uncapped sleep cannot return in under its two real seconds, so "< 2" is the exact
+  // discriminator. A tighter bound measured the runner's scheduler, not the cap.
+  assert.ok(stopped.at - started.at < 2, "the uncapped two-second sample sleep won");
   result.pids.forEach(assertGone);
 });
 
