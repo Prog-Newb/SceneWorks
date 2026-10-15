@@ -2015,6 +2015,7 @@ while True:
     line = f.readline().decode().strip()
     if line == f"BYE {nonce}": break
     assert line == f"PING {nonce}"
+    if scenario == "final_fault_once": open(marker, "w").write("pinged after DONE")
 if scenario == "ack_exit_race":
     while not os.path.exists(marker): time.sleep(0.001)
 sock.close()
@@ -2100,7 +2101,8 @@ raise SystemExit(m.guard(m.parse_args()))
   try { await execFileAsync("python3", [launcher], { timeout: 60_000, env: withVirtualClock() }); }
   catch (error) { status = error.code; }
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
-  return { status, events };
+  const marker = await readFile(files.pids, "utf8").catch(() => "");
+  return { status, events, marker };
 }
 
 for (const status of [0, 1, 7]) {
@@ -2156,8 +2158,10 @@ chain.emit({"event": "sample", "physicalFootprintBytes": 1})
 test("a transient final-sample fault is retried and the measured release keeps the root's status", async () => {
   // sc-26257: one slow probe at the final pre-release sample used to be an immediate
   // completion_telemetry_lost stop. The root is still blocked on BYE, so the next tick retries it.
-  const { status, events } = await completionRun("final_fault_once", 7);
+  const { status, events, marker } = await completionRun("final_fault_once", 7);
   assert.equal(status, 7, JSON.stringify(events));
+  // The retried tick keeps the client's idle timeout fed rather than going silent until release.
+  assert.equal(marker, "pinged after DONE");
   const fault = events.findIndex((event) => event.event === "telemetry_fault" && event.phase === "completion");
   const sampled = events.findIndex((event) => event.phase === "completion_before_release");
   const completed = events.findIndex((event) => event.event === "child_completed");

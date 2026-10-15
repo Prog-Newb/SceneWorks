@@ -1192,6 +1192,25 @@ def guard(args: argparse.Namespace) -> int:
             return last_live, False, f"telemetry_lost:{type(error).__name__}:{error}"
         return last_live, True, None
 
+    def fault_heartbeat() -> str | None:
+        """PING the attested child from a tick that ended in a TOLERATED fault (sc-26257 review).
+
+        Only a good sample reaches the per-tick PING, so a whole fault run — up to the fault window
+        plus slow ticks — went silent, and the completion client's idle timeout could give up on a
+        run the guard was still entitled to recover. The same states the client already accepts a
+        PING in: before DONE, and (handshake only) between DONE and BYE.
+        """
+        if attestation_stream is None or (child_reported_done and not (
+                args.require_completion_handshake and not completion_released)):
+            return None
+        message = f"PING {attestation_nonce}\n".encode()
+        try:
+            if attestation_stream.send(message) != len(message):
+                return "child_attestation_heartbeat_was_partial"
+        except (BlockingIOError, BrokenPipeError, ConnectionResetError):
+            return "child_attestation_channel_lost_before_done"
+        return None
+
     def pause_runtime() -> None:
         sleep_seconds = args.sample_interval
         if runtime_deadline is not None:
@@ -1541,6 +1560,9 @@ def guard(args: argparse.Namespace) -> int:
                     if (isinstance(error, TELEMETRY_SOURCE_ERRORS)
                             and not isinstance(error, RootTelemetryLost)
                             and tolerate_telemetry_fault(error, "completion")):
+                        hard_stop = fault_heartbeat()
+                        if hard_stop is not None:
+                            break
                         pause_runtime()
                         continue
                     hard_stop = f"completion_telemetry_lost:{type(error).__name__}:{error}"
@@ -1596,6 +1618,9 @@ def guard(args: argparse.Namespace) -> int:
                     hard_stop = census_lost
                     break
                 if tolerate_telemetry_fault(error, "runtime"):
+                    hard_stop = fault_heartbeat()
+                    if hard_stop is not None:
+                        break
                     pause_runtime()
                     continue
                 hard_stop = f"telemetry_lost:{type(error).__name__}:{error}"
