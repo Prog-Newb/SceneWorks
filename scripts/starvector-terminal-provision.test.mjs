@@ -1161,10 +1161,10 @@ test("upstream pip watchdog closes its owned child on repeated or decreasing tra
     ]) {
       const pidPath = path.join(root, name), events = [];
       let settled = false;
-      // Advance the stall clock until the run ends, not once: a loaded runner can deliver the
-      // progress lines in a later chunk than `download_started`, after which a single tick left
-      // the clock frozen until the real process deadline. The outcome is assembled only after the
-      // pipe drains, so the recorded transfer and progress are the same either way.
+      // Advance the stall clock until the run ends, not once. Under the full parallel suite a run
+      // held its child for the whole real 10 s deadline and failed as `process_exit`: the single
+      // tick never produced the stall stop. Ticking until the outcome is emitted guarantees it; the
+      // outcome is assembled only after the pipe drains, and `stopReason` is set once.
       const advance = () => {
         if (settled) return;
         t.mock.timers.tick(630);

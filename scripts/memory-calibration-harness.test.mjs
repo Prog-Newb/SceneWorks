@@ -3316,4 +3316,5 @@ test("a failing guarded capture completes the guard's handshake and exits with i
   assert.ok(log.some((event) => event.event === "child_completed"), "the capture completed the handshake");
   assert.equal(status, 1, stderr);
   assert.match(stderr, /memory-strategy calibration:/);
+  assert.deepEqual(await readdir(path.dirname(output)), [], "the private completion evidence is removed");
 });

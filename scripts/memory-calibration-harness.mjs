@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -2776,8 +2776,20 @@ async function main() {
       } catch (error) {
         failure = error;
       }
+      // The completion evidence is THIS capture's output alone, in a private directory: the shared
+      // captures directory grows with the walk and may hold files this run never wrote.
       await mkdir(path.dirname(output), { recursive: true });
-      await completion.complete(path.dirname(output));
+      const evidence = await mkdtemp(path.join(path.dirname(output), `.${path.basename(output)}.completion-`));
+      try {
+        if (!failure) await link(output, path.join(evidence, path.basename(output)));
+        await completion.complete(evidence);
+      } catch (completionError) {
+        // The capture's own failure is what the runner classifies; never let this one replace it.
+        if (!failure) throw completionError;
+        failure.message += `; watchdog completion also failed: ${completionError.message}`;
+      } finally {
+        await rm(evidence, { recursive: true, force: true });
+      }
       if (failure) throw failure;
       return;
     } finally {
