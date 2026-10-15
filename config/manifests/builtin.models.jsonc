@@ -14221,7 +14221,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+          "revision": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -14232,7 +14232,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+          "revision": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -14242,7 +14242,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+          "revision": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -14409,7 +14409,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+          "revision": "225fde6c092706aa603937e26b93a75c1dde0324",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -14420,7 +14420,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+          "revision": "225fde6c092706aa603937e26b93a75c1dde0324",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -14430,7 +14430,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+          "revision": "225fde6c092706aa603937e26b93a75c1dde0324",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],

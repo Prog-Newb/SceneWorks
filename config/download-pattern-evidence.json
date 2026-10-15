@@ -1420,14 +1420,16 @@
       ]
     },
     {
-      "key": "SceneWorks/Sana_1600M_1024px_mlx@ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+      "key": "SceneWorks/Sana_1600M_1024px_mlx@bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
       "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-      "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
-      "resolvedSha": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+      "revision": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
+      "resolvedSha": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
       "servedRepo": "SceneWorks/Sana_1600M_1024px_mlx",
       "gated": false,
       "files": [
         ".gitattributes",
+        "GEMMA_PROHIBITED_USE_POLICY.md",
+        "GEMMA_TERMS_OF_USE",
         "LICENSE",
         "NOTICE",
         "README.md",
@@ -1450,14 +1452,16 @@
       ]
     },
     {
-      "key": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx@0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+      "key": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx@225fde6c092706aa603937e26b93a75c1dde0324",
       "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-      "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
-      "resolvedSha": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+      "revision": "225fde6c092706aa603937e26b93a75c1dde0324",
+      "resolvedSha": "225fde6c092706aa603937e26b93a75c1dde0324",
       "servedRepo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
       "gated": false,
       "files": [
         ".gitattributes",
+        "GEMMA_PROHIBITED_USE_POLICY.md",
+        "GEMMA_TERMS_OF_USE",
         "LICENSE",
         "NOTICE",
         "README.md",

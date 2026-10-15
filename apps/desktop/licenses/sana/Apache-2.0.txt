@@ -9,6 +9,11 @@ the Apache License, Version 2.0:
   - Efficient-Large-Model/Sana_Sprint_1.6B_1024px model card: released under the
     Apache License 2.0 (Hugging Face tag license:apache-2.0)
   - Efficient-Large-Model/Sana_1600M_1024px: Hugging Face tag license:apache-2.0
+  - NVIDIA relicensed the weights from its earlier non-commercial license to
+    Apache-2.0 on 2026-07-31 ("Relicense model under Apache-2.0"):
+    Sana_Sprint_1.6B_1024px@449693db, Sana_Sprint_1.6B_1024px_diffusers@19683c58,
+    Sana_1600M_1024px@d71cbc8e, Sana_1600M_1024px_diffusers@ac0da2ff. The weight
+    files are byte-identical before and after.
 
 This covers the SANA transformer and DC-AE VAE weights in the SceneWorks re-hosts
 SceneWorks/Sana_1600M_1024px_mlx and SceneWorks/Sana_Sprint_1.6B_1024px_mlx, and
