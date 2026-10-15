@@ -708,9 +708,9 @@ class OwnedGroup:
     def signal_group(self, sig: signal.Signals) -> None:
         try:
             os.killpg(self.pgid, sig)
-        # Darwin answers EPERM for a group whose only member is the exited, not-yet-reaped
-        # sentinel. Anything genuinely left alive fails the survivor check below.
         except (ProcessLookupError, PermissionError):
+            # The group is already gone, or (Darwin EPERM) its only member is the exited,
+            # not-yet-reaped sentinel. Anything genuinely left alive fails the survivor check.
             pass
 
     @staticmethod
@@ -721,6 +721,7 @@ class OwnedGroup:
             try:
                 os.kill(identity.pid, sig)
             except ProcessLookupError:
+                # It exited between the census and this signal: already the intended outcome.
                 pass
 
     def terminate(self, grace: float) -> None:
