@@ -72,6 +72,10 @@ class SystemClock:
     def advance(self, seconds: float) -> None:
         """No-op: real time advances by itself. Present so callers need not branch on the clock."""
 
+    def probe_wait(self, budget: float) -> float:
+        """The real seconds a probe subprocess may run before it counts as timed out."""
+        return budget
+
 
 class QuantizedClock(SystemClock):
     """TEST-ONLY monotonic source: real waits, but EXACT timestamps.
@@ -113,6 +117,15 @@ class QuantizedClock(SystemClock):
         self.advance(seconds)
         if seconds > 0:
             time.sleep(seconds)
+
+    # A real `/bin/ps` census still waits on the real host. Under a test's sub-second
+    # `--telemetry-timeout` a loaded runner overran it, so scheduling jitter leaked in as extra
+    # telemetry faults — the exact thing this clock exists to keep out. Scripted faults raise
+    # directly and never depend on this wait.
+    PROBE_WAIT_FLOOR_SECONDS = 10.0
+
+    def probe_wait(self, budget: float) -> float:
+        return max(budget, self.PROBE_WAIT_FLOOR_SECONDS)
 
 
 TEST_CLOCK_ENVIRONMENT_VARIABLE = "SCENEWORKS_WATCHDOG_TEST_CLOCK"
@@ -248,7 +261,7 @@ def set_census_timeout(seconds: float) -> None:
 
 
 def census_budget(timeout: float | None) -> float:
-    return CENSUS_TIMEOUT_SECONDS if timeout is None else timeout
+    return CLOCK.probe_wait(CENSUS_TIMEOUT_SECONDS if timeout is None else timeout)
 
 
 def process_identity(pid: int, timeout: float | None = None) -> Identity | None:
@@ -666,43 +679,87 @@ class OwnedGroup:
         return ([self.root.pid] if not self.completion_acknowledged
                 and self.root is not None and self.root in live else [])
 
+    def census_or_none(self) -> list[Identity] | None:
+        """`refresh()`, or `None` while the census itself is unavailable.
+
+        Termination must never depend on telemetry: a `ps` that times out under the very load that
+        triggered a hard stop used to raise out of `terminate` before any SIGKILL, leaving the
+        guarded group — and the TERM-immune anchor, which nothing else ever kills — running.
+        """
+        try:
+            return self.refresh()
+        except TELEMETRY_SOURCE_ERRORS:
+            return None
+
+    def group_is_owned(self) -> bool:
+        """Whether signalling the numeric PGID can only reach this launch's group.
+
+        Until this monitor reaps the sentinel — running or a zombie — its PID stays allocated, so
+        no new group can take that ID and no census is needed. `terminate` never reaps before its
+        signals. Once reaped, only a live exact-identity anchor proves it.
+        """
+        if self.child.returncode is None:
+            return True
+        try:
+            return any(identity_is_live(anchor) for anchor in self.anchors)
+        except TELEMETRY_SOURCE_ERRORS:
+            return False
+
+    def signal_group(self, sig: signal.Signals) -> None:
+        try:
+            os.killpg(self.pgid, sig)
+        except (ProcessLookupError, PermissionError):
+            # The group is already gone, or (Darwin EPERM) its only member is the exited,
+            # not-yet-reaped sentinel. Anything genuinely left alive fails the survivor check.
+            pass
+
+    @staticmethod
+    def signal_each(identities: list[Identity] | None, sig: signal.Signals) -> None:
+        # Only census-verified identities are signalled one by one; an unverified PID may have been
+        # reissued to an unrelated process.
+        for identity in identities or []:
+            try:
+                os.kill(identity.pid, sig)
+            except ProcessLookupError:
+                # It exited between the census and this signal: already the intended outcome.
+                pass
+
     def terminate(self, grace: float) -> None:
         if hasattr(self, "control") and not self.released:
             self.control.close()
             self.released = True
-        live = self.refresh()
-        if any(identity_is_live(anchor) for anchor in self.anchors):
-            try:
-                os.killpg(self.pgid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+        # An owned group is signalled by PGID with no census first: a hung `ps` must not delay
+        # the stop it is part of.
+        if self.group_is_owned():
+            self.signal_group(signal.SIGTERM)
         else:
-            for identity in live:
-                try:
-                    os.kill(identity.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
+            self.signal_each(self.census_or_none(), signal.SIGTERM)
         deadline = time.monotonic() + grace
-        while time.monotonic() < deadline and any(identity_is_live(item) for item in live):
-            live = self.refresh()
+        while time.monotonic() < deadline:
+            live = self.census_or_none()
+            # An unavailable census ends the grace early: waiting on telemetry that cannot answer
+            # only postpones the SIGKILL.
+            if not live:
+                break
             time.sleep(0.02)
-        live = self.refresh()
-        if any(identity_is_live(anchor) for anchor in self.anchors):
-            try:
-                os.killpg(self.pgid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        for identity in live:
-            if identity_is_live(identity):
-                try:
-                    os.kill(identity.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+        if self.group_is_owned():
+            self.signal_group(signal.SIGKILL)
+        self.signal_each(self.census_or_none(), signal.SIGKILL)
         try:
             self.child.wait(timeout=2)
         except subprocess.TimeoutExpired as error:
             raise RuntimeError("owned process-group leader did not terminate") from error
-        survivors = [identity for identity in self.retained if identity_is_live(identity)]
+        verify_deadline = time.monotonic() + 2
+        while True:
+            try:
+                survivors = [
+                    identity for identity in self.retained if identity_is_live(identity)]
+                break
+            except TELEMETRY_SOURCE_ERRORS as error:
+                if time.monotonic() >= verify_deadline:
+                    raise RuntimeError(
+                        "could not verify the owned process group terminated") from error
+                time.sleep(0.02)
         if survivors:
             raise RuntimeError(f"owned process group retained live identities: {survivors}")
 

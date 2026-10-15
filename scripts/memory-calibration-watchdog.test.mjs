@@ -286,7 +286,9 @@ test("a wall-time ceiling fails closed and removes the owned group", async () =>
   const stopped = result.events.find((event) =>
     event.event === "hard_stop" && event.reason.includes("runtime_at_or_above_0.2s"));
   assert.ok(stopped);
-  assert.ok(stopped.at - started.at < 1, "the uncapped two-second sample sleep won");
+  // The uncapped sleep cannot return in under its two real seconds, so "< 2" is the exact
+  // discriminator. A tighter bound measured the runner's scheduler, not the cap.
+  assert.ok(stopped.at - started.at < 2, "the uncapped two-second sample sleep won");
   result.pids.forEach(assertGone);
 });
 
@@ -1231,6 +1233,7 @@ group.leader = stale
 group.anchors = (stale,)
 group.retained = {stale}
 class Finished:
+    returncode = 0
     def wait(self, timeout=None): return 0
 group.child = Finished()
 module.group_identities = lambda pgid: (_ for _ in ()).throw(AssertionError("blind PGID census"))
@@ -1773,6 +1776,32 @@ def footprint_outcome(n, state):
   assert.match(result.faults[1].reason, /^TimeoutExpired:.*footprint/);
 });
 
+test("a census outage during termination still removes the whole owned group, anchor included", async () => {
+  // The hard stop runs under the same load that slows `/bin/ps`. `terminate` used to open with a
+  // census, so one timed-out `ps` raised out of it before any SIGKILL: the guarded tree kept
+  // running and the TERM-immune `--anchor`, which nothing else ever kills, was orphaned for good.
+  const files = await fixture();
+  const result = await runWithScriptedCensus(files, "census-outage-during-terminate", String.raw`
+real_terminate = module.OwnedGroup.terminate
+def terminate(self, grace):
+    state["terminating"] = True
+    return real_terminate(self, grace)
+module.OwnedGroup.terminate = terminate
+def census_outcome(n, state):
+    if state.get("terminating") and state["censusFaults"] < 3:
+        state["censusFaults"] += 1
+        raise census_timeout()
+`);
+  assert.equal(result.status, 97);
+  assert.equal(result.stopped.reason, "runtime_at_or_above_0.3s");
+  assert.equal(result.events.at(-1).event, "terminated");
+  const identities = result.stopped.processIdentities.map((item) => item.pid);
+  assert.ok(identities.length >= 3, "the stop recorded the sentinel, the anchor and the tree");
+  identities.forEach(assertGone);
+  const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+  pids.forEach(assertGone);
+});
+
 test("a successful census that lacks the root stops at once, after tolerated census faults", async () => {
   // Root-loss detection must survive the tolerance: a census that FAILS is unknown, but the first
   // SUCCESSFUL one that no longer enumerates the group ends the guard immediately with the child's
@@ -1893,6 +1922,22 @@ for error in [AttributeError("bug"), TypeError("bug"), NameError("bug"), KeyErro
 print("census budget is the telemetry budget")
 `]);
   assert.match(probe.stdout, /census budget is the telemetry budget/);
+});
+
+test("under the test clock a real census waits past a loaded host, while the policy budget is unchanged", async () => {
+  // Scripted faults raise directly; a REAL `/bin/ps` that a busy runner slowed past a sub-second
+  // `--telemetry-timeout` must not become an extra, unscripted telemetry fault.
+  const probe = await execFileAsync("python3", ["-c", String.raw`
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+module.set_census_timeout(0.2)
+assert module.CENSUS_TIMEOUT_SECONDS == 0.2, module.CENSUS_TIMEOUT_SECONDS
+assert module.census_budget(None) >= 10.0, module.census_budget(None)
+assert module.SystemClock().probe_wait(0.2) == 0.2
+print("probe wait floored")
+`], { env: withVirtualClock() });
+  assert.match(probe.stdout, /probe wait floored/);
 });
 
 test("a guard run adopts its --telemetry-timeout as the census budget", async () => {
