@@ -929,15 +929,19 @@
         "sana_1600m",
         "sana_sprint_1600m"
       ],
-      "name": "SANA 1.6B",
-      "publisher": "NVIDIA Corporation",
-      "license": "NVIDIA Open Model License",
+      "name": "SANA 1.6B + Gemma-2-2B-IT",
+      "publisher": "NVIDIA Corporation (SANA) · Google (Gemma-2)",
+      "license": "Apache-2.0 (SANA) · Gemma Terms of Use (text encoder)",
       "homepage": "https://huggingface.co/Efficient-Large-Model/Sana_1600M_1024px",
-      "usage": "Efficient image generation model (base + Sprint distilled). SceneWorks downloads on first use a converted copy re-hosted at SceneWorks/Sana_1600M_1024px_mlx and SceneWorks/Sana_Sprint_1.6B_1024px_mlx; the candle backend loads the upstream Efficient-Large-Model diffusers snapshots directly.",
+      "usage": "Efficient image generation model (base + Sprint distilled). SceneWorks downloads on first use a converted copy re-hosted at SceneWorks/Sana_1600M_1024px_mlx and SceneWorks/Sana_Sprint_1.6B_1024px_mlx; the candle backend loads the upstream Efficient-Large-Model diffusers snapshots directly. Each bundle contains the SANA transformer and DC-AE VAE, which NVIDIA licenses under the Apache License 2.0 (NVlabs/Sana changed its license to Apache 2.0 on 2025-01-11; the Efficient-Large-Model SANA and SANA-Sprint model cards declare apache-2.0), plus a gemma-2-2b-it text encoder governed by Google's Gemma Terms of Use and its Prohibited Use Policy. Both notices below apply.",
       "documents": [
         {
-          "label": "NVIDIA Open Model License",
-          "key": "sana-nvidia-open-model-license"
+          "label": "Apache License 2.0 (SANA)",
+          "key": "sana-apache-2.0"
+        },
+        {
+          "label": "Google Gemma Terms (gemma-2-2b-it text encoder)",
+          "key": "sana-gemma"
         }
       ]
     },

@@ -14515,15 +14515,15 @@
       // (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag. True-CFG text-to-image (20 steps
       // / guidance 4.5). `adapter` is the asset stamp (mirrors mlx_<family>).
       //
-      // NVIDIA non-commercial: SANA-1.6B is distributed under the NVIDIA Open Model License /
-      // NSCLv1 (research & evaluation, non-commercial). On macOS the re-hosted
-      // `SceneWorks/Sana_1600M_1024px_mlx` mirror carries the upstream LICENSE + NOTICE + attribution
-      // (the Krea/Ideogram re-host precedent). Off-Mac the candle lane pulls the ORIGINAL public NVIDIA
-      // repo `Efficient-Large-Model/Sana_1600M_1024px_diffusers` (un-gated — `gated: false` on HF), which
-      // ships the upstream LICENSE.txt (the NVIDIA Open Model License) alongside the weights; the bundled
-      // gemma-2-2b-it text encoder remains under the Gemma Terms of Use. `candle-gen-sana`'s NOTICE
-      // documents the same. SceneWorks's overall non-commercial posture covers this; generations are for
-      // non-commercial / research use only.
+      // LICENSE: the SANA transformer + DC-AE VAE are Apache-2.0 — NVIDIA changed the NVlabs/Sana
+      // code-base license to Apache 2.0 on 2025-01-11, and `Efficient-Large-Model/Sana_1600M_1024px`
+      // (and its `_diffusers` snapshot, whose LICENSE is the Apache 2.0 text) is tagged apache-2.0. The
+      // bundled gemma-2-2b-it text encoder is under Google's Gemma Terms of Use + Prohibited Use Policy
+      // (upstream google/gemma-2-2b-it is gated). The earlier "NVIDIA Open Model License / NSCLv1,
+      // non-commercial" classification is superseded, so `nonCommercial` is false. On macOS the weights
+      // come from the re-hosted `SceneWorks/Sana_1600M_1024px_mlx` mirror; off-Mac the candle lane pulls
+      // the ORIGINAL public NVIDIA repo `Efficient-Large-Model/Sana_1600M_1024px_diffusers` (un-gated —
+      // `gated: false` on HF). The About → Licenses `sana` entry carries both notices.
       "autoDownload": false,
       "name": "SANA 1600M",
       "family": "sana",
@@ -14531,7 +14531,7 @@
       "adapter": "mlx_sana",
       "capabilities": ["text_to_image", "image_to_image"],
       "macOnly": false,
-      "nonCommercial": true,
+      "nonCommercial": false,
       "gated": false,
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8489/sc-8513, epic 8506): per-tier
@@ -14540,13 +14540,13 @@
         // DC-AE f32 decoder, dense in EVERY tier), and `text_encoder/` (the gemma-2-2b-it CHI caption
         // encoder — `gemma-2-2b-it.safetensors` packed q4/q8 else dense + `tokenizer.json`, sourced
         // from the SceneWorks/gemma-2-2b-it mirror so the TE weights are NOT duplicated). Un-gated
-        // (the mirror carries the NVIDIA non-commercial NOTICE). mlx-gen #653 packs the transformer +
+        // (licensing: see the LICENSE comment above). mlx-gen #653 packs the transformer +
         // Gemma-2 TE offline and packed-detects on load (NO install-time quantize). This is the
         // shared group-64 affine tier, NOT the (unported) 2-bit SANA quant. Sizes measured on-disk.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+          "revision": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -14557,7 +14557,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+          "revision": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -14567,7 +14567,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+          "revision": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -14582,8 +14582,8 @@
           // `tokenizer/`) directly and `resolve_component_files` tolerates the repo's fp16/fp32 +
           // single/sharded duplication, so NO curated allow-list is needed — the whole snapshot loads
           // dense bf16 (there is no packed q4/q8 tier off-Mac; the worker resolves this repo's snapshot
-          // ROOT, never a tier subdir). Un-gated on HF (`gated: false`); ships the upstream NVIDIA Open
-          // Model License LICENSE.txt. Size is the whole-repo on-disk footprint (fp16 + fp32 duplication).
+          // ROOT, never a tier subdir). Un-gated on HF (`gated: false`); ships the upstream Apache 2.0
+          // LICENSE. Size is the whole-repo on-disk footprint (fp16 + fp32 duplication).
           "provider": "huggingface",
           "repo": "Efficient-Large-Model/Sana_1600M_1024px_diffusers",
           "revision": "ac0da2ff55fbe434795be0dce883042e4d49e2fc",
@@ -14668,7 +14668,7 @@
         // (`model_supports_img2img` reads `ui.img2img`) — no per-model worker routing. Strength 0.5.
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
-        "description": "NVIDIA SANA 1600M — an efficient Linear-DiT image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). Its 1.6B linear-attention transformer, deep-compression 32× DC-AE, and Gemma 2 instruction text encoder support text-to-image plus reference-guided image-to-image with true classifier-free guidance and negative prompts. Runs ~20 steps at guidance 4.5 (flow-match Euler, shift 3.0). Apple Silicon offers pre-packed q4 (default), q8, and bf16 tiers; Candle uses the original dense snapshot. Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice.",
+        "description": "NVIDIA SANA 1600M — an efficient Linear-DiT image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). Its 1.6B linear-attention transformer, deep-compression 32× DC-AE, and Gemma 2 instruction text encoder support text-to-image plus reference-guided image-to-image with true classifier-free guidance and negative prompts. Runs ~20 steps at guidance 4.5 (flow-match Euler, shift 3.0). Apple Silicon offers pre-packed q4 (default), q8, and bf16 tiers; Candle uses the original dense snapshot. The SANA transformer and VAE are licensed by NVIDIA under Apache-2.0; the bundled Gemma 2 text encoder is governed by Google's Gemma Terms of Use and Prohibited Use Policy.",
         "recommendedFor": ["text_to_image", "image_to_image"],
         "promptGuide": {
           "title": "SANA Prompt Guide",
@@ -14703,15 +14703,16 @@
       // tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag. `adapter` is the asset stamp
       // (mirrors mlx_<family>).
       //
-      // NVIDIA non-commercial: SANA-Sprint is distributed under the NVIDIA Open Model License / NSCLv1
-      // (research & evaluation, non-commercial). On macOS the re-hosted `SceneWorks/Sana_Sprint_1.6B_1024px_mlx`
-      // mirror carries the upstream LICENSE + NOTICE + attribution (the Krea/Ideogram re-host precedent).
-      // Off-Mac the candle lane pulls the ORIGINAL public NVIDIA repo
-      // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` (un-gated — `gated: false` on HF), which
-      // ships the upstream LICENSE.txt (the NVIDIA Open Model License) alongside the weights; the bundled
-      // gemma-2-2b-it text encoder remains under the Gemma Terms of Use. `candle-gen-sana`'s NOTICE documents
-      // the same. SceneWorks's overall non-commercial posture covers this; generations are for
-      // non-commercial / research use only.
+      // LICENSE: the SANA-Sprint transformer + DC-AE VAE are Apache-2.0 — the
+      // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px` model card states "released under the Apache
+      // License 2.0" (tag license:apache-2.0; the `_diffusers` snapshot's LICENSE is the Apache 2.0 text),
+      // and NVlabs/Sana moved to Apache 2.0 on 2025-01-11. The bundled gemma-2-2b-it text encoder is under
+      // Google's Gemma Terms of Use + Prohibited Use Policy (upstream google/gemma-2-2b-it is gated). The
+      // earlier "NVIDIA Open Model License / NSCLv1, non-commercial" classification is superseded, so
+      // `nonCommercial` is false. On macOS the weights come from the re-hosted
+      // `SceneWorks/Sana_Sprint_1.6B_1024px_mlx` mirror; off-Mac the candle lane pulls the ORIGINAL public
+      // NVIDIA repo `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` (un-gated — `gated: false` on
+      // HF). The About → Licenses `sana` entry carries both notices.
       "autoDownload": false,
       "name": "SANA-Sprint 1.6B",
       "family": "sana",
@@ -14719,7 +14720,7 @@
       "adapter": "mlx_sana",
       "capabilities": ["text_to_image", "image_to_image"],
       "macOnly": false,
-      "nonCommercial": true,
+      "nonCommercial": false,
       "gated": false,
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8490/sc-8513, epic 8506): per-tier subdirs
@@ -14727,13 +14728,13 @@
         // `transformer/` (the Sprint Linear-DiT trunk, packed q4/q8 else dense bf16), `vae/` (the 32×
         // DC-AE f32 decoder, dense in EVERY tier), and `text_encoder/` (the gemma-2-2b-it CHI caption
         // encoder — packed q4/q8 else dense + `tokenizer.json`, from the SceneWorks/gemma-2-2b-it
-        // mirror, NOT duplicated). Un-gated (NVIDIA non-commercial NOTICE). mlx-gen #653 packs the
+        // mirror, NOT duplicated). Un-gated (licensing: see the LICENSE comment above). mlx-gen #653 packs the
         // transformer + Gemma-2 TE offline and packed-detects on load (no install-time quantize). This
         // is the shared group-64 affine tier, NOT the (unported) 2-bit SANA quant. Sizes measured.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+          "revision": "225fde6c092706aa603937e26b93a75c1dde0324",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -14744,7 +14745,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+          "revision": "225fde6c092706aa603937e26b93a75c1dde0324",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -14754,7 +14755,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+          "revision": "225fde6c092706aa603937e26b93a75c1dde0324",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -14770,8 +14771,8 @@
           // `resolve_component_files` tolerates the repo's fp16/fp32 + single/sharded duplication, so NO
           // curated allow-list is needed — the whole snapshot loads dense bf16 (there is no packed q4/q8
           // tier off-Mac; the worker resolves this repo's snapshot ROOT, never a tier subdir). CFG-free
-          // 1–4 step SCM/TrigFlow. Un-gated on HF (`gated: false`); ships the upstream NVIDIA Open Model
-          // License LICENSE.txt. Size is the whole-repo on-disk footprint (single-precision — unlike the
+          // 1–4 step SCM/TrigFlow. Un-gated on HF (`gated: false`); ships the upstream Apache 2.0
+          // LICENSE. Size is the whole-repo on-disk footprint (single-precision — unlike the
           // base repo the Sprint diffusers tree ships no fp16/fp32 duplication, so it is the smaller ~9.7GB).
           "provider": "huggingface",
           "repo": "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
@@ -14848,7 +14849,7 @@
         // few-step, so the strength window is narrower than base SANA — validate the band on-device.
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
-        "description": "NVIDIA SANA-Sprint 1.6B — the few-step SANA distillation, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). The same 1.6B linear-attention transformer, 32× DC-AE, and Gemma 2 instruction text encoder as base SANA support text-to-image plus reference-guided image-to-image. Its CFG-free SCM/TrigFlow sampler and guidance-embedding trunk generate a 1024×1024 image in about two steps with no negative prompt. Apple Silicon offers pre-packed q4 (default), q8, and bf16 tiers; Candle uses the original dense snapshot. Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice.",
+        "description": "NVIDIA SANA-Sprint 1.6B — the few-step SANA distillation, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). The same 1.6B linear-attention transformer, 32× DC-AE, and Gemma 2 instruction text encoder as base SANA support text-to-image plus reference-guided image-to-image. Its CFG-free SCM/TrigFlow sampler and guidance-embedding trunk generate a 1024×1024 image in about two steps with no negative prompt. Apple Silicon offers pre-packed q4 (default), q8, and bf16 tiers; Candle uses the original dense snapshot. The SANA transformer and VAE are licensed by NVIDIA under Apache-2.0; the bundled Gemma 2 text encoder is governed by Google's Gemma Terms of Use and Prohibited Use Policy.",
         "recommendedFor": ["text_to_image", "image_to_image"],
         "promptGuide": {
           "title": "SANA Prompt Guide",

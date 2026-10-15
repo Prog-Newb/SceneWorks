@@ -192,7 +192,7 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // predictor (Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview): 144 keys.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "621ef5b82026590ebe91180f4226215a9034718b7c175f36926a85d85848a0f3";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "1c5fe4dbdefd112ea48b5b30a8d7a3af6b34c16b10ec6fe10b429df7bf15f920";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 
