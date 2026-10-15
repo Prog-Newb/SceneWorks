@@ -1231,7 +1231,7 @@ group.leader = stale
 group.anchors = (stale,)
 group.retained = {stale}
 class Finished:
-    def poll(self): return 0
+    returncode = 0
     def wait(self, timeout=None): return 0
 group.child = Finished()
 module.group_identities = lambda pgid: (_ for _ in ()).throw(AssertionError("blind PGID census"))

@@ -694,52 +694,56 @@ class OwnedGroup:
     def group_is_owned(self) -> bool:
         """Whether signalling the numeric PGID can only reach this launch's group.
 
-        While the sentinel is running its PID stays allocated, so no new group can take that ID —
-        no census is needed. Once it has exited (`poll` reaps it), only a live exact-identity
-        anchor proves it.
+        Until this monitor reaps the sentinel — running or a zombie — its PID stays allocated, so
+        no new group can take that ID and no census is needed. `terminate` never reaps before its
+        signals. Once reaped, only a live exact-identity anchor proves it.
         """
-        if self.child.poll() is None:
+        if self.child.returncode is None:
             return True
         try:
             return any(identity_is_live(anchor) for anchor in self.anchors)
         except TELEMETRY_SOURCE_ERRORS:
             return False
 
+    def signal_group(self, sig: signal.Signals) -> None:
+        try:
+            os.killpg(self.pgid, sig)
+        # Darwin answers EPERM for a group whose only member is the exited, not-yet-reaped
+        # sentinel. Anything genuinely left alive fails the survivor check below.
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    @staticmethod
+    def signal_each(identities: list[Identity] | None, sig: signal.Signals) -> None:
+        # Only census-verified identities are signalled one by one; an unverified PID may have been
+        # reissued to an unrelated process.
+        for identity in identities or []:
+            try:
+                os.kill(identity.pid, sig)
+            except ProcessLookupError:
+                pass
+
     def terminate(self, grace: float) -> None:
         if hasattr(self, "control") and not self.released:
             self.control.close()
             self.released = True
-        live = self.census_or_none()
+        # An owned group is signalled by PGID with no census first: a hung `ps` must not delay
+        # the stop it is part of.
         if self.group_is_owned():
-            try:
-                os.killpg(self.pgid, signal.SIGTERM)
-            # Darwin answers EPERM for a group whose only member is the exited, not-yet-reaped
-            # sentinel. Anything genuinely left alive fails the survivor check below.
-            except (ProcessLookupError, PermissionError):
-                pass
+            self.signal_group(signal.SIGTERM)
         else:
-            for identity in live or []:
-                try:
-                    os.kill(identity.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
+            self.signal_each(self.census_or_none(), signal.SIGTERM)
         deadline = time.monotonic() + grace
-        while time.monotonic() < deadline and live != []:
-            time.sleep(0.02)
+        while time.monotonic() < deadline:
             live = self.census_or_none()
-        live = self.census_or_none()
+            # An unavailable census ends the grace early: waiting on telemetry that cannot answer
+            # only postpones the SIGKILL.
+            if not live:
+                break
+            time.sleep(0.02)
         if self.group_is_owned():
-            try:
-                os.killpg(self.pgid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-        # Only census-verified identities are signalled one by one; an unverified PID may have been
-        # reissued to an unrelated process.
-        for identity in live or []:
-            try:
-                os.kill(identity.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            self.signal_group(signal.SIGKILL)
+        self.signal_each(self.census_or_none(), signal.SIGKILL)
         try:
             self.child.wait(timeout=2)
         except subprocess.TimeoutExpired as error:
