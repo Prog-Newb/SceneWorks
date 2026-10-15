@@ -2711,12 +2711,11 @@ async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_m
 /// heartbeat/cancel polls — neither of which needs a real job row, because the poll interval never
 /// elapses inside a sub-second transcode.
 ///
-/// **The id is a parameter because it is the scratch directory's name.** The resolver stages every
-/// reference under `<temp>/sw-reference-audio-<job id>-<index>` and REMOVES that directory on every
-/// exit, so two tests sharing one id delete each other's work mid-transcode and read each other's
-/// `reference.wav` — which is exactly what the two resolver tests did to each other when the
-/// sc-24070 one reused this snapshot verbatim. One id per test keeps them independent under
-/// `cargo test`'s default parallelism.
+/// The id is a parameter so each test is legibly its own job. The resolver's scratch directory
+/// used to be named by the id alone, so two tests (or two test PROCESSES on one host — sc-25777,
+/// two Windows CI runners sharing `%TEMP%`) sharing one id deleted each other's work
+/// mid-transcode; it now carries a random suffix (`reference_audio_scratch_dir`), so ids no longer
+/// need to be unique for isolation.
 fn reference_audio_job_snapshot(id: &str) -> JobSnapshot {
     serde_json::from_value(json!({
         "id": id,
