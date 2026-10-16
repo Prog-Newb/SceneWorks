@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "6bfe5f364dd2fe5727dc46e029888fe8ea4ac0b5",
+    "inferenceRevision": "91ffb4a819aa2990c652db2d881ba0b9b10126ce",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -15996,6 +15996,174 @@
     },
     {
       "provider": "qwen_image_2_1",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
       "tier": "q8",
       "mode": "character_image",
       "overlay": "lora",

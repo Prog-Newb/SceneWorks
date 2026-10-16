@@ -7,10 +7,11 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "6bfe5f364dd2fe5727dc46e029888fe8ea4ac0b5"
+      "inferenceRevision": "6bfe5f364dd2fe5727dc46e029888fe8ea4ac0b5",
+      "audioInferenceRevision": "91ffb4a819aa2990c652db2d881ba0b9b10126ce"
     },
     "mlx": {
-      "inferenceRevision": "6bfe5f364dd2fe5727dc46e029888fe8ea4ac0b5"
+      "inferenceRevision": "91ffb4a819aa2990c652db2d881ba0b9b10126ce"
     }
   },
   "models": {
@@ -175,6 +176,10 @@
       "mlx": true
     },
     "qwen_image_2_1": {
+      "candle": false,
+      "mlx": false
+    },
+    "qwen_image_2_1_turbo": {
       "candle": false,
       "mlx": false
     },

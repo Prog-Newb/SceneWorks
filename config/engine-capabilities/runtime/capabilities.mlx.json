@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "6bfe5f364dd2fe5727dc46e029888fe8ea4ac0b5",
+    "inferenceRevision": "91ffb4a819aa2990c652db2d881ba0b9b10126ce",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -39,6 +39,7 @@
     "mage_flow_turbo": "mage_flow_turbo",
     "qwen_image": "qwen_image",
     "qwen_image_2_1": "qwen_image_2_1",
+    "qwen_image_2_1_turbo": "qwen_image_2_1_turbo",
     "qwen_image_edit": "qwen_image_edit",
     "qwen_image_edit_2509": "qwen_image_edit",
     "qwen_image_edit_2511": "qwen_image_edit",
