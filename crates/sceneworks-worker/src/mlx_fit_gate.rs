@@ -3647,10 +3647,12 @@ fn evaluate_request_with_budget_using_bundle(
 /// (`derived::request_transient_budget_bytes` — the budget the generator holds a prefill render
 /// to), at the loaded tier and the rung's forced decode tile; `None` for every other provider.
 ///
-/// sc-25909: the cached-path fit check compares this against the activation a reference
-/// request's rung was charged — the activation slice of the generic area-scaled headroom, on a
-/// rung whose activation term is that headroom — and prices the shortfall on top of the cache
-/// surcharge. Same 256-row conditioning assumption as the generator's own bound.
+/// sc-25909 (owner-approved E6 exception): the shed ladder compares this against the activation a
+/// reference request's rung was charged — the activation slice of the generic area-scaled
+/// headroom, on a rung whose activation term is that headroom — and prices the shortfall into
+/// every such rung's peak. Every admission that runs the shed ladder grades it: the prefill path,
+/// the cached path (corrected shed rung + cache surcharge) and the pre-load tier probe. Same
+/// 256-row conditioning assumption as the generator's own bound.
 fn mlx_prefix_kv_cache_shed_transient_bytes(
     engine_id: &str,
     tier_quant: Option<gen_core::Quant>,
@@ -3722,8 +3724,9 @@ fn select_request_with_budget_using_bundle(
     // probe grades exactly the shed demand.
     prefix_kv_cache_surcharge: Option<u64>,
     // sc-25909: the provider's own cache-shed request transient at a rung's forced decode tile
-    // (`mlx_prefix_kv_cache_shed_transient_bytes`), or `None`. Read ONLY by the cached-path fit
-    // check, never by the shed ladder.
+    // (`mlx_prefix_kv_cache_shed_transient_bytes`), or `None`. Priced into every rung whose
+    // activation term is the generic area-scaled headroom — into the shed ladder itself, so the
+    // prefill and cached paths both grade it (owner-approved E6 exception, 2026-10-16).
     prefix_kv_cache_shed_transient: &dyn Fn(Option<u32>) -> Option<u64>,
     predict_peak: impl FnOnce(u64) -> gen_core::MemoryPeakBreakdown,
     plan: &MlxRequestPlan,
@@ -4123,6 +4126,9 @@ fn select_request_with_budget_using_bundle(
         .committed_bytes
         .saturating_sub(attributable_resident_bytes);
     let predicted_peak_bytes = modeled_peak_bytes;
+    // `request_total_peak_bytes` is the generic weights+headroom total on every route except
+    // `mage_flow`, whose resident peak is the provider's own `generation_peak_gb` scalar.
+    let resident_peak_is_provider_scalar = plan.engine_id.starts_with("mage_flow");
     let (resident_selection, resident) = resident_evidence(
         contract,
         plan.tier,
@@ -4167,6 +4173,12 @@ fn select_request_with_budget_using_bundle(
     // `predicted_memory_peak_from_base`. Both now carry `None` and take the policy's documented
     // undeclared-floor arm instead of being charged a headroom they do not contain.
     let mut candidate_activation_bytes: Vec<Option<u64>> = Vec::new();
+    // Index-aligned, pushed at the same sites (sc-25909): whether the candidate's peak IS counted
+    // weights + the generic area-scaled headroom — the resident baseline on every non-`mage_flow`
+    // route and a floor estimate composed with `ImageFloorActivationTerm::GenericHeadroom`. Only
+    // those rungs take the provider-transient correction below; a measured, fitted-curve,
+    // anchor-derived, phase or law-residue rung prices its own activation.
+    let mut candidate_charges_generic_headroom: Vec<bool> = Vec::new();
     // Index-aligned with `evidence`: the Evidence path's per-candidate pre-check budget (GiB, at the
     // candidate's CAPTURED foreign reserve), so a cache-surcharged pass re-runs the same pre-check
     // at the surcharged peak. `None` where no pre-check applies (the Legacy path).
@@ -4203,6 +4215,7 @@ fn select_request_with_budget_using_bundle(
                 candidate_bases.push(crate::memory_strategy::CandidateBasis::Measured);
                 // A measured envelope is one observed number; it does not decompose.
                 candidate_activation_bytes.push(None);
+                candidate_charges_generic_headroom.push(false);
                 candidate_precheck_available_gb.push(candidate_budget.effective_gb());
             }
         }
@@ -4247,6 +4260,7 @@ fn select_request_with_budget_using_bundle(
         evidence.reserve(capacity);
         candidate_bases.reserve(capacity);
         candidate_activation_bytes.reserve(capacity);
+        candidate_charges_generic_headroom.reserve(capacity);
         candidate_precheck_available_gb.resize(capacity, None);
         selections.push(resident_selection);
         evidence.push(&resident);
@@ -4265,6 +4279,7 @@ fn select_request_with_budget_using_bundle(
         // not contain. `None` takes the policy's undeclared-floor arm, whose doc says the fix for
         // a lane that wants better is to declare a real split, not to widen a number.
         candidate_activation_bytes.push(None);
+        candidate_charges_generic_headroom.push(!resident_peak_is_provider_scalar);
         selections.extend(additional_evidence.iter().map(|item| MemorySelection {
             strategy: item.key.strategy,
             parameters: item.key.parameters,
@@ -4273,30 +4288,97 @@ fn select_request_with_budget_using_bundle(
         evidence.extend(additional_evidence);
         candidate_bases.extend(additional_evidence.iter().map(|_| CandidateBasis::Measured));
         candidate_activation_bytes.extend(additional_evidence.iter().map(|_| None));
+        candidate_charges_generic_headroom.extend(additional_evidence.iter().map(|_| false));
         for estimate in synthesized_estimates {
             selections.push(estimate.selection);
             evidence.push(&estimate.evidence);
             candidate_bases.push(estimate.basis);
             candidate_activation_bytes.push(estimate.unmodeled_activation_bytes);
+            candidate_charges_generic_headroom
+                .push(estimate.activation_term == Some(ImageFloorActivationTerm::GenericHeadroom));
         }
     }
     debug_assert_eq!(evidence.len(), candidate_bases.len());
     debug_assert_eq!(evidence.len(), candidate_activation_bytes.len());
+    debug_assert_eq!(evidence.len(), candidate_charges_generic_headroom.len());
+    // sc-25909 — OWNER-APPROVED E6 EXCEPTION (Michael, 2026-10-16): a reference request on a rung
+    // whose activation term is the generic area-scaled headroom is priced by the provider's own
+    // cache-shed request transient (`derived::request_transient_budget_bytes`, the bound the
+    // generator holds the render to) wherever that exceeds the headroom's activation slice. At
+    // <=1024^2 with many references on a packed tier (the q8/q4 DiT computes in f32) the generic
+    // figure ignores reference count and dtype width and under-prices the render, so the rung's
+    // priced activation becomes max(generic activation slice, derived transient) + the fixed
+    // reserve. This deliberately grades the SHED ladder — prefill path, cached path and the
+    // pre-load tier probe alike — so a request admitted before the epic may now shed to a further
+    // rung or be refused with the ordinary "needs … GiB" reason. The correction itself never
+    // changes the tier, the references or the size. Its tier consequence is the EXISTING one: a
+    // request with no explicit tier pick whose requested tier no longer fits the probe goes through
+    // the pre-existing downtier ladder (`downtier_candidate_tiers` / `choose_mlx_request_tier`,
+    // bounded by `min_quality_floor`), exactly as any other over-budget request does; an explicit
+    // tier pick is refused.
+    // The generic headroom carries the held-back fixed OS/app reserve, which is not activation, so
+    // only its activation slice is compared (as the floor arm's `unmodeled_activation_bytes` does).
+    // Where the derived transient is at or under that slice (bf16, no references) the shortfall is
+    // zero and the request is graded byte for byte as before.
+    let generic_headroom_shortfall = |rung: &MemorySelection| -> u64 {
+        if admission.path != AdmissionPath::Legacy || geometry.reference_count == 0 {
+            return 0;
+        }
+        let forced_tile_edge = contract
+            .engages_selection(rung, MemoryStrategy::BoundedDecode)
+            .then_some(rung.parameters.decode_tile_edge)
+            .flatten();
+        let generic_activation_bytes = plan
+            .generic_headroom_bytes(geometry)
+            .saturating_sub(plan.fixed_reserve_bytes.min(plan.activation_headroom_bytes));
+        prefix_kv_cache_shed_transient(forced_tile_edge).map_or(0, |transient| {
+            transient.saturating_sub(generic_activation_bytes)
+        })
+    };
+    let corrected_evidence = selections
+        .iter()
+        .zip(&evidence)
+        .zip(&candidate_charges_generic_headroom)
+        .map(|((selection, evidence), charges_generic_headroom)| {
+            let shortfall = if *charges_generic_headroom {
+                generic_headroom_shortfall(selection)
+            } else {
+                0
+            };
+            (shortfall > 0).then(|| {
+                let mut corrected = (*evidence).clone();
+                corrected.predicted_peak_bytes =
+                    corrected.predicted_peak_bytes.saturating_add(shortfall);
+                (corrected, shortfall)
+            })
+        })
+        .collect::<Vec<_>>();
     let candidates = selections
         .iter()
         .zip(evidence)
         .zip(&candidate_bases)
         .zip(&candidate_activation_bytes)
-        .map(|(((selection, evidence), basis), activation)| Candidate {
-            selection: *selection,
-            evidence,
-            basis: *basis,
-            // sc-22508: carried from the site that BUILT each peak (see
-            // `candidate_activation_bytes`), never inferred from the basis label here. A
-            // `CandidateBasis::EstimateFloor` label says how much evidence stands behind a
-            // number; it does not say the number is `weights + generic_headroom_bytes`.
-            unmodeled_activation_bytes: *activation,
-        })
+        .zip(&corrected_evidence)
+        .map(
+            |((((selection, evidence), basis), activation), corrected)| Candidate {
+                selection: *selection,
+                evidence: corrected
+                    .as_ref()
+                    .map_or(evidence, |(corrected, _)| corrected),
+                basis: *basis,
+                // sc-22508: carried from the site that BUILT each peak (see
+                // `candidate_activation_bytes`), never inferred from the basis label here. A
+                // `CandidateBasis::EstimateFloor` label says how much evidence stands behind a
+                // number; it does not say the number is `weights + generic_headroom_bytes`.
+                // sc-25909: a corrected rung's activation carries its shortfall too.
+                unmodeled_activation_bytes: match corrected {
+                    Some((_, shortfall)) => {
+                        activation.map(|bytes| bytes.saturating_add(*shortfall))
+                    }
+                    None => *activation,
+                },
+            },
+        )
         .collect::<Vec<_>>();
     let request_scope = RequestScope {
         resolved_route: plan.engine_id,
@@ -4461,44 +4543,6 @@ fn select_request_with_budget_using_bundle(
         };
         outcome
     };
-    // sc-25909: the provider's own cache-shed request transient over the activation a reference
-    // request's rung was charged. Only a rung whose activation term IS the generic area-scaled
-    // headroom qualifies — the resident baseline (`request_total_peak_bytes` is the generic
-    // weights+headroom total on every non-`mage_flow` route) and a weights+headroom floor estimate
-    // composed with `ImageFloorActivationTerm::GenericHeadroom`. A measured, fitted-curve,
-    // anchor-derived, phase or law-residue rung prices its own activation, so subtracting the
-    // generic figure from the provider transient would compare unlike terms; it gets no correction.
-    // The generic headroom carries the held-back fixed OS/app reserve, which is not activation, so
-    // only its activation slice is compared (as the floor arm's `unmodeled_activation_bytes` does).
-    // Where the provider's transient exceeds it — ≤1024², many references, a packed tier — the
-    // cache is priced over that shortfall too. Only the cached-path check sees it: the rung and the
-    // admit/refuse outcome are the shed pass's.
-    let transient_shortfall = |rung: &MemorySelection| -> u64 {
-        if admission.path != AdmissionPath::Legacy || geometry.reference_count == 0 {
-            return 0;
-        }
-        let charges_generic_headroom = (*rung == resident_selection
-            && !plan.engine_id.starts_with("mage_flow"))
-            || synthesized_estimates
-                .iter()
-                .find(|estimate| estimate.selection == *rung)
-                .is_some_and(|estimate| {
-                    estimate.activation_term == Some(ImageFloorActivationTerm::GenericHeadroom)
-                });
-        if !charges_generic_headroom {
-            return 0;
-        }
-        let forced_tile_edge = contract
-            .engages_selection(rung, MemoryStrategy::BoundedDecode)
-            .then_some(rung.parameters.decode_tile_edge)
-            .flatten();
-        let generic_activation_bytes = plan
-            .generic_headroom_bytes(geometry)
-            .saturating_sub(plan.fixed_reserve_bytes.min(plan.activation_headroom_bytes));
-        prefix_kv_cache_shed_transient(forced_tile_edge).map_or(0, |transient| {
-            transient.saturating_sub(generic_activation_bytes)
-        })
-    };
     let ((selection, grant_outcome), prefix_kv_cache) =
         crate::execution_planner::plan_prefix_kv_cache(
             prefix_kv_cache_surcharge,
@@ -4511,28 +4555,16 @@ fn select_request_with_budget_using_bundle(
                 else {
                     return None;
                 };
-                let (cached, _) = run_ladder(
-                    priced_bytes.saturating_add(transient_shortfall(rung)),
-                    Some(*rung),
-                );
+                // The rung's peak already carries its sc-25909 transient shortfall (corrected
+                // above), so the cached path is that graded shed rung + the cache surcharge.
+                let (cached, _) = run_ladder(priced_bytes, Some(*rung));
                 // The shed pass's warm-policy outcome stands: it decided the rung.
                 matches!(&cached, Selection::Selected { selection, .. } if selection == rung)
                     .then_some((cached, *grant_outcome))
             },
         );
-    // The demand a cached selection was graded at on top of its shed peak: the provider's own cache
-    // figure plus the sc-25909 transient shortfall. `priced_bytes` stays the cache alone.
-    let prefix_kv_cache_extra = match (&selection, prefix_kv_cache) {
-        (
-            Selection::Selected {
-                selection: rung, ..
-            },
-            Some(plan),
-        ) if plan.mode.is_cached() => plan
-            .admitted_surcharge_bytes()
-            .saturating_add(transient_shortfall(rung)),
-        (_, plan) => plan.map_or(0, |plan| plan.admitted_surcharge_bytes()),
-    };
+    // The demand a cached selection was graded at on top of its (corrected) shed peak.
+    let prefix_kv_cache_extra = prefix_kv_cache.map_or(0, |plan| plan.admitted_surcharge_bytes());
     warm_policy.settle_with_selection(
         grant_outcome.unwrap_or(crate::execution_planner::GrantOutcome::AlreadyStaged),
     );
@@ -4655,18 +4687,25 @@ fn select_request_with_budget_using_bundle(
         process_limit_bytes = Some(budget.total_bytes.saturating_sub(reserve));
         selected_record_id = Some(candidate.record_id.clone());
         evidence.predicted_peak_bytes
-    } else if let Some(estimate) = synthesized_estimates.iter().find(|estimate| {
-        estimate.selection.strategy == selection.strategy
-            && estimate.selection.parameters == selection.parameters
-            && estimate.selection.tier == selection.tier
-    }) {
-        // Keep the selected full peak paired with the normalized budget used by selection.
-        estimate.evidence.predicted_peak_bytes
+    } else if selection == resident_selection
+        || synthesized_estimates
+            .iter()
+            .any(|estimate| estimate.selection == selection)
+    {
+        // Keep the selected full peak paired with the normalized budget used by selection: the
+        // peak of the candidate the ladder GRADED (the same lookup `selected_basis` uses), which
+        // carries its sc-25909 transient shortfall where the rung took one — one source of truth.
+        candidates
+            .iter()
+            .find(|candidate| candidate.selection == selection)
+            .map_or(predicted_peak_bytes, |candidate| {
+                candidate.evidence.predicted_peak_bytes
+            })
     } else {
         predicted_peak_bytes
     };
-    // The demand the admission approved: a cached selection was graded at shed + surcharge +
-    // transient shortfall (`prefix_kv_cache_extra`).
+    // The demand the admission approved: a cached selection was graded at its (corrected) shed
+    // peak + the cache surcharge (`prefix_kv_cache_extra`).
     let predicted_peak_bytes = predicted_peak_bytes.saturating_add(prefix_kv_cache_extra);
     tracing::info!(
         event = if phase == MlxAdmissionPhase::TierProbe {
@@ -4830,14 +4869,36 @@ pub(crate) fn preflight_request(
         .map_err(|error| {
             crate::classify_engine_error("MLX pre-load memory contract failed", error)
         })?;
+    preflight_request_with_contract(contract.as_ref(), spec.offload_policy, plan, inputs, budget)
+}
+
+/// [`preflight_request`] once the registry contract is resolved — split out so the tier probe's
+/// pricing is testable against a fixture contract without a `LoadSpec` or the linked registry.
+#[cfg(target_os = "macos")]
+fn preflight_request_with_contract(
+    contract: Option<&MemoryProviderContract>,
+    load_policy: OffloadPolicy,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    budget: MemoryBudget,
+) -> WorkerResult<MlxRequestAdmission> {
     select_request_with_budget_using_bundle(
         MlxAdmissionPhase::TierProbe,
         declared_component_floors(plan.engine_id),
-        contract.as_ref(),
+        contract,
         None,
-        &|_| None,
+        // sc-25909: the probe grades exactly the shed demand, which now carries the provider
+        // transient shortfall — a tier the loaded gate would refuse is not probed as fitting.
+        &|forced_tile_edge| {
+            mlx_prefix_kv_cache_shed_transient_bytes(
+                plan.engine_id,
+                plan.tier.quant,
+                inputs,
+                forced_tile_edge,
+            )
+        },
         |base| {
-            contract.as_ref().map_or(
+            contract.map_or(
                 gen_core::MemoryPeakBreakdown::from_unattributed(base),
                 |contract| contract.predicted_peak_from_base(base),
             )
@@ -4845,7 +4906,7 @@ pub(crate) fn preflight_request(
         plan,
         inputs,
         MemoryCacheState::Cold,
-        spec.offload_policy,
+        load_policy,
         crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
         budget,
         request_total_peak_bytes(plan, request_geometry(inputs)),
@@ -17849,58 +17910,103 @@ mod tests {
     /// sc-25909, through the PRODUCTION pricing site with the LINKED Qwen-Image 2.1 descriptors: a
     /// reference request's rungs carry the generic area-scaled headroom as their activation, which
     /// at ≤1024² with many references on a packed tier is BELOW the provider's own cache-shed
-    /// transient (`derived::request_transient_budget_bytes`). The cached-path fit check adds that
-    /// shortfall on top of the cache surcharge, so the cache is not taken on a budget where it only
-    /// fits against the generic figure — and nothing else moves.
+    /// transient (`derived::request_transient_budget_bytes`). OWNER-APPROVED E6 EXCEPTION
+    /// (2026-10-16): the shed ladder itself — prefill and cached paths alike — now grades each such
+    /// rung at max(generic activation slice, derived transient) + the fixed reserve, so a request
+    /// admitted before the fix may shed to a further rung or be refused. The correction itself never
+    /// changes the tier, the references or the size; a request with no explicit tier pick whose
+    /// requested tier no longer fits the (corrected) tier probe goes through the pre-existing
+    /// downtier ladder (`downtier_candidate_tiers`, bounded by `min_quality_floor`), and an explicit
+    /// tier pick is refused — that ladder is not exercised here.
     ///
-    /// Every budget on a scan from roomy to over-full is admitted three ways: the shed demand (no
-    /// cache priced — today's pre-cache admission), the cache priced WITHOUT the correction, and the
-    /// production site (with it). At every budget:
+    /// Every budget on a scan from roomy to over-full is admitted three ways: the pre-fix shed
+    /// admission (no transient seam — exactly the pre-fix ladder), the corrected shed admission (the
+    /// seam, no cache), and the production site (seam + cache). The pre-load tier probe
+    /// (`preflight_request_with_contract`, the production probe past its registry lookup) is also
+    /// run at every budget, with and without the seam. At every budget:
     ///
-    /// * AC2: the admit/refuse outcome and the rung are identical in all three (the correction
-    ///   never touches the shed ladder), and a production `Prefill` is the shed admission byte for
-    ///   byte;
-    /// * AC1: a production `Cached` is also an uncorrected `Cached` (the correction only demotes);
-    ///   on a packed tier a band exists — at least as wide as the shortfall — where the uncorrected
-    ///   check caches and production runs prefill, and a roomy budget still caches;
-    /// * AC2: where the provider's transient is under the generic figure (bf16 at ten references,
-    ///   any tier with no reference) production is the uncorrected admission byte for byte.
+    /// * (a) q8/q4 at ten references: the corrected admission never admits what the pre-fix one
+    ///   refused; on the fixture weights (3 GiB, all transformer — every rung floors alike) a band
+    ///   exists where pre-fix admitted and the corrected ladder refuses (`newly_refused`); on
+    ///   Qwen-shaped weights (20 GiB DiT + 8 GiB text encoder, `StagedResidency` implemented) a band
+    ///   also exists where both admit but the corrected ladder sheds to a FURTHER rung
+    ///   (`shed_further`); every refusal is the existing "needs … GiB for the complete pipeline"
+    ///   reason. The cache is asserted taken only on the fixture-weights scan;
+    /// * (probe) the tier probe's admit/refuse equals the loaded gate's at every budget, and a band
+    ///   exists where the pre-fix probe (`&|_| None`) admits a tier the corrected probe refuses;
+    /// * (b) where the provider's transient is under the generic slice (bf16 at ten references, q4
+    ///   with no reference) production is the pre-fix admission byte for byte, refusals included;
+    /// * (c) production runs the corrected shed rung; a `Prefill` is the corrected shed admission
+    ///   byte for byte, and a `Cached` records `predicted_peak_bytes` = corrected shed peak + cache
+    ///   surcharge — the figure it was graded at, with the shortfall counted once; the corrected
+    ///   shed peak of a rung the pre-fix ladder also ran is that peak + the rung's own shortfall.
     ///
-    /// * a production `Cached` records the demand it was graded at — shed peak + cache + shortfall —
-    ///   as its `context.predicted_peak_bytes`.
+    /// (d) measured / anchor-derived / fitted-curve / law-residue rungs are NOT reached by this
+    /// fixture: production passes no additional evidence, the qwen reference route has no packaged
+    /// cells (so no `Evidence` path) and reference geometry skips the anchor, law and phase arms.
+    /// Their exclusion is structural (`candidate_charges_generic_headroom` is `false` for them).
     ///
-    /// *Mutations that red this:* dropping the correction from the cached check (the demoted band
-    /// disappears); subtracting the WHOLE generic headroom, fixed reserve included (the band
-    /// narrows below the shortfall); adding it to the shed ladder (the shed and production outcomes
-    /// diverge); dropping the shortfall from the recorded demand.
+    /// *Mutations that red this:* dropping the shed-ladder correction (no tightened band; the
+    /// corrected-peak equality); keeping the old cached-only correction as well (the cached peak
+    /// equality); charging the whole derived transient instead of its shortfall (the bf16 / no-ref
+    /// byte identity); dropping the probe's seam (probe/gate disagreement); recording a peak other
+    /// than the graded candidate's (the corrected-peak and cached-peak equalities).
     #[cfg(target_os = "macos")]
     #[test]
-    fn mlx_prefix_kv_cache_fit_prices_the_provider_transient_above_the_generic_headroom() {
+    fn mlx_prefix_kv_cache_shed_ladder_prices_the_provider_transient_above_the_generic_headroom() {
         use gen_core::Generator as _;
+        /// Per-scan tallies. `shed_further`: both ladders admit, on different rungs.
+        /// `newly_refused`: the pre-fix ladder admits, the corrected one refuses. `probe_tightened`:
+        /// the pre-fix tier probe admits, the corrected probe refuses.
+        #[derive(Debug, Default)]
+        struct ScanCounts {
+            cached: u32,
+            shed_further: u32,
+            newly_refused: u32,
+            refused: u32,
+            probe_tightened: u32,
+        }
         const STEP_GIB: f64 = 1.0;
         const TOTAL_GIB: f64 = 96.0;
+        const EXISTING_REFUSAL: &str = "for the complete pipeline but only";
         let scan = |engine_id: &'static str,
                     quant: Option<gen_core::Quant>,
                     reference_count: u32,
-                    expect_correction: bool| {
+                    expect_correction: bool,
+                    realistic_weights: bool| {
             let descriptor = crate::inference_runtime::media_descriptor(engine_id)
                 .expect("the linked MLX registry carries the Qwen-Image 2.1 ids");
             let mut generator = RequestGenerator {
                 descriptor,
                 ..fixture_generator()
             };
-            generator
-                .contract
-                .as_mut()
-                .expect("fixture contract")
-                .provider_id = engine_id.to_owned();
+            let fixture_contract = generator.contract.as_mut().expect("fixture contract");
+            fixture_contract.provider_id = engine_id.to_owned();
+            if realistic_weights {
+                // Qwen-Image 2.1-shaped residency: a ~20 GiB DiT, an ~8 GiB text encoder and a
+                // small VAE. `StagedResidency` (implemented on the fixture) drops the text encoder
+                // from the denoise-phase floor, so the staged rung sits ~8 GiB under resident.
+                fixture_contract.asset_facts = gen_core::MemoryAssetFacts {
+                    base_bytes: gib_to_bytes(28.5),
+                    conditioning_bytes: gib_to_bytes(8.0),
+                    transformer_bytes: gib_to_bytes(20.0),
+                    decoder_bytes: gib_to_bytes(0.5),
+                    overlay_bytes: 0,
+                };
+            }
             let generator = generator;
+            let contract = generator
+                .memory_strategy_contract()
+                .expect("fixture contract");
             let mut plan = MlxRequestPlan {
                 engine_id,
                 calibration: MlxCalibrationConfig::Absent,
                 ..fixture_plan()
             };
             plan.tier.quant = quant;
+            if realistic_weights {
+                plan.asset_bytes = gib_to_bytes(28.5);
+            }
             // The production generic figure: 2 GiB fixed reserve + 14 GiB at 1024².
             plan.activation_headroom_bytes = gib_to_bytes(16.0);
             plan.fixed_reserve_bytes = gib_to_bytes(2.0);
@@ -17915,11 +18021,26 @@ mod tests {
             // The ACTIVATION slice of the generic headroom: its fixed OS/app reserve is held back,
             // not available to the render.
             let generic = plan.generic_headroom_bytes(geometry) - plan.fixed_reserve_bytes;
-            let derived = mlx_prefix_kv_cache_shed_transient_bytes(engine_id, quant, &inputs, None)
-                .expect("the provider prices its cache-shed transient");
-            let shortfall = derived.saturating_sub(generic);
+            let transient = |forced_tile_edge: Option<u32>| {
+                mlx_prefix_kv_cache_shed_transient_bytes(
+                    engine_id,
+                    quant,
+                    &inputs,
+                    forced_tile_edge,
+                )
+            };
+            let shortfall_of = |rung: &MemorySelection| {
+                let tile = contract
+                    .engages_selection(rung, MemoryStrategy::BoundedDecode)
+                    .then_some(rung.parameters.decode_tile_edge)
+                    .flatten();
+                transient(tile)
+                    .expect("the provider prices its cache-shed transient")
+                    .saturating_sub(generic)
+            };
+            let derived = transient(None).expect("the provider prices its cache-shed transient");
             assert_eq!(
-                shortfall > 0,
+                derived > generic,
                 expect_correction,
                 "{engine_id} {quant:?} refs {reference_count}: derived {:.2} GiB vs generic {:.2} GiB",
                 derived as f64 / BYTES_PER_GIB,
@@ -17942,13 +18063,15 @@ mod tests {
                 reclaimable_bytes: 0,
                 reserved_headroom_bytes: gib_to_bytes(2.0),
             };
-            let uncorrected = |committed: u64, surcharge: Option<u64>| {
+            let select = |committed: u64,
+                          surcharge: Option<u64>,
+                          seam: &dyn Fn(Option<u32>) -> Option<u64>| {
                 select_request_with_budget_using_bundle(
                     MlxAdmissionPhase::Generation,
                     generator.descriptor.capabilities.component_precision_floors,
                     generator.memory_strategy_contract(),
                     surcharge,
-                    &|_| None,
+                    seam,
                     |base| generator.predicted_memory_peak_from_base(base),
                     &plan,
                     &inputs,
@@ -17979,105 +18102,314 @@ mod tests {
                 Ok(evaluation) => MlxRequestAdmission::Admitted(Box::new(evaluation)),
                 Err(error) => MlxRequestAdmission::Rejected(error),
             };
-            let (mut cached, mut demoted, mut refused) = (0u32, 0u32, 0u32);
+            let render = |admission: &MlxRequestAdmission| match admission {
+                MlxRequestAdmission::Admitted(evaluation) => format!("{evaluation:?}"),
+                MlxRequestAdmission::Rejected(error) => error.to_string(),
+            };
+            // The pre-load tier probe (`preflight_request` past its registry lookup) and the loaded
+            // gate it stands in for, on the same budget and the same (probe-shaped, zero external
+            // baseline) attribution. `uncorrected_probe` is the probe as it was before the fix.
+            let probe_total_peak = request_total_peak_bytes(&plan, geometry);
+            let probe = |committed: u64| {
+                preflight_request_with_contract(
+                    generator.memory_strategy_contract(),
+                    OffloadPolicy::Resident,
+                    &plan,
+                    &inputs,
+                    budget(committed),
+                )
+                .expect("structurally admissible")
+            };
+            let uncorrected_probe = |committed: u64| {
+                select_request_with_budget_using_bundle(
+                    MlxAdmissionPhase::TierProbe,
+                    declared_component_floors(plan.engine_id),
+                    generator.memory_strategy_contract(),
+                    None,
+                    &|_| None,
+                    |base| generator.predicted_memory_peak_from_base(base),
+                    &plan,
+                    &inputs,
+                    MemoryCacheState::Cold,
+                    OffloadPolicy::Resident,
+                    crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
+                    budget(committed),
+                    probe_total_peak,
+                    0,
+                    &[],
+                    None,
+                )
+                .expect("structurally admissible")
+            };
+            let loaded_gate = |committed: u64| {
+                evaluate_request_with_budget_using_bundle(
+                    &generator,
+                    &plan,
+                    &inputs,
+                    MemoryCacheState::Cold,
+                    OffloadPolicy::Resident,
+                    crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
+                    budget(committed),
+                    probe_total_peak,
+                    0,
+                    &[],
+                    None,
+                )
+                .is_ok()
+            };
+            let mut counts = ScanCounts::default();
             for step in 0..=(TOTAL_GIB / STEP_GIB) as u64 {
                 let committed = gib_to_bytes(STEP_GIB) * step;
-                match (
-                    uncorrected(committed, None),
-                    uncorrected(committed, Some(surcharge)),
-                    production(committed),
-                ) {
+                let probe_admits = matches!(probe(committed), MlxRequestAdmission::Admitted(_));
+                assert_eq!(
+                    probe_admits,
+                    loaded_gate(committed),
+                    "{engine_id} {quant:?} refs {reference_count}: the tier probe and the loaded \
+                     gate agree on admit/refuse (at {committed})"
+                );
+                if !probe_admits
+                    && matches!(
+                        uncorrected_probe(committed),
+                        MlxRequestAdmission::Admitted(_)
+                    )
+                {
+                    counts.probe_tightened += 1;
+                }
+                let pre_fix_shed = select(committed, None, &|_| None);
+                let corrected_shed = select(committed, None, &transient);
+                let produced = production(committed);
+                if !expect_correction {
+                    // (b): no shortfall, so the seam changes nothing at all.
+                    assert_eq!(
+                        render(&produced),
+                        render(&select(committed, Some(surcharge), &|_| None)),
+                        "{engine_id} {quant:?} refs {reference_count}: production is the pre-fix \
+                         admission byte for byte (at {committed})"
+                    );
+                    assert_eq!(render(&corrected_shed), render(&pre_fix_shed));
+                }
+                match (&pre_fix_shed, &corrected_shed, &produced) {
                     (
-                        MlxRequestAdmission::Rejected(shed),
-                        MlxRequestAdmission::Rejected(priced),
+                        _,
                         MlxRequestAdmission::Rejected(corrected),
+                        MlxRequestAdmission::Rejected(error),
                     ) => {
-                        assert_eq!(priced.to_string(), shed.to_string());
-                        assert_eq!(corrected.to_string(), shed.to_string());
-                        refused += 1;
+                        assert_eq!(error.to_string(), corrected.to_string());
+                        assert!(
+                            error.to_string().contains(EXISTING_REFUSAL),
+                            "an existing refusal reason (at {committed}): {error}"
+                        );
+                        if matches!(pre_fix_shed, MlxRequestAdmission::Admitted(_)) {
+                            counts.newly_refused += 1;
+                        }
+                        counts.refused += 1;
+                    }
+                    (MlxRequestAdmission::Rejected(error), MlxRequestAdmission::Admitted(_), _) => {
+                        panic!(
+                        "{engine_id} {quant:?}: the correction admitted what the pre-fix ladder \
+                         refused at {committed}: {error}"
+                    )
                     }
                     (
+                        MlxRequestAdmission::Admitted(pre),
                         MlxRequestAdmission::Admitted(shed),
-                        MlxRequestAdmission::Admitted(priced),
                         MlxRequestAdmission::Admitted(corrected),
                     ) => {
-                        assert_eq!(priced.context.selection, shed.context.selection);
                         assert_eq!(
                             corrected.context.selection, shed.context.selection,
-                            "the correction never moves the rung (at {committed})"
+                            "production runs the corrected shed rung (at {committed})"
                         );
-                        let mode = |evaluation: &MlxRequestEvaluation| {
-                            evaluation
-                                .prefix_kv_cache
-                                .expect("a priced request records its plan")
-                                .mode
-                        };
-                        if !expect_correction {
+                        if pre.context.selection == shed.context.selection {
                             assert_eq!(
-                                format!("{corrected:?}"),
-                                format!("{priced:?}"),
-                                "no shortfall: production is the uncorrected admission"
+                                shed.context.predicted_peak_bytes,
+                                pre.context.predicted_peak_bytes
+                                    + shortfall_of(&shed.context.selection),
+                                "the rung is graded at its own shortfall once (at {committed})"
+                            );
+                        } else {
+                            // Both admitted on a different rung: the corrected ladder shed further.
+                            counts.shed_further += 1;
+                        }
+                        let decision = corrected
+                            .prefix_kv_cache
+                            .expect("a priced request records its plan");
+                        if shortfall_of(&shed.context.selection) > 0 {
+                            // (c) the cache is taken exactly when the corrected shed rung + the
+                            // surcharge fits: a seam that also carries the surcharge prices this
+                            // rung at exactly that figure (and never cheapens an earlier rung), so
+                            // its ladder lands on the same rung iff the cached pass does.
+                            let shed_plus_cache = select(committed, None, &|tile| {
+                                transient(tile).map(|bytes| bytes + surcharge)
+                            });
+                            assert_eq!(
+                                decision.mode == gen_core::PrefixKvCacheMode::Cached,
+                                matches!(&shed_plus_cache, MlxRequestAdmission::Admitted(rung)
+                                    if rung.context.selection == shed.context.selection),
+                                "cached iff the corrected shed rung + the cache fits (at \
+                                 {committed})"
                             );
                         }
-                        match (mode(&priced), mode(&corrected)) {
-                            (_, gen_core::PrefixKvCacheMode::Cached) => {
-                                assert_eq!(
-                                    mode(&priced),
-                                    gen_core::PrefixKvCacheMode::Cached,
-                                    "the correction only ever demotes (at {committed})"
-                                );
-                                // The approved demand a cached evaluation records is the shed
-                                // peak + the cache + the shortfall it was graded at.
+                        match decision.mode {
+                            gen_core::PrefixKvCacheMode::Cached => {
                                 assert_eq!(
                                     corrected.context.predicted_peak_bytes,
-                                    shed.context.predicted_peak_bytes + surcharge + shortfall,
-                                    "a cached selection records the demand it was graded at \
-                                     (at {committed})"
+                                    shed.context.predicted_peak_bytes + surcharge,
+                                    "a cached selection records the corrected shed peak + the \
+                                     cache it was graded at (at {committed})"
                                 );
-                                cached += 1;
+                                counts.cached += 1;
                             }
-                            (cached_or_not, gen_core::PrefixKvCacheMode::Prefill) => {
+                            gen_core::PrefixKvCacheMode::Prefill => {
                                 assert_eq!(
                                     format!("{:?}", (&corrected.memory, &corrected.context)),
                                     format!("{:?}", (&shed.memory, &shed.context)),
-                                    "a production prefill is the shed admission byte for byte"
+                                    "a production prefill is the corrected shed admission byte \
+                                     for byte (at {committed})"
                                 );
-                                if cached_or_not == gen_core::PrefixKvCacheMode::Cached {
-                                    demoted += 1;
-                                }
                             }
                         }
                     }
                     _ => panic!(
-                        "{engine_id} {quant:?}: admit/refuse diverged at {committed} between the \
-                         shed, uncorrected and corrected admissions"
+                        "{engine_id} {quant:?}: production and the corrected shed ladder disagree \
+                         on admit/refuse at {committed}"
                     ),
                 }
             }
-            (cached, demoted, refused, shortfall)
+            counts
         };
         for engine_id in ["qwen_image_2_1", "qwen_image_2_1_turbo"] {
             for quant in [gen_core::Quant::Q8, gen_core::Quant::Q4] {
-                let (cached, demoted, refused, shortfall) = scan(engine_id, Some(quant), 10, true);
+                // Fixture weights (3 GiB, all transformer): every rung floors alike, so no rung can
+                // absorb the shortfall — the correction only ever refuses here.
+                let counts = scan(engine_id, Some(quant), 10, true, false);
                 assert!(
-                    cached > 0 && demoted > 0 && refused > 0,
-                    "{engine_id} {quant:?}: cached={cached} demoted={demoted} refused={refused}"
+                    counts.cached > 0
+                        && counts.newly_refused > 0
+                        && counts.refused > 0
+                        && counts.probe_tightened > 0,
+                    "{engine_id} {quant:?}: {counts:?}"
                 );
+                // Realistic weights: the staged rung sits a text encoder under resident, so a band
+                // exists where the corrected ladder admits on a FURTHER rung instead of refusing.
+                let counts = scan(engine_id, Some(quant), 10, true, true);
                 assert!(
-                    f64::from(demoted + 1) * STEP_GIB >= shortfall as f64 / BYTES_PER_GIB,
-                    "{engine_id} {quant:?}: the demoted band ({demoted} steps) is at least the \
-                     {:.2} GiB shortfall",
-                    shortfall as f64 / BYTES_PER_GIB
+                    counts.shed_further > 0
+                        && counts.newly_refused > 0
+                        && counts.probe_tightened > 0,
+                    "{engine_id} {quant:?} realistic weights: {counts:?}"
                 );
             }
             for (quant, refs) in [(None, 10), (Some(gen_core::Quant::Q4), 0)] {
-                let (cached, demoted, _, _) = scan(engine_id, quant, refs, false);
+                let counts = scan(engine_id, quant, refs, false, false);
                 assert!(
-                    cached > 0 && demoted == 0,
-                    "{engine_id} {quant:?} refs {refs}"
+                    counts.cached > 0
+                        && counts.shed_further == 0
+                        && counts.newly_refused == 0
+                        && counts.probe_tightened == 0,
+                    "{engine_id} {quant:?} refs {refs}: {counts:?}"
                 );
             }
         }
+    }
+
+    /// sc-25909: each rung's correction is the provider transient AT THAT RUNG'S forced decode tile.
+    /// A synthetic seam prices every untiled rung far over budget and the fixture's 512-px
+    /// `BoundedDecode` tile at `generic + EXTRA`, so only a rung that engages bounded decode with
+    /// `decode_tile_edge = Some(512)` can be admitted, and its graded (and recorded) peak is the
+    /// same rung's zero-shortfall peak + exactly `transient(Some(512)) − generic`; the zero-shortfall
+    /// peak is pinned to the fixture's weights + generic headroom floor.
+    ///
+    /// *Mutations that red this:* passing `None` as the forced tile edge (every rung is refused);
+    /// recording any peak other than the graded candidate's (the pinned floor, or the `+ EXTRA`).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mlx_shed_transient_correction_prices_each_rung_at_its_own_forced_decode_tile() {
+        use gen_core::Generator as _;
+        const TILE: u32 = 512;
+        let engine_id = "qwen_image_2_1";
+        let descriptor = crate::inference_runtime::media_descriptor(engine_id)
+            .expect("the linked MLX registry carries the Qwen-Image 2.1 ids");
+        let mut generator = RequestGenerator {
+            descriptor,
+            ..fixture_generator()
+        };
+        generator
+            .contract
+            .as_mut()
+            .expect("fixture contract")
+            .provider_id = engine_id.to_owned();
+        let generator = generator;
+        let contract = generator
+            .memory_strategy_contract()
+            .expect("fixture contract");
+        let mut plan = MlxRequestPlan {
+            engine_id,
+            calibration: MlxCalibrationConfig::Absent,
+            ..fixture_plan()
+        };
+        plan.tier.quant = Some(gen_core::Quant::Q8);
+        plan.activation_headroom_bytes = gib_to_bytes(16.0);
+        plan.fixed_reserve_bytes = gib_to_bytes(2.0);
+        let plan = plan;
+        let inputs = MlxRequestInputs {
+            reference_count: 10,
+            has_reference: true,
+            ..fixture_inputs(1024, 1024)
+        };
+        let geometry = request_geometry(&inputs);
+        let generic = plan.generic_headroom_bytes(geometry) - plan.fixed_reserve_bytes;
+        let extra = gib_to_bytes(1.0);
+        let over_budget = gib_to_bytes(1024.0);
+        let select = |tiled_transient: u64| {
+            select_request_with_budget_using_bundle(
+                MlxAdmissionPhase::Generation,
+                generator.descriptor.capabilities.component_precision_floors,
+                Some(contract),
+                None,
+                &|forced_tile_edge| {
+                    Some(if forced_tile_edge == Some(TILE) {
+                        tiled_transient
+                    } else {
+                        over_budget
+                    })
+                },
+                |base| generator.predicted_memory_peak_from_base(base),
+                &plan,
+                &inputs,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
+                fixture_budget(96.0),
+                plan.generic_total_peak_bytes(geometry),
+                0,
+                &[],
+                None,
+            )
+            .expect("structurally admissible")
+            .into_evaluation()
+            .expect("the tiled rung is admitted")
+        };
+        let at_generic = select(generic);
+        let corrected = select(generic + extra);
+        let rung = corrected.context.selection;
+        assert!(
+            contract.engages_selection(&rung, MemoryStrategy::BoundedDecode)
+                && rung.parameters.decode_tile_edge == Some(TILE),
+            "only the rung tiled at {TILE} px escapes the untiled pricing: {rung:?}"
+        );
+        assert_eq!(at_generic.context.selection, rung);
+        // The recorded peak is the GRADED candidate's: the fixture's 3 GiB (all transformer — no
+        // rung sheds weights) + the generic headroom, with no correction at a zero shortfall.
+        assert_eq!(
+            at_generic.context.predicted_peak_bytes,
+            contract.asset_facts.base_bytes + plan.generic_headroom_bytes(geometry),
+            "a zero-shortfall rung records its weights + generic headroom floor"
+        );
+        assert_eq!(
+            corrected.context.predicted_peak_bytes,
+            at_generic.context.predicted_peak_bytes + extra,
+            "the tiled rung is charged transient(Some({TILE})) − generic, not the untiled figure"
+        );
     }
 
     #[test]
