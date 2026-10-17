@@ -36,8 +36,8 @@ ARG CARGO_BUILD_JOBS
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
-# Cargo resolves the GTK3 safety patch even for server-only builds.
-COPY vendor/glib-0.18.5 ./vendor/glib-0.18.5
+# Cargo resolves all workspace patches even for server-only builds.
+COPY vendor ./vendor
 COPY .cargo/config.toml ./.cargo/config.toml
 COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
 COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
@@ -219,8 +219,8 @@ WORKDIR /app
 # entrypoints, then `cargo fetch` so the candle dependency tree (candle-gen +
 # candle/cudarc, all public git deps) caches independently of source edits.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
-# Cargo resolves the GTK3 safety patch even for server-only builds.
-COPY vendor/glib-0.18.5 ./vendor/glib-0.18.5
+# Cargo resolves all workspace patches even for server-only builds.
+COPY vendor ./vendor
 COPY .cargo/config.toml ./.cargo/config.toml
 COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
 COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
