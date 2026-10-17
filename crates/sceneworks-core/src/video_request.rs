@@ -17,6 +17,8 @@
 
 use serde_json::Value;
 
+pub use crate::h3_veda::{requested_h3_veda, H3VedaBudget, H3VedaSettings};
+
 use crate::contracts::JsonObject;
 // The memory-ladder rung vocabulary (sc-18814). `sceneworks-core` already owns this enum — the
 // worker's `memory_strategy` bridges it to gen-core's `MemoryStrategy` — so the video gate can
@@ -405,6 +407,18 @@ impl VideoRequest {
             advanced: object_or_empty(payload, "advanced"),
             model_manifest_entry,
         }
+    }
+
+    /// Shared API/worker controls, bounded by the actual selected H3 schedule.
+    pub fn h3_veda_settings(&self) -> Result<Option<H3VedaSettings>, String> {
+        if !self.advanced.contains_key("veda") {
+            return Ok(None);
+        }
+        let recipe = crate::minimax_h3_turbo::resolve_turbo_recipe(&self.model, &self.loras)?;
+        let steps = requested_steps(&self.advanced)
+            .or_else(|| recipe.map(|r| r.steps))
+            .unwrap_or(50);
+        requested_h3_veda(&self.model, &self.advanced, steps)
     }
 
     /// Raw frame count from `duration * fps` (Python `round(duration * fps)`), at
@@ -870,8 +884,9 @@ pub fn image_dimension_error(
     // those models have always accepted, including stored recipes and workflow replays (a 1000x1000
     // Mage-Flow render is not a multiple of 16).
     //
-    // Gating on the envelope keeps the new refusal to models that declared one — today only
-    // `qwen_image_2_1` — while leaving the Mage family exactly as it was. It is also the honest
+    // Gating on the envelope keeps the new refusal to models that declared one — today the
+    // Qwen-Image 2.1 family (`qwen_image_2_1`, `qwen_image_2_1_turbo`) — while leaving the Mage
+    // family exactly as it was. It is also the honest
     // reading: a bare stride was authored as advice to a snapping control, whereas a declared
     // min/max/stride triple is a model stating its whole request contract.
     let grid = envelope

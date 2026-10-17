@@ -674,6 +674,88 @@ fn generation_metrics_upsert_get_list_and_merge() {
 /// *materialized* it as. The failure this pins is a stats row that says `nvfp4` and leaves a reader
 /// to assume the run executed NVFP4 natively when it took the dense BF16 fallback.
 #[test]
+fn veda_metrics_survive_partial_updates_retention_and_later_job_isolation() {
+    let db = temp_db("veda-metrics");
+    let path = db.path();
+    let store = JobsStore::new(path.clone());
+    store.initialize().unwrap();
+    let connection = Connection::open(&path).unwrap();
+    for id in ["sparse-run", "dense-run", "later-run"] {
+        connection.execute("insert into jobs (id,type,status,payload_json,created_at,updated_at,completed_at)
+            values (?1,'video_generate','completed','{}','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')", [id]).unwrap();
+    }
+    let sparse = json!({"effective":"sparse","kernel":"actual-native-kernel","plan":"trained",
+        "planMatch":"nearest","totalAttentionFraction":0.4375});
+    let dense = json!({"effective":"dense","totalAttentionFraction":1.0,"fallbackReason":"missing predictor"});
+    for (id, outcome) in [("sparse-run", sparse.clone()), ("dense-run", dense.clone())] {
+        store
+            .upsert_generation_metrics(
+                id,
+                &GenerationMetrics {
+                    veda_execution: Some(outcome.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .upsert_generation_metrics(
+                id,
+                &GenerationMetrics {
+                    total_ms: Some(1234),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get_generation_metrics(id)
+                .unwrap()
+                .unwrap()
+                .veda_execution,
+            Some(outcome)
+        );
+    }
+    store
+        .upsert_generation_metrics("later-run", &GenerationMetrics::default())
+        .unwrap();
+    assert!(store
+        .get_generation_metrics("later-run")
+        .unwrap()
+        .unwrap()
+        .veda_execution
+        .is_none());
+    store
+        .purge_terminal_jobs_completed_before("2021-01-01T00:00:00Z")
+        .unwrap();
+    let rows = store
+        .list_generation_metrics(None, None, None, 100)
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.job_id == "sparse-run")
+            .unwrap()
+            .metrics
+            .veda_execution,
+        Some(sparse)
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.job_id == "dense-run")
+            .unwrap()
+            .metrics
+            .veda_execution,
+        Some(dense)
+    );
+    assert!(rows
+        .iter()
+        .find(|r| r.job_id == "later-run")
+        .unwrap()
+        .metrics
+        .veda_execution
+        .is_none());
+}
+
+#[test]
 fn generation_metrics_separate_source_codec_from_execution_representation() {
     let db = temp_db("gen-metrics-facts");
     let path = db.path();
@@ -698,6 +780,9 @@ fn generation_metrics_separate_source_codec_from_execution_representation() {
     let dense = GenerationMetrics {
         model: Some("kreamania-v7".to_owned()),
         quant_label: Some("nvfp4".to_owned()),
+        veda_execution: Some(
+            json!({"effective":"dense","fallbackReason":"forced self-test failure","totalAttentionFraction":1.0}),
+        ),
         source_codec: Some("nvfp4-v1".to_owned()),
         execution_representation: Some("dense-fallback".to_owned()),
         backend: Some("cuda".to_owned()),
@@ -771,6 +856,10 @@ fn generation_metrics_separate_source_codec_from_execution_representation() {
     );
     assert_eq!(row.metrics.model.as_deref(), Some("kreamania-v7"));
     assert_eq!(row.metrics.total_ms, Some(1234));
+    assert_eq!(
+        row.metrics.veda_execution.as_ref().unwrap()["effective"],
+        "dense"
+    );
 }
 
 /// The same separation, on a database that EXISTED before the two columns did — the only shape in
@@ -915,6 +1004,7 @@ fn generation_metrics_history_upgrade_case(label: &str, with_image_count: bool) 
             &GenerationMetrics {
                 model: Some("kreamania-v7".to_owned()),
                 quant_label: Some("nvfp4".to_owned()),
+                veda_execution: Some(json!({"effective":"dense","fallbackReason":"forced self-test failure","totalAttentionFraction":1.0})),
                 source_codec: Some("nvfp4-v1".to_owned()),
                 execution_representation: Some("dense-fallback".to_owned()),
                 image_count: Some(3),
@@ -951,6 +1041,14 @@ fn generation_metrics_history_upgrade_case(label: &str, with_image_count: bool) 
     assert_eq!(row.metrics.model.as_deref(), Some("kreamania-v7"));
     assert_eq!(row.metrics.quant_label.as_deref(), Some("nvfp4"));
     assert_eq!(row.metrics.total_ms, Some(4321));
+    assert_eq!(
+        row.metrics.veda_execution.as_ref().unwrap()["effective"],
+        "dense"
+    );
+    assert_eq!(
+        row.metrics.veda_execution.as_ref().unwrap()["fallbackReason"],
+        "forced self-test failure"
+    );
     assert_eq!(
         row.metrics.image_count,
         Some(3),
@@ -9368,4 +9466,44 @@ fn resume_checkpoint_step_survives_later_results_and_an_interrupt() {
     assert_eq!(job.status, JobStatus::Interrupted);
     assert_eq!(job.result.get("resumeCheckpointStep"), Some(&json!(100)));
     assert_eq!(job.result.get("other"), Some(&json!(true)));
+}
+
+/// sc-25907 (epic 25899 E3): a Qwen Image 2.1 TURBO image job — plain text-to-image and an ordered
+/// reference edit — is claimed by an MLX worker and by a Candle worker, through the store's real
+/// claim path, exactly as a base 2.1 job is.
+///
+/// *Mutation that reds this:* dropping `qwen_image_2_1_turbo` from `IMAGE_MODEL_CAPS` (both lanes
+/// stop claiming), from the MLX match arm (the MLX claim fails), or from the Candle
+/// `QwenImage21Edit` route (the conditioned Candle claim fails).
+#[test]
+fn qwen_image_2_1_turbo_image_jobs_are_claimed_by_the_mlx_and_the_candle_worker() {
+    let payloads = [
+        json!({ "model": "qwen_image_2_1_turbo", "prompt": "a lighthouse at dusk" }),
+        json!({
+            "model": "qwen_image_2_1_turbo",
+            "mode": "edit_image",
+            "prompt": "make the sky violet",
+            "sourceAssetId": "asset_source",
+            "referenceAssetIds": ["asset_source", "asset_style"]
+        }),
+    ];
+    for (index, payload) in payloads.iter().enumerate() {
+        for native in ["mlx", "candle"] {
+            let store = store(&format!("qwen-2-1-turbo-claim-{native}-{index}"));
+            let job = store
+                .create_job(image_job_with(payload.clone(), "auto"))
+                .expect("job creates");
+            let worker = format!("worker-{native}");
+            if native == "mlx" {
+                register_gpu_worker(&store, &worker, "mlx", image_caps());
+            } else {
+                register_candle_worker(&store, &worker);
+            }
+            let claimed = store
+                .claim_next_job(&worker)
+                .unwrap_or_else(|error| panic!("{worker} claim ok: {error:?}"))
+                .unwrap_or_else(|| panic!("{worker} must claim Turbo job {index}"));
+            assert_eq!(claimed.id, job.id, "{worker}/{index}");
+        }
+    }
 }

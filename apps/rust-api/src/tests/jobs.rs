@@ -16053,6 +16053,156 @@ async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job
     }
 }
 
+#[tokio::test]
+async fn h3_veda_api_preserves_complete_controls_and_refuses_malformed_or_incompatible_requests() {
+    let _hf_cache = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let (app, project_id) = shipped_manifest_app(&temp).await;
+    // This test selects the shipped Turbo LoRA. Seed a small, structurally valid adapter at its
+    // immutable manifest source so the real installed-file and receipt/hash checks run without
+    // depending on whichever models happen to be cached on the machine running the test.
+    let builtin_path = temp.path().join("config/manifests/builtin.loras.jsonc");
+    let builtin: Value = serde_json::from_str(&strip_jsonc_comments(
+        &std::fs::read_to_string(&builtin_path).unwrap(),
+    ))
+    .unwrap();
+    let turbo = builtin["loras"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == "minimax_h3_turbo_8step")
+        .unwrap();
+    let source = &turbo["source"];
+    let (repo, revision, filename) = (
+        source["repo"].as_str().unwrap(),
+        source["revision"].as_str().unwrap(),
+        source["file"].as_str().unwrap(),
+    );
+    let data_dir = temp.path().join("data");
+    let snapshot = huggingface_repo_cache_path(&data_dir, repo)
+        .unwrap()
+        .join("snapshots")
+        .join(revision);
+    std::fs::create_dir_all(&snapshot).unwrap();
+    let turbo_file = snapshot.join(filename);
+    write_test_safetensors_with_keys(
+        &turbo_file,
+        &[
+            "transformer_blocks.0.attn.to_q.lora_A.default.weight".into(),
+            "transformer_blocks.0.attn.to_q.lora_B.default.weight".into(),
+        ],
+    );
+    let metadata = std::fs::metadata(&turbo_file).unwrap();
+    let modified_nanos = metadata
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_string();
+    use sha2::Digest as _;
+    let sha256 = format!(
+        "{:x}",
+        sha2::Sha256::digest(std::fs::read(&turbo_file).unwrap())
+    );
+    let receipt_dir = data_dir
+        .join("loras")
+        .join(safe_download_dir("minimax_h3_turbo_8step"));
+    std::fs::create_dir_all(&receipt_dir).unwrap();
+    std::fs::write(
+        receipt_dir.join(".sceneworks-download-complete.json"),
+        serde_json::to_vec(&json!({
+            "repo": repo,
+            "loraFileName": filename,
+            "loraFileBytes": metadata.len(),
+            "loraFileModifiedNanos": modified_nanos,
+            "loraFileSha256": sha256
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("config/manifests/user.loras.jsonc"),
+        json!({"schemaVersion":1,"loras":[{"id":"user_style","name":"H3 style","family":"minimax-h3","triggerWords":[],"compatibility":{"families":["minimax-h3"]},"source":{"provider":"local","path":"loras/h3_style.safetensors"}}]}).to_string()).unwrap();
+    std::fs::create_dir_all(temp.path().join("data/loras")).unwrap();
+    write_test_safetensors_with_keys(
+        &temp.path().join("data/loras/h3_style.safetensors"),
+        &[
+            "transformer_blocks.0.attn.to_q.lora_A.default.weight".into(),
+            "transformer_blocks.0.attn.to_q.lora_B.default.weight".into(),
+        ],
+    );
+    let controls = json!({"enabled":true,"generated":"32","reference":"0%","fullAttentionLayers":"49,2–0","fullAttentionSteps":"0;7"});
+    let payload = json!({"projectId":project_id,"model":"minimax_h3","mode":"text_to_video","prompt":"a lighthouse","loras":[{"id":"minimax_h3_turbo_8step","weight":0.8},{"id":"user_style","weight":0.4}],"advanced":{"veda":controls}});
+    let (status, created) =
+        request(app.clone(), "POST", "/api/v1/video/jobs", payload.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["payload"]["advanced"]["veda"], controls);
+    for (index, id) in ["minimax_h3_turbo_8step", "user_style"].iter().enumerate() {
+        assert_eq!(created["payload"]["loras"][index]["id"], *id);
+        assert_eq!(
+            created["payload"]["loras"][index]["weight"],
+            payload["loras"][index]["weight"]
+        );
+    }
+    let id = created["id"].as_str().unwrap();
+    for changes in [
+        json!({"model":"mochi_1"}),
+        json!({"advanced":{"veda":{"enabled":true,"generated":"0"}}}),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/duplicate"),
+            json!({"payloadChanges":changes}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["detail"].as_str().unwrap().contains("advanced.veda"),
+            "{body}"
+        );
+    }
+    for wire in [
+        json!(null),
+        json!({"enabled":"true"}),
+        json!({"enabled":false,"generated":"100%"}),
+        json!({"enabled":true,"fullAttentionLayers":"50"}),
+        json!({"enabled":true,"fullAttentionSteps":"8"}),
+        json!({"enabled":true,"reference":"1.5"}),
+    ] {
+        let mut bad = payload.clone();
+        bad["advanced"]["veda"] = wire;
+        let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["detail"].as_str().unwrap().contains("advanced.veda"),
+            "{body}"
+        );
+    }
+    let mut incompatible = payload.clone();
+    incompatible["model"] = json!("mochi_1");
+    incompatible["loras"] = json!([]);
+    let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", incompatible).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"].as_str().unwrap().contains("only supported"),
+        "{body}"
+    );
+    let mut overridden = payload.clone();
+    overridden["advanced"]["steps"] = json!(4);
+    let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", overridden).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"].as_str().unwrap().contains("outside 0..4"),
+        "{body}"
+    );
+    let mut off = payload.clone();
+    off["advanced"] = json!({});
+    let (status, body) = request(app, "POST", "/api/v1/video/jobs", off).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(body["payload"]["advanced"].get("veda").is_none());
+}
+
 /// A real 2x2 PNG for routes that only need an importable raster.
 fn depth_source_png() -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -16214,4 +16364,235 @@ async fn image_depth_route_queues_a_typed_job_and_publishes_a_depth_asset() {
             .is_some_and(|d| d.contains("already a depth map")),
         "{body}"
     );
+}
+
+/// The SHIPPED Qwen-Image 2.1 base and Turbo catalog entries (sc-25907), written as a fixture
+/// catalog so the API under test serves exactly the bytes the product ships.
+fn write_shipped_qwen_image_2_1_pair(config_dir: &std::path::Path) {
+    let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc embedded")
+            .1,
+    ))
+    .expect("builtin.models.jsonc parses");
+    let entries: Vec<Value> = shipped["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter(|model| model["id"] == "qwen_image_2_1" || model["id"] == "qwen_image_2_1_turbo")
+        .cloned()
+        .collect();
+    assert_eq!(entries.len(), 2, "both 2.1 entries ship");
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_string(&json!({ "schemaVersion": 1, "models": entries }))
+            .expect("fixture serializes"),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+}
+
+/// sc-25907 AC: `GET /api/v1/models` lists `qwen_image_2_1_turbo` with its distilled defaults
+/// (8 steps, guidance 1.0), three tier rows and the licence-acknowledgment gate; a download without
+/// the accept is refused (and queues nothing), and one with it queues the DEFAULT tier — the
+/// published q4 re-host (sc-25909), the lightest installable tier, as on base.
+///
+/// *Mutation that reds this:* dropping `requiresLicenseAcknowledgment` from the Turbo entry (the
+/// bare download is then created), copying base's 40-step default, or leaving `default` on bf16.
+#[tokio::test]
+async fn qwen_image_2_1_turbo_is_listed_with_its_defaults_tiers_and_licence_gate() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_shipped_qwen_image_2_1_pair(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let turbo = models
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1_turbo")
+        .expect("Turbo is listed")
+        .clone();
+    assert_eq!(turbo["defaults"]["steps"], 8, "{turbo}");
+    assert_eq!(turbo["defaults"]["guidanceScale"], 1.0, "{turbo}");
+    assert_eq!(turbo["requiresLicenseAcknowledgment"], true, "{turbo}");
+    let tiers: Vec<&str> = turbo["variants"]
+        .as_array()
+        .expect("variants array")
+        .iter()
+        .filter_map(|variant| variant["variant"].as_str())
+        .collect();
+    for tier in ["bf16", "q8", "q4"] {
+        assert!(tiers.contains(&tier), "{tier} row listed: {tiers:?}");
+    }
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/qwen_image_2_1_turbo/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "license_acknowledgment_required");
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array().expect("jobs array").is_empty(),
+        "a refused download queues nothing: {jobs}"
+    );
+
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/models/qwen_image_2_1_turbo/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["payload"]["repo"], "SceneWorks/qwen-image-2-1-turbo-mlx",
+        "{job}"
+    );
+    assert_eq!(
+        job["payload"]["revision"], "9095dfbbb7e3edc753fbeb6bde8b92e0cf803912",
+        "{job}"
+    );
+    assert_eq!(job["payload"]["files"], json!(["q4/*"]), "{job}");
+}
+
+/// sc-25907: `create_image_job` gates a Turbo request on Turbo's OWN declarations — the 4-step
+/// floor the terminal step sweep measured (sc-25909; base's is 2), base's 10-reference cap and
+/// base's scheduler menu — so a request below the floor is a 400 at enqueue, and one it serves is
+/// created.
+///
+/// *Mutation that reds this:* restoring the pre-sweep `hardMinSteps: 1` (the 3-step job is created)
+/// or copying base's `hardMinSteps: 2`, or dropping Turbo's `maxReferenceAssets` (the 11-reference
+/// job is created).
+#[tokio::test]
+async fn qwen_image_2_1_turbo_image_jobs_are_gated_on_turbos_declared_limits() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_shipped_qwen_image_2_1_pair(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen 2.1 Turbo Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let enqueue = |model: &'static str, extra: Value| {
+        let mut body = json!({
+            "projectId": project_id,
+            "model": model,
+            "prompt": "a lighthouse at dusk",
+            "width": 2048,
+            "height": 2048,
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().cloned().unwrap_or_default());
+        request(app.clone(), "POST", "/api/v1/image/jobs", body)
+    };
+
+    // No steps named: created, and the worker resolves the model's own default.
+    let (status, body) = enqueue("qwen_image_2_1_turbo", json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // Four steps: Turbo's floor admits it; three is below it; base refuses one by its own floor.
+    let (status, body) = enqueue(
+        "qwen_image_2_1_turbo",
+        json!({ "advanced": { "steps": 4 } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "Turbo admits 4 steps: {body}");
+    let (status, body) = enqueue(
+        "qwen_image_2_1_turbo",
+        json!({ "advanced": { "steps": 3 } }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Turbo refuses 3 steps: {body}"
+    );
+    // Refused by TURBO's own 4-step floor, not by base's (2) or a generic bound.
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("qwen_image_2_1_turbo"),
+        "names the Turbo model: {detail}"
+    );
+    assert!(
+        detail.contains("at least 4 sampling steps"),
+        "names Turbo's 4-step floor: {detail}"
+    );
+    let (status, body) = enqueue("qwen_image_2_1", json!({ "advanced": { "steps": 1 } })).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "base refuses 1 step: {body}"
+    );
+
+    // An off-menu scheduler is refused by name, as on base.
+    let (status, body) = enqueue(
+        "qwen_image_2_1_turbo",
+        json!({ "advanced": { "scheduler": "no_such_scheduler" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // Eleven ordered references exceed the 10 the engine composes.
+    let references: Vec<String> = (0..11).map(|index| format!("asset_{index}")).collect();
+    let (status, body) = enqueue(
+        "qwen_image_2_1_turbo",
+        json!({ "mode": "edit_image", "referenceAssetIds": references }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("qwen_image_2_1_turbo") && detail.contains("10"),
+        "the refusal names the model and the cap: {detail}"
+    );
+}
+
+#[test]
+fn h3_last_only_typed_video_request_is_valid_and_other_families_still_need_a_source() {
+    for (model, has_last, accepted) in [
+        ("minimax_h3", true, true),
+        ("minimax_h3", false, false),
+        ("minimax_h3_ref", true, false),
+        ("ltx_2_3", true, false),
+    ] {
+        let payload: crate::dto::VideoJobRequest = serde_json::from_value(serde_json::json!({
+            "projectId":"owned", "model":model, "mode":"image_to_video", "prompt":"A cyclist rides",
+            "lastFrameAssetId": if has_last { Some("last") } else { None },
+        }))
+        .unwrap();
+        assert_eq!(
+            crate::validate_video_job(&payload).is_ok(),
+            accepted,
+            "{model}/{has_last}"
+        );
+    }
+}
+
+#[test]
+fn h3_empty_last_frame_is_not_a_keyframe_input() {
+    for id in ["", " "] {
+        let payload: crate::dto::VideoJobRequest = serde_json::from_value(serde_json::json!({
+            "projectId":"owned", "model":"minimax_h3", "mode":"image_to_video", "prompt":"A cyclist rides", "lastFrameAssetId":id,
+        })).unwrap();
+        assert!(crate::validate_video_job(&payload).is_err());
+    }
 }

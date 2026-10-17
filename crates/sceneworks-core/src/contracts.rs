@@ -162,6 +162,9 @@ string_enum! {
         // and licence are all different from 2512's — a shared stamp would make the two
         // indistinguishable on replay.
         QwenImage21 => "qwen_image_2_1",
+        // sc-25907: the distilled Turbo checkpoint stamps its own id for the same reason — its
+        // weights are not base's, so a replayed asset must say which of the two produced it.
+        QwenImage21Turbo => "qwen_image_2_1_turbo",
         LensTurbo => "lens_turbo",
         SenseNovaU1 => "sensenova_u1",
         FluxDiffusers => "flux_diffusers",
@@ -1120,6 +1123,9 @@ pub struct JobSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationMetrics {
+    /// Provider-owned post-generation H3 attention observations; absent on historical/unadopted jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub veda_execution: Option<Value>,
     // --- resolved effective settings ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -1865,6 +1871,11 @@ pub struct ModelDownload {
     /// through the contract type rather than the `extra` bag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_id: Option<String>,
+    /// Exact identity of a pinned single-file artifact, enforced beyond HF metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_size_bytes: Option<u64>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

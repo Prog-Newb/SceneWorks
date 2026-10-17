@@ -97,7 +97,7 @@ pub(crate) async fn create_job(
             payload.job_type.as_str()
         )));
     }
-    validate_raw_job_payload(&state, &payload.job_type, &payload.payload).await?;
+    validate_raw_job_payload(&state, &payload.job_type, &mut payload.payload).await?;
     canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
     crate::model_sources::ensure_runtime_model_sources(
         &state,
@@ -865,7 +865,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
             .await?;
         }
     } else {
-        validate_raw_job_payload(state, &job_type, &merged).await?;
+        validate_raw_job_payload(state, &job_type, &mut merged).await?;
     }
     let canonical_model_entry =
         canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
@@ -896,6 +896,9 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // arrays must not be cleaned by VideoRequest's tolerant parser, and a legacy multi-ref row
         // must not bypass today's descriptor gate simply because its stored entry is rebuilt here.
         validate_video_reference_asset_ids_payload(&merged, &model_manifest_entry)?;
+        sceneworks_core::video_request::VideoRequest::from_payload(&merged)
+            .h3_veda_settings()
+            .map_err(ApiError::bad_request)?;
         crate::generation::ensure_video_model_available_on_platform(
             model_id,
             &model_manifest_entry,
@@ -1261,8 +1264,19 @@ fn dense_image_detail_error() -> ApiError {
 async fn validate_raw_job_payload(
     state: &AppState,
     job_type: &JobType,
-    payload: &JsonObject,
+    payload: &mut JsonObject,
 ) -> Result<(), ApiError> {
+    if matches!(
+        job_type,
+        JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace
+    ) {
+        sceneworks_core::video_request::VideoRequest::from_payload(payload)
+            .h3_veda_settings()
+            .map_err(ApiError::bad_request)?;
+    }
     if matches!(
         job_type,
         JobType::ImageUpscale | JobType::ImageDetail | JobType::PromptRefine
@@ -1277,6 +1291,13 @@ async fn validate_raw_job_payload(
         JobType::ModelDownload | JobType::ModelImport | JobType::ModelConvert
     ) {
         validate_payload_model_id(payload)?;
+    }
+    if matches!(job_type, JobType::ModelDownload) {
+        if let Some(identity) = sceneworks_core::managed_file::authoritative_job_identity(payload)
+            .map_err(ApiError::bad_request)?
+        {
+            identity.stamp(payload);
+        }
     }
     if matches!(job_type, JobType::ImageDepth) {
         crate::depth_jobs::validate_raw_image_depth_payload(payload)?;
@@ -1364,6 +1385,11 @@ async fn validate_raw_job_payload(
     // sc-24159: the training twin — a hand-built `lora_train`/`control_training` plan naming a
     // licence-bound target (Qwen Image 2.1) must not reach the queue around the typed route's gate.
     if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        // sc-25907: a base that is deliberately not trainable (the distilled Qwen-Image 2.1 Turbo)
+        // is a 400 that says to train on base, before any licence question is asked about it.
+        if let Some(error) = crate::training::raw_training_payload_base_error(payload) {
+            return Err(error);
+        }
         if let Some(error) = crate::training::raw_training_payload_license_error(payload) {
             return Err(error);
         }
