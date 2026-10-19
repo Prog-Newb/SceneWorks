@@ -3972,3 +3972,45 @@ fn an_unhealthy_worker_is_routed_nothing_even_with_full_capabilities() {
         );
     }
 }
+
+/// A queued `image_upscale` job; `engine = None` leaves the field absent (which means Real-ESRGAN).
+fn image_upscale_job(engine: Option<&str>) -> JobSnapshot {
+    let mut payload = json!({ "sourceAssetId": "a", "factor": 2 });
+    if let Some(engine) = engine {
+        payload["engine"] = json!(engine);
+    }
+    serde_json::from_value(json!({
+        "id": "job_iu",
+        "type": "image_upscale",
+        "status": "queued",
+        "payload": payload,
+        "result": {},
+        "requestedGpu": "auto",
+        "progress": 0,
+        "stage": "queued",
+        "message": "",
+        "attempts": 1,
+        "cancelRequested": false,
+        "createdAt": "2026-10-11T00:00:00Z",
+        "updatedAt": "2026-10-11T00:00:00Z",
+    }))
+    .expect("valid JobSnapshot")
+}
+
+#[test]
+fn rocm_worker_serves_seedvr2_upscale_only_and_cuda_candle_is_unchanged() {
+    let rocm = gpu_worker(&["gpu", "candle", "rocm", "image_upscale", "video_upscale"]);
+    let cuda = gpu_worker(&["gpu", "candle", "image_upscale", "video_upscale"]);
+    // SeedVR2 (image and video) is what the ROCm lane serves.
+    assert!(worker_supports_job(&rocm, &image_upscale_job(Some("seedvr2"))));
+    assert!(worker_supports_job(&rocm, &video_upscale_job(json!({ "sourceAssetId": "a" }))));
+    // Real-ESRGAN (explicit, or the default when no engine is sent) needs ONNX Runtime with CUDA.
+    assert!(!worker_supports_job(&rocm, &image_upscale_job(Some("real-esrgan"))));
+    assert!(!worker_supports_job(&rocm, &image_upscale_job(None)));
+    // The existing CUDA candle lane keeps admitting all of them.
+    assert!(worker_supports_job(&cuda, &image_upscale_job(Some("seedvr2"))));
+    assert!(worker_supports_job(&cuda, &image_upscale_job(Some("real-esrgan"))));
+    assert!(worker_supports_job(&cuda, &image_upscale_job(None)));
+    assert!(worker_supports_job(&cuda, &video_upscale_job(json!({ "sourceAssetId": "a" }))));
+    assert!(worker_is_rocm(&rocm) && !worker_is_rocm(&cuda));
+}

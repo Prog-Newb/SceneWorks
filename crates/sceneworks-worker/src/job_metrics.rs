@@ -176,7 +176,7 @@ impl JobMetricsProbe {
 /// summed across a batch's items (the model loads once, so load is one-time).
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(crate) struct PhaseTimer {
     start: Instant,
@@ -189,7 +189,7 @@ pub(crate) struct PhaseTimer {
 
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 impl PhaseTimer {
     pub(crate) fn new(start: Instant) -> Self {

@@ -30,7 +30,7 @@ use sceneworks_core::video_request::{
 // unused (`-D warnings`, the sc-10404 dead-code trap).
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 use sceneworks_core::contracts::GenerationMetrics;
 
@@ -70,7 +70,7 @@ mod prelude {
     pub(super) use super::{
         backend_label, cancel_requested_peek, check_cancel, faststart_mp4, fresh_asset_id,
         heartbeat, huggingface_snapshot_dir, json, now_rfc3339, resolve_video_seed, run_ffmpeg,
-        safe_download_dir, shutdown_requested, task_join_error, update_job, video_progress,
+        safe_download_dir, shutdown_requested, task_join_error, update_job, video_progress, video_progress_with_eta,
         write_poster_frame, ApiClient, AudioTrack, BTreeMap, CancelJoinGuard, DecodedVideo,
         Duration, FfmpegContext, Instant, JobSnapshot, JobStatus, JsonObject, Path, PathBuf,
         ProgressStage, ProjectStore, RgbFrame, Settings, Uuid, Value, VideoRequest, WorkerError,
@@ -82,6 +82,14 @@ mod prelude {
     ))]
     #[allow(unused_imports)]
     pub(super) use super::{classify_adapter, lora_path};
+    // ROCm lane (backend-rocm): only the backend-neutral gen_core contract types. The CUDA-only helpers in
+    // the block above (LoRA / adapter / SCAIL2 resolvers) are deliberately NOT exported here.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-rocm", not(feature = "backend-candle")))]
+    #[allow(unused_imports)]
+    pub(super) use super::{
+        AdapterSpec, CancelFlag, Conditioning, GenerationMetrics, GenerationOutput, GenerationRequest,
+        Generator, Image, LoadPhase, LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
+    };
     #[cfg(target_os = "macos")]
     #[allow(unused_imports)]
     pub(super) use super::{resolve_mlx_dense_quant, AdapterKind, MoeExpert};
@@ -108,7 +116,7 @@ use crate::image_jobs::{classify_adapter, lora_path};
 // video engine, not which contract types this module names.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 use gen_core::{
     AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Generator,
@@ -121,9 +129,14 @@ use gen_core::{AdapterKind, MoeExpert};
 // lane (sc-5494), so they are available on both the macos and windows+backend-candle builds.
 #[cfg(any(
     target_os = "macos",
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
+))]
+use gen_core::Image;
+#[cfg(any(
+    target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-use gen_core::{Image, ReplacementMode};
+use gen_core::ReplacementMode;
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1735,6 +1748,33 @@ fn video_progress(
         worker_id: None,
         extra: BTreeMap::new(),
     }
+}
+
+/// [`video_progress`] plus a projected seconds-remaining for the WHOLE job.
+///
+/// `video_progress` has always hardcoded `eta_seconds: None`, so no video job on any backend has
+/// ever reported an ETA - even though the field is carried end to end: `ProgressRequest`,
+/// `contracts`, an `eta_seconds real` column with its own validation, and `etaSeconds` on the API
+/// response. The plumbing was built and this one helper discarded the value.
+///
+/// Non-finite and negative values are dropped rather than forwarded, because `jobs_store` rejects
+/// a non-finite `etaSeconds` outright and that would fail the whole progress post - losing the
+/// message and the fraction along with it.
+#[allow(clippy::too_many_arguments)]
+fn video_progress_with_eta(
+    status: JobStatus,
+    stage: ProgressStage,
+    progress: f64,
+    message: &str,
+    result: Option<JsonObject>,
+    backend: &str,
+    eta_seconds: Option<f64>,
+) -> ProgressRequest {
+    let mut request = video_progress(status, stage, progress, message, result, backend);
+    request.eta_seconds = eta_seconds
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(number_from_f64);
+    request
 }
 
 pub(crate) mod seedvr2;

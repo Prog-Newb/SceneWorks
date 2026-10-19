@@ -1,0 +1,31 @@
+AMD / ROCm port of SceneWorks 0.8.7.
+
+Adds Radeon support as a third backend beside MLX and Candle/CUDA, selected at
+build time by the `backend-rocm` feature. Validated on an RX 7900 XTX (gfx1100)
+under Windows: SeedVR2 image and video upscaling both run on ROCm at
+15.3 s/frame for 1440p video.
+
+The CUDA and MLX lanes are unchanged. Against the 0.8.7 baseline this touches
+35 upstream files for +1018 / -161 lines, and no file is net-subtractive.
+
+Documentation:
+- docs/amd-port/README.md                 scope and prerequisites
+- docs/amd-port/PORT_MAP.md               architecture and the processing chain
+- docs/amd-port/README-AMD-TESTER.md      how to run it, and the results
+- docs/amd-port/IMPLEMENTATION-NOTES.md   the detailed account
+
+Three of the changes are NOT AMD-specific and apply to every platform:
+- a rectangular spatial tiler, a conv3d `T==1` collapse and a fused GroupNorm,
+  together 4.0x on this card, all backend-agnostic (candle-gen-seedvr2)
+- multi-window video progress, which reported 41% at 1.1% done
+- the video ETA, which existed end to end but was always null, plus a disk
+  guard that over-estimated output size by 4.1x
+
+One deliberate restriction, scoped to the new lane only: a ROCm worker serves
+SeedVR2 and refuses Real-ESRGAN and dataset_upscale, because those run through
+`ort` and there is no HIP execution provider. The refusal is in the router
+(`worker_supports_job`, gated on `worker_is_rocm`); the Mac and candle lanes
+keep every engine and capability they had.
+
+The ROCm backend inside the vendored candle fork is third-party work (17 of 25
+commits on that fork); candle is MIT / Apache-2.0.

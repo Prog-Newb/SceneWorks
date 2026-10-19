@@ -1172,6 +1172,7 @@ pub(super) async fn generate_candle_video_using(
             &request.advanced,
             input,
             load_generator,
+            None,
         )
         .await?;
         return Ok((decoded, adapter, raw_settings, replacement_status));
@@ -1290,6 +1291,7 @@ pub(super) async fn generate_candle_video_using(
         &request.advanced,
         input,
         load_generator,
+        None,
     )
     .await?;
     Ok((decoded, adapter, raw_settings, replacement_status))

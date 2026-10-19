@@ -163,19 +163,19 @@ async fn begin_training_cancel_trips_flag_and_stays_non_terminal() {
 
 #[test]
 fn seedvr2_output_bytes_scales_with_frames_and_pixels() {
-    // Raw RGB8 upper bound: 1 frame at 100×100 = 100·100·3 = 30_000 bytes.
+    // Raw RGB8 (100*100*3 = 30_000) scaled by SEEDVR2_PNG_RAW_RATIO (0.5) = 15_000 bytes.
     assert_eq!(
         crate::video_jobs::seedvr2::seedvr2_estimated_output_bytes(1, 100, 100),
-        30_000
+        15_000
     );
     // Linear in frame count and in each dimension.
     assert_eq!(
         crate::video_jobs::seedvr2::seedvr2_estimated_output_bytes(10, 100, 100),
-        300_000
+        150_000
     );
     assert_eq!(
         crate::video_jobs::seedvr2::seedvr2_estimated_output_bytes(1, 200, 100),
-        60_000
+        30_000
     );
     // A degenerate zero dimension / frame count yields zero (the guard treats that as "unknown").
     assert_eq!(

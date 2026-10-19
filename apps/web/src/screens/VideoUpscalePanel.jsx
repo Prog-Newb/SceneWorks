@@ -67,7 +67,9 @@ export function VideoUpscalePanel({
   return (
     <aside className="upscale-card" data-testid="video-upscale-panel">
       <h3>Upscale video</h3>
-      <p className="upscale-card-sub">{engine.label} · one-step super-resolution (Mac / MLX)</p>
+      {/* No backend name here: the same panel drives MLX on Mac and candle/ROCm on AMD,
+          so naming one of them is wrong on the other. */}
+      <p className="upscale-card-sub">{engine.label} · one-step super-resolution</p>
       {block ? <p className="mac-feature-block">{block.text}</p> : null}
       <VideoSourcePickerField
         assets={videoAssets}

@@ -2103,7 +2103,7 @@ pub(crate) fn detail_workflow_share(
 /// backend) so the contract is tested on every build rather than only where candle or MLX compiles.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm")),
     test
 ))]
 pub(crate) fn standalone_upscale_workflow_share(

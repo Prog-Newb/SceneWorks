@@ -1529,6 +1529,16 @@ pub(crate) fn worker_is_candle(worker: &WorkerSnapshot) -> bool {
         .any(|capability| capability.as_str() == "candle")
 }
 
+/// Does this worker serve the AMD ROCm lane (Windows, Radeon)? A ROCm worker is a candle build, so it also
+/// advertises the `candle` lane marker; the additional `rocm` marker lets the router confine it to what that
+/// lane has validated (SeedVR2 upscaling) instead of the CUDA lane's wider set.
+pub(crate) fn worker_is_rocm(worker: &WorkerSnapshot) -> bool {
+    worker
+        .capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "rocm")
+}
+
 /// Epic 5164 / sc-7817 routing — does this `lora_train` job belong on the candle (Windows/CUDA +
 /// Linux/NVIDIA) worker? The training sibling of
 /// [`image_job_is_candle_eligible`]/[`video_job_is_candle_eligible`]: the candle engine has a native

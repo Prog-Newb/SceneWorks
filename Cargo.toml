@@ -10,6 +10,10 @@ members = [
     "crates/sceneworks-memory-adapter",
     "crates/sceneworks-worker",
 ]
+# `amd/` is its own workspace (the ROCm lane, see docs/amd-port/PORT_MAP.md). Without this,
+# cargo treats its crates as members of THIS workspace and drags the ROCm dependency graph
+# into every build. Excluding it keeps a bare `cargo build` here resolving upstream candle.
+exclude = ["amd"]
 # apps/desktop (Tauri) needs platform GUI libs (WebKit/GTK on Linux) and is built
 # per-platform via `tauri build` on macOS/Windows — it is NOT shipped on Linux
 # (Docker covers Linux). Excluding it from default-members keeps bare cargo and

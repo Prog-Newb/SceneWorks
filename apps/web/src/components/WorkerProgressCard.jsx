@@ -16,6 +16,21 @@ import { deriveWorkerHardware, findWorkerForJob, liveMeters } from "../workers.j
 import { AssetMedia, AssetThumbnail, assetUrl, posterUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
 
+// Human duration for a seconds-remaining ESTIMATE. Deliberately not `formatSeconds`, which is
+// built for elapsed time: it emits `${minutes}m ${remainder}s` with no rounding, so a raw
+// `etaSeconds` float rendered "325m 33.5663848000004s" - a 20-character decimal, and "325m" for
+// what a person reads as 5h 25m. Seconds are dropped entirely because the projection carries
+// minutes of uncertainty; showing them is false precision.
+export function formatRemaining(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.round((total % 3600) / 60);
+  if (hours > 0) {
+    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  }
+  return minutes > 0 ? `${minutes}m` : "under a minute";
+}
+
 // Live-ticking elapsed seconds for in-flight jobs. Re-exported here after the
 // sc-2093 cleanup deleted the legacy JobProgress.jsx that originally housed it.
 export function useLiveJobElapsedSeconds(job) {
@@ -660,6 +675,16 @@ export function WorkerProgressCard({
   }, [worker, job.backend]);
   const meters = useMemo(() => pickMeters(job, worker), [job, worker]);
   const elapsedSeconds = useLiveJobElapsedSeconds(job);
+  // Seconds-remaining the worker projects (`etaSeconds`). Rendered beside Elapsed so a long run
+  // says how long it has LEFT, not only how long it has taken - the whole point of the worker-side
+  // ETA work. Shown only while in flight and only for a finite positive value: a terminal job's
+  // stale figure would read as work still to do, and the field is absent until the worker can
+  // project honestly (it needs two finished windows on a streaming upscale).
+  const etaNumeric = Number(job?.etaSeconds);
+  const remainingSeconds =
+    !terminalStatuses.has(job.status) && Number.isFinite(etaNumeric) && etaNumeric > 0
+      ? etaNumeric
+      : null;
 
   // Live denoise preview state (sc-16965, epic 16948). Engine-KEYED: the same model id can preview
   // on one backend and not the other, so the answer is looked up under the backend of the worker
@@ -760,6 +785,12 @@ export function WorkerProgressCard({
             <small>Elapsed:</small>
             <strong>{formatSeconds(elapsedSeconds)}</strong>
           </span>
+          {remainingSeconds != null ? (
+            <span>
+              <small>Remaining:</small>
+              <strong>{formatRemaining(remainingSeconds)}</strong>
+            </span>
+          ) : null}
         </span>
       </div>
       <ProgressBar status={job.status} progress={job.progress} />

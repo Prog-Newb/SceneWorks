@@ -1,0 +1,17 @@
+[package]
+name = "sceneworks-rocm-worker"
+version = "0.8.7"
+edition = "2024"
+publish = false
+
+[dependencies]
+sceneworks-rust-api = { path = "../../apps/rust-api", default-features = false, features = ["backend-rocm"] }
+sceneworks-worker = { path = "../../crates/sceneworks-worker", default-features = false, features = ["backend-rocm"] }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
+
+[features]
+embedded-api = ["sceneworks-rust-api/embed-web"]
+
+[[bin]]
+name = "sceneworks-api"
+path = "../../apps/rust-api/src/main.rs"

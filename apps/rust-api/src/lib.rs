@@ -544,10 +544,9 @@ fn json_rejection_response(rejection: JsonRejection) -> Response {
 /// faithfully predicts whether the worker can acquire a GPU. `Ok(())` when usable;
 /// `Err(message)` is the user-facing reason the desktop relays onto the setup screen.
 ///
-/// Exactly one of the two probes is ever live in a given build: `metal_preflight` is a
-/// no-op off-Mac, and `cuda_preflight` is a no-op on macOS and on any off-Mac build
-/// without `backend-candle`. Calling both keeps this dispatch platform-agnostic — the
-/// desktop decides *whether* to spawn the probe, not which one runs.
+/// The build selects one native device probe: Metal on macOS, ROCm when
+/// `backend-rocm` is enabled, or CUDA on a `backend-candle` build. The other
+/// probes are no-ops, so the desktop can dispatch without backend-specific linkage.
 pub fn gpu_check() -> Result<(), GpuCheckFailure> {
     if let Err(message) = sceneworks_worker::metal_preflight() {
         // Metal's contract is unchanged from sc-8411: any failure blocks startup.
@@ -556,6 +555,11 @@ pub fn gpu_check() -> Result<(), GpuCheckFailure> {
             blocking: true,
         });
     }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-rocm"))]
+    sceneworks_worker::rocm_preflight().map_err(|message| GpuCheckFailure {
+        message,
+        blocking: true,
+    })?;
     sceneworks_worker::cuda_preflight().map_err(|message| GpuCheckFailure {
         blocking: sceneworks_worker::cuda_failure_is_blocking(&message),
         message,

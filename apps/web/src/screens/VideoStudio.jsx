@@ -1398,6 +1398,27 @@ export function VideoStudio() {
   const generateDisabled = submitting || !videoValidity.ready;
   const renderLabel = mode === "replace_person" ? "Replace person" : "Render clip";
 
+  // Upscale is a post-process on an EXISTING clip, so it needs an upscaler engine
+  // (SeedVR2), not a generation model. Hoisted out of the JSX so the same element can
+  // render both in its normal home inside Advanced and, when the generation gate is
+  // closed, alongside the gate card — otherwise having no text-to-video model installed
+  // would hide a feature that does not depend on one.
+  const videoUpscalePanel = (
+    <VideoUpscalePanel
+      characters={characters}
+      createVideoUpscaleJob={createVideoUpscaleJob}
+      importAsset={importAsset}
+      macCapabilities={macCapabilities}
+      onSubmitted={(job) => {
+        onLocalJobCreated(job);
+        onOpenQueue();
+      }}
+      selectedAsset={selectedAsset}
+      projectId={activeProject?.id}
+      videoAssets={videoAssets}
+    />
+  );
+
   return (
     <ModelAvailabilityGate
       ready={modelReady}
@@ -1409,6 +1430,7 @@ export function VideoStudio() {
       onOpenModels={() => setActiveView("Models")}
       onOpenQueue={onOpenQueue}
       onCancelJob={onCancelJob}
+      aside={videoUpscalePanel}
     >
     <section className="page-frame video-studio">
       <form className="studio-shell" onSubmit={submit}>
@@ -2172,20 +2194,9 @@ export function VideoStudio() {
               ) : null}
               {/* Video upscale (super-resolve an existing clip) folds into Advanced — it
                   previously lived in the render rail this layout removes. It operates on a
-                  selected existing asset, independent of the current generation payload. */}
-              <VideoUpscalePanel
-                characters={characters}
-                createVideoUpscaleJob={createVideoUpscaleJob}
-                importAsset={importAsset}
-                macCapabilities={macCapabilities}
-                onSubmitted={(job) => {
-                  onLocalJobCreated(job);
-                  onOpenQueue();
-                }}
-                selectedAsset={selectedAsset}
-                projectId={activeProject?.id}
-                videoAssets={videoAssets}
-              />
+                  selected existing asset, independent of the current generation payload.
+                  Defined above the return so the gate can also render it when closed. */}
+              {videoUpscalePanel}
             </div>
           </AdvancedSection>
 

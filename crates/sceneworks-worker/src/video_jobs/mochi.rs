@@ -755,6 +755,7 @@ pub(super) async fn generate_mochi_using(
         &request.advanced,
         input,
         load_generator,
+        None,
     )
     .await?;
     Ok((decoded, raw_settings))

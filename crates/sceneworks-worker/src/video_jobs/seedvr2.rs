@@ -2,14 +2,14 @@
 use super::prelude::*;
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 use super::vace::rgb_image_to_engine;
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
-use super::wan::{generate_video, VideoGenInput};
+use super::wan::{generate_video_using, GenProgressWindow, VideoGenInput};
 
 // ---------------------------------------------------------------------------
 // SeedVR2 video upscale (epic 4811, sc-4816): the net-new `video_upscale` job —
@@ -22,6 +22,8 @@ use super::wan::{generate_video, VideoGenInput};
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) use runtime_cuda::providers::seedvr2::video as seedvr2_video;
+#[cfg(all(not(target_os = "macos"), feature = "backend-rocm", not(feature = "backend-candle")))]
+pub(super) use runtime_rocm::providers::seedvr2::video as seedvr2_video;
 /// The SeedVR2 provider's pure temporal-chunk planning/blend module (`video::plan_chunks`,
 /// `video::assemble_overlap`, `DEFAULT_OVERLAP`, `Chunk`), reused ONE LEVEL UP for worker-window
 /// streaming (sc-9595). Both provider crates expose an identical `video` module over `gen_core::Image`
@@ -42,39 +44,39 @@ pub(super) use runtime_macos::providers::seedvr2::video as seedvr2_video;
 /// The engine registry id wired for video upscale (3B; 7B = sc-5197 / sc-5927).
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 const SEEDVR2_ENGINE_ID: &str = "seedvr2_3b";
 /// Adapter id recorded on the result asset for provenance (mirrors the other `mlx_*` video adapters;
 /// SeedVR2 itself takes no LoRA — this is metadata only).
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 const SEEDVR2_ADAPTER: &str = "mlx_seedvr2";
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 const SEEDVR2_CANCEL_MESSAGE: &str = "Video upscale canceled by user.";
 
 /// A failed post-encode step must not leave the intermediate, silent output, or derived poster
 /// behind. The API publishes the asset only after the final completion update succeeds.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(target_os = "macos", any(feature = "backend-candle", feature = "backend-rocm"), test))]
 pub(super) async fn cleanup_failed_seedvr2_mux(media_path: &Path, mux_tmp: &Path) {
     let _ = tokio::fs::remove_file(mux_tmp).await;
     let _ = tokio::fs::remove_file(media_path).await;
     let _ = tokio::fs::remove_file(media_path.with_extension("poster.jpg")).await;
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(target_os = "macos", any(feature = "backend-candle", feature = "backend-rocm"), test))]
 pub(super) struct Seedvr2OutputGuard {
     media_path: PathBuf,
     mux_tmp: PathBuf,
     armed: bool,
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(target_os = "macos", any(feature = "backend-candle", feature = "backend-rocm"), test))]
 impl Seedvr2OutputGuard {
     pub(super) fn new(media_path: &Path, mux_tmp: &Path) -> Self {
         Self {
@@ -89,7 +91,7 @@ impl Seedvr2OutputGuard {
     }
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(target_os = "macos", any(feature = "backend-candle", feature = "backend-rocm"), test))]
 impl Drop for Seedvr2OutputGuard {
     fn drop(&mut self) {
         if self.armed {
@@ -104,7 +106,7 @@ impl Drop for Seedvr2OutputGuard {
 /// requirement), rounding to nearest and clamping to the engine's `[16, 4096]` size range.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 fn snap_seedvr2_dim(value: u32) -> u32 {
     let rounded = value.saturating_add(8) / 16 * 16;
@@ -123,35 +125,66 @@ fn snap_seedvr2_dim(value: u32) -> u32 {
 // clip that would fill the scratch volume, so the disk is not silently exhausted mid-run.
 
 /// Fraction of the scratch volume's CURRENTLY-AVAILABLE space the streamed output PNG sequence is
-/// allowed to occupy. Deliberately generous — the estimate itself uses raw RGB8 per frame (a real
-/// upper bound on PNG-compressed output), and we still leave headroom for the source frames already on
+/// allowed to occupy. Deliberately generous - the per-frame estimate carries its own
+/// [`SEEDVR2_PNG_RAW_RATIO`] headroom, and we still leave room for the source frames already on
 /// disk, the eventual encoded MP4, and everything else sharing the volume.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 const SEEDVR2_DISK_OUTPUT_FRACTION: f64 = 0.8;
 
-/// Estimated peak on-disk bytes for the streamed output: `frame_count` PNG frames at
-/// `out_w × out_h`, sized as raw RGB8 (`w·h·3`) per frame. PNG compression only ever makes the real
-/// footprint SMALLER, so this is a safe upper bound (matching the generous shape of the removed
-/// `seedvr2_estimated_host_bytes`). Pure so the estimate is unit-testable without a filesystem.
+/// Ratio of real PNG bytes to the raw RGB8 figure (`w*h*3`), applied by
+/// [`seedvr2_estimated_output_bytes`] so the guard stops refusing clips that comfortably fit.
+///
+/// Raw RGB8 was documented as "a real upper bound". It is one, but it overstates the true
+/// footprint by ~4x. Measured 2026-10-16 on a live 1920x1032 -> 3840x2064 run, aggregated over
+/// every frame then on disk (not a sample):
+///
+/// | sequence                | raw RGB8/frame | actual PNG/frame | ratio |
+/// | ----------------------- | -------------- | ---------------- | ----- |
+/// | source (decoded BluRay) |        5.67 MB |          0.72 MB | 0.127 |
+/// | output (SeedVR2 detail) |       22.68 MB |          6.16 MB | 0.272 |
+/// | combined                |       28.34 MB |          6.88 MB | 0.243 |
+///
+/// What that cost: a 95-minute 1080p -> 4K clip estimated 3.79 TiB against a real 0.92 TiB and
+/// was refused on a volume with 1.21 TiB of budget, where it would in fact have fit.
+///
+/// Set to 0.5, not the measured 0.243, deliberately. The source sequence compresses far better
+/// than the output (the model ADDS high-frequency detail), and PNG on genuinely grainy or noisy
+/// footage compresses worse than either row above - while the failure mode of being too
+/// permissive is a disk-full abort hours into a run. 0.5 keeps ~1.8x headroom over the worst
+/// component observed and still roughly doubles the clip length the guard admits.
 #[cfg(any(
     test,
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
+))]
+const SEEDVR2_PNG_RAW_RATIO: f64 = 0.5;
+
+/// Estimated peak on-disk bytes for the streamed output: `frame_count` PNG frames at
+/// `out_w x out_h`, taken as raw RGB8 (`w*h*3`) scaled by [`SEEDVR2_PNG_RAW_RATIO`] - raw RGB8
+/// alone overstates real PNG output by ~4x and refused clips that fit (see that constant). Pure
+/// so the estimate is unit-testable without a filesystem.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(crate) fn seedvr2_estimated_output_bytes(frame_count: u64, out_w: u64, out_h: u64) -> u64 {
-    let per_frame = out_w.saturating_mul(out_h).saturating_mul(3);
+    let raw_per_frame = out_w.saturating_mul(out_h).saturating_mul(3);
+    // A zero dimension stays exactly zero: the guard reads 0 as "unknown" and short-circuits.
+    let per_frame = ((raw_per_frame as f64) * SEEDVR2_PNG_RAW_RATIO) as u64;
     frame_count.saturating_mul(per_frame)
 }
 
 /// Peak scratch footprint while SeedVR2 is streaming: the native-resolution source PNG sequence and
-/// the upscaled output sequence coexist until the final encode. Both use a raw-RGB upper bound.
+/// the upscaled output sequence coexist until the final encode, both sized by
+/// [`seedvr2_estimated_output_bytes`], so both carry [`SEEDVR2_PNG_RAW_RATIO`].
 #[cfg(any(
     test,
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(crate) fn seedvr2_estimated_scratch_bytes(
     frame_count: u64,
@@ -171,7 +204,7 @@ pub(crate) fn seedvr2_estimated_scratch_bytes(
 /// fails; the caller then skips the guard rather than falsely rejecting a job.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(crate) fn available_disk_bytes(path: &Path) -> Option<u64> {
     #[cfg(unix)]
@@ -216,7 +249,7 @@ pub(crate) fn available_disk_bytes(path: &Path) -> Option<u64> {
 /// removed `check_seedvr2_host_ram` (sc-9646).
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 #[allow(dead_code)] // retained as the output-only regression seam for sc-9646/sc-13585 tests
 pub(crate) fn check_seedvr2_output_disk(
@@ -254,7 +287,7 @@ pub(crate) fn check_seedvr2_output_disk(
 
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 fn check_seedvr2_scratch_disk(
     scratch_dir: &Path,
@@ -324,7 +357,7 @@ fn check_seedvr2_scratch_disk(
 /// host footprint (≈ `64 · out_w · out_h · 3` bytes of RGB8, ~1.6 GB at 4×-of-1080p — bounded).
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) const SEEDVR2_WORKER_CHUNK_FRAMES: i32 = 64;
 
@@ -335,7 +368,7 @@ pub(super) const SEEDVR2_WORKER_CHUNK_FRAMES: i32 = 64;
 /// synthetic frames (see `seedvr2_stream_matches_whole_clip_assembly`).
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) struct Seedvr2StreamAssembler {
     /// Cross-fade overlap (frames) between adjacent worker windows — the engine's `DEFAULT_OVERLAP`.
@@ -353,7 +386,7 @@ pub(super) struct Seedvr2StreamAssembler {
 
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 impl Seedvr2StreamAssembler {
     pub(super) fn new(n: i32, ov: i32) -> Self {
@@ -424,7 +457,7 @@ impl Seedvr2StreamAssembler {
 /// components — same guard as `upscale_jobs::resolve_source`).
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 fn safe_join(project_path: &Path, rel: &str) -> Option<PathBuf> {
     let mut path = project_path.to_path_buf();
@@ -445,7 +478,7 @@ fn safe_join(project_path: &Path, rel: &str) -> Option<PathBuf> {
 /// returned paths live under a job-scoped temp dir the caller is responsible for removing.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 async fn decode_seedvr2_source_to_disk(
     api: &ApiClient,
@@ -496,7 +529,7 @@ async fn decode_seedvr2_source_to_disk(
 #[cfg(any(
     test,
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Seedvr2SourceProbe {
@@ -513,7 +546,7 @@ pub(super) struct Seedvr2SourceProbe {
 #[cfg(any(
     test,
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) fn parse_seedvr2_source_probe(stderr: &str) -> Option<Seedvr2SourceProbe> {
     let frame_count = stderr.rmatch_indices("frame=").find_map(|(idx, _)| {
@@ -544,7 +577,7 @@ pub(super) fn parse_seedvr2_source_probe(stderr: &str) -> Option<Seedvr2SourcePr
 /// the normal heartbeat/cancellation lifecycle while FFmpeg walks the source.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 async fn probe_seedvr2_source(
     api: &ApiClient,
@@ -583,7 +616,7 @@ async fn probe_seedvr2_source(
 /// PNG decode off the async runtime.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 async fn load_seedvr2_window(
     paths: &[PathBuf],
@@ -612,7 +645,7 @@ async fn load_seedvr2_window(
 /// output is byte-identical while peak host RAM stays bounded to one worker window.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 async fn append_seedvr2_frames(
     frames_dir: &Path,
@@ -664,7 +697,7 @@ async fn append_seedvr2_frames(
 #[cfg_attr(
     not(any(
         target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
+        all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
     )),
     allow(dead_code)
 )]
@@ -775,7 +808,7 @@ pub(super) async fn encode_seedvr2_stream(
 #[cfg_attr(
     not(any(
         target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
+        all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
     )),
     allow(dead_code)
 )]
@@ -859,7 +892,7 @@ pub(super) fn seedvr2_workflow_metadata(
 /// (`out_frames_dir`), never held whole in RAM.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 struct Seedvr2Stream {
     /// Real output frame count (== source frame count).
@@ -881,7 +914,7 @@ struct Seedvr2Stream {
 /// avoid a redundant (harmless) second removal. `Drop` must use the sync `std::fs` API.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) struct ScratchDir {
     path: std::path::PathBuf,
@@ -890,7 +923,7 @@ pub(super) struct ScratchDir {
 
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 impl ScratchDir {
     /// Guard `path`. Does not create it — the caller populates it; the guard only guarantees removal.
@@ -907,7 +940,7 @@ impl ScratchDir {
 
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 impl Drop for ScratchDir {
     fn drop(&mut self) {
@@ -928,7 +961,7 @@ impl Drop for ScratchDir {
 /// between windows too — no long silent blocking span.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 #[allow(clippy::too_many_arguments)]
 async fn run_seedvr2_stream(
@@ -1010,7 +1043,11 @@ async fn run_seedvr2_stream(
     let mut out_h = target_h;
     let window_total = plan.len().max(1);
 
+    // Observed window throughput, for the whole-job ETA posted inside the loop.
+    let mut windows_done: u32 = 0;
+    let mut warm_secs: f64 = 0.0;
     for (window_idx, chunk) in plan.iter().enumerate() {
+        let window_start = std::time::Instant::now();
         check_cancel(api, &job.id, SEEDVR2_CANCEL_MESSAGE).await?;
         // Real frames only for this window; the engine's preprocess_chunk pads a partial tail internally.
         let start = chunk.start.max(0) as usize;
@@ -1027,16 +1064,41 @@ async fn run_seedvr2_stream(
         // Per-window progress spanning the Generating band (0.18 → 0.55) so the bar advances per window
         // even though each window's own denoise progress is reported inside `generate_video`.
         let frac = 0.18 + 0.37 * (window_idx as f64 / window_total as f64);
+        let frac_next = 0.18 + 0.37 * ((window_idx + 1) as f64 / window_total as f64);
+        // Whole-job ETA from observed window throughput. The first window is excluded from the
+        // mean: it pays engine load and, on ROCm, MIOpen's per-shape algorithm search - 321s of
+        // one 5.7-hour run. Under two finished windows there is nothing honest to project, so none
+        // is posted rather than a figure built from the cold window.
+        let eta_secs = if windows_done >= 2 {
+            let per_window = warm_secs / f64::from(windows_done - 1);
+            Some(per_window * (window_total - window_idx) as f64)
+        } else {
+            None
+        };
+        let window_msg = match eta_secs {
+            Some(eta) if eta >= 3600.0 => format!(
+                "Upscaling window {}/{window_total} - about {:.1} h left at this rate.",
+                window_idx + 1,
+                eta / 3600.0
+            ),
+            Some(eta) => format!(
+                "Upscaling window {}/{window_total} - about {:.0} min left at this rate.",
+                window_idx + 1,
+                (eta / 60.0).max(1.0)
+            ),
+            None => format!("Upscaling window {}/{window_total}.", window_idx + 1),
+        };
         update_job(
             api,
             &job.id,
-            video_progress(
+            video_progress_with_eta(
                 JobStatus::Running,
                 ProgressStage::Generating,
                 frac,
-                &format!("Upscaling window {}/{window_total}.", window_idx + 1),
+                &window_msg,
                 None,
                 backend,
+                eta_secs,
             ),
         )
         .await?;
@@ -1061,8 +1123,25 @@ async fn run_seedvr2_stream(
         };
         // SeedVR2 upscale is one-step with no per-generation sampler/scheduler knobs, so the
         // advanced block generate_video reads for those is empty here (F-118).
-        let decoded =
-            generate_video(api, settings, job, backend, &JsonObject::new(), input).await?;
+        let decoded = generate_video_using(
+            api,
+            settings,
+            job,
+            backend,
+            &JsonObject::new(),
+            input,
+            crate::inference_runtime::load,
+            // This window owns only ITS slice of the Generating band. Without the slice, the
+            // window's own denoise steps are mapped across the whole band and overwrite the
+            // correct per-window post above - a 675-window job then reads 41% at window 8.
+            Some(GenProgressWindow {
+                lo: frac,
+                hi: frac_next,
+                label: Some(format!("Upscaling window {}/{window_total}", window_idx + 1)),
+                eta: eta_secs,
+            }),
+        )
+        .await?;
         if let Some(frame) = decoded.frames.first() {
             out_w = frame.width;
             out_h = frame.height;
@@ -1081,6 +1160,14 @@ async fn run_seedvr2_stream(
         // now-finalized frames to disk.
         let finalized = assembler.push_window(chunk.start, upscaled);
         next_index = append_seedvr2_frames(out_frames_dir, next_index, finalized).await?;
+
+        // Window wall-clock feeding the ETA above. The cold first window is counted but kept OUT
+        // of the warm mean.
+        let window_wall = window_start.elapsed().as_secs_f64();
+        if windows_done >= 1 {
+            warm_secs += window_wall;
+        }
+        windows_done += 1;
     }
 
     // Flush the final tail.
@@ -1109,7 +1196,7 @@ async fn run_seedvr2_stream(
 /// factor widened to `u32` for the downstream dimension math.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) fn resolve_video_upscale_factor(factor: u8) -> WorkerResult<u32> {
     match factor {
@@ -1125,7 +1212,7 @@ pub(super) fn resolve_video_upscale_factor(factor: u8) -> WorkerResult<u32> {
 /// and stream a single upscaled video asset.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(crate) async fn run_video_upscale_job(
     api: &ApiClient,

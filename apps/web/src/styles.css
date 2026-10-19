@@ -7373,6 +7373,14 @@ details[open] > summary.lora-scope-group-heading::before,
   background: var(--surface);
 }
 
+/* A gated Studio can still carry features that do not depend on the missing model —
+   the video upscaler post-processes an existing clip via SeedVR2 and needs no
+   text-to-video model. Match the card width so the two read as one column. */
+.model-availability-gate-aside {
+  width: min(560px, 100%);
+  margin-top: 16px;
+}
+
 .model-availability-offers {
   display: grid;
   gap: 12px;

@@ -330,6 +330,55 @@ pub fn cuda_preflight() -> Result<(), String> {
     Ok(())
 }
 
+// ─── AMD ROCm preflight ──────────────────────────────────────────────────────────────────
+
+/// User-facing message for a failed ROCm probe.
+#[cfg(all(not(target_os = "macos"), feature = "backend-rocm"))]
+const ROCM_UNAVAILABLE: &str = "SceneWorks could not acquire an AMD ROCm device. \
+    Check that an AMD Radeon GPU is installed, the ROCm HIP runtime libraries are in PATH \
+    (ROCM_PATH env var must point to the SDK), and no other process holds the device.";
+
+/// AMD ROCm device preflight — the off-Mac analogue of `cuda_preflight` for the ROCm lane.
+/// Initialises HIP device 0 and runs a trivial tensor round-trip to prove the ROCm stack
+/// is live. `Ok(())` when the GPU is usable; `Err(message)` is the user-facing reason.
+////
+/// Gated to the ROCm feature; on every other build the no-op below takes over so
+/// `SCENEWORKS_GPU_CHECK` dispatch compiles everywhere.
+#[cfg(all(not(target_os = "macos"), feature = "backend-rocm"))]
+pub fn rocm_preflight() -> Result<(), String> {
+    use runtime_rocm::media::candle_core::{DType, Tensor};
+
+    let probe = || -> Result<(), String> {
+        let device = runtime_rocm::media::default_device()
+            .map_err(|e| format!("{ROCM_UNAVAILABLE}\n\nUnderlying error: {e}"))?;
+        let op = || -> Result<Vec<f32>, runtime_rocm::media::candle_core::Error> {
+            Tensor::new(&[1.0f32], &device)?
+                .to_dtype(DType::F16)?
+                .to_dtype(DType::F32)?
+                .to_vec1::<f32>()
+        };
+        op().map(|_| ())
+            .map_err(|e| format!("{ROCM_UNAVAILABLE}\n\nUnderlying error: {e}"))
+    };
+    match std::panic::catch_unwind(probe) {
+        Ok(result) => result,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .map(|t| (*t).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "no panic message".to_owned());
+            Err(format!("The AMD ROCm runtime could not be loaded: {detail}"))
+        }
+    }
+}
+
+/// No-op wherever the ROCm lane is not linked.
+#[cfg(not(all(not(target_os = "macos"), feature = "backend-rocm")))]
+pub fn rocm_preflight() -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

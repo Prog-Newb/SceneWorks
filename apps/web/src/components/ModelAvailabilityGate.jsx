@@ -17,6 +17,12 @@ import { terminalStatuses } from "../constants.js";
 //   offers         — models to offer for download (downloadOffersFor in modelEligibility.js).
 //   downloadJobs   — model_download jobs, to show progress for an in-flight offer.
 //   onDownload(model) / onOpenModels() / onOpenQueue() / onCancelJob(job) — wired from context.
+//   aside          — optional element rendered BELOW the gate card while gated. For the
+//                    parts of a Studio that do not actually need the missing model: the
+//                    Video Studio's upscaler runs on an existing clip via SeedVR2 and has
+//                    no dependency on a text-to-video model, so gating it behind one made
+//                    a working feature unreachable. Not rendered when `ready` — the body
+//                    owns it then.
 function offerSizeText(model) {
   if (!model?.downloadSizeLabel) {
     return "Size unavailable";
@@ -35,6 +41,7 @@ export function ModelAvailabilityGate({
   onOpenModels,
   onOpenQueue,
   onCancelJob,
+  aside = null,
   children,
 }) {
   if (ready) {
@@ -85,6 +92,7 @@ export function ModelAvailabilityGate({
           </button>
         ) : null}
       </div>
+      {aside ? <div className="model-availability-gate-aside">{aside}</div> : null}
     </section>
   );
 }

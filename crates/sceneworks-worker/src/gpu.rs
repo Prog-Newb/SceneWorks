@@ -33,6 +33,17 @@ pub(crate) async fn discover_gpu(settings: &Settings, health: &GpuHealth) -> Dis
         gpu.utilization = query_mlx_utilization().await;
         return gpu;
     }
+    // AMD ROCm lane: a sentinel GPU analogous to `mlx_gpu`. Triggered when the worker is
+    // built with `backend-rocm` and the requested gpu_id is "rocm" or "auto" / empty.
+    // The ROCm build never calls `discover_gpus()` (nvidia-smi) -- it returns early here.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-rocm"))]
+    if requested_gpu_id == "rocm"
+        || requested_gpu_id.is_empty()
+        || requested_gpu_id == "auto"
+    {
+        return rocm_gpu(health);
+    }
+
     let gpus = discover_gpus().await;
     let gpu = if requested_gpu_id.is_empty() || requested_gpu_id == "auto" {
         gpus.into_iter().next().unwrap_or_else(cpu_gpu)
@@ -1130,6 +1141,38 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
     DiscoveredGpu {
         id: "mlx".to_owned(),
         name: "Apple Silicon (MLX)".to_owned(),
+        capabilities,
+        utilization: None,
+    }
+}
+
+/// The AMD ROCm GPU worker (Windows, Radeon RX 7900 XTX / gfx1100+ validated).
+///
+/// Follows the same sentinel pattern as `mlx_gpu`: a pre-built `DiscoveredGpu` with an
+/// explicit capability list rather than a live hardware query. The lane marker logic mirrors
+/// `with_candle_capabilities` (sc-16260): both `candle` and `rocm` markers are kept even
+/// when unhealthy so `fail_stranded_candle_jobs` does not mass-fail queued SeedVR2 work
+/// and `isPlaceholderOnlyGpuWorker` keeps the worker visible in the Queue screen while the
+/// driver is being repaired. Actual capabilities (SeedVR2 upscale) are withheld until the
+/// ROCm probe passes.
+///
+/// SeedVR2 is the only supported upscaler on this lane: Real-ESRGAN's `ort` engine has no
+/// HIP execution provider, so `DatasetUpscale` is deliberately NOT advertised here. The Mac
+/// and candle lanes advertise it as before.
+#[cfg(all(not(target_os = "macos"), feature = "backend-rocm"))]
+pub(crate) fn rocm_gpu(health: &GpuHealth) -> DiscoveredGpu {
+    let mut capabilities = vec![WorkerCapability::Gpu];
+    // Lane markers stay regardless of health -- same rationale as the `candle` marker in
+    // `with_candle_capabilities` (see that function's doc comment for the full analysis).
+    capabilities.push(WorkerCapability::Unknown("candle".to_owned()));
+    capabilities.push(WorkerCapability::Unknown("rocm".to_owned()));
+    if health.is_usable() {
+        capabilities.push(WorkerCapability::ImageUpscale);
+        capabilities.push(WorkerCapability::VideoUpscale);
+    }
+    DiscoveredGpu {
+        id: "rocm".to_owned(),
+        name: "AMD Radeon (ROCm)".to_owned(),
         capabilities,
         utilization: None,
     }

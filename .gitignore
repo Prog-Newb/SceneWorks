@@ -299,3 +299,12 @@ build.bat
 # harness derives each record's `dirty` flag from `git status --porcelain`, which counts untracked
 # paths, and complete evidence from a dirty repository is rejected outright.
 .tmp/
+
+# --- AMD / ROCm lane (backend-rocm) ---
+# Cargo target dir for the amd/ workspace build.
+amd/target-rocm-continue/
+# Sidecar staging dir written by apps/desktop/scripts/build-sidecar.mjs and read
+# back by apps/desktop/src/setup.rs (rocm-worker/backend.txt). Build output.
+apps/desktop/rocm-worker/
+# Machine-specific ROCm paths (see set-scene-env.local.example.ps1).
+set-scene-env.local.ps1

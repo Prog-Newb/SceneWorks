@@ -32,7 +32,8 @@
     "resources": [
       "onnxruntime/**/*",
       "ffmpeg/**/*",
-      "mlx/**/*"
+      "mlx/**/*",
+      "rocm-worker/**/*"
     ],
     "icon": [
       "icons/32x32.png",

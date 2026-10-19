@@ -3908,6 +3908,15 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_candle_eligible(job) {
             return false;
         }
+        // The ROCm lane (backend-rocm) serves only SeedVR2: Real-ESRGAN's `ort` upscaler has no
+        // HIP execution provider, so a ROCm worker must not claim a Real-ESRGAN image_upscale job.
+        // Scoped to `worker_is_rocm` so the Mac and candle/CUDA lanes keep every engine they had.
+        if matches!(job.job_type, JobType::ImageUpscale)
+            && worker_is_rocm(worker)
+            && !upscale_job_requests_seedvr2(job)
+        {
+            return false;
+        }
         // Video upscale (sc-5928): the candle worker serves the net-new SeedVR2 video upscaler. A
         // non-SeedVR2 engine is refused (no other video-upscale backend exists off-Mac).
         if matches!(job.job_type, JobType::VideoUpscale)

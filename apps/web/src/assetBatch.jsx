@@ -14,7 +14,8 @@ import { BatchOperationsPanel } from "./components/BatchOperationsPanel.jsx";
 import { Modal } from "./components/Modal.jsx";
 import { useAppContextOptional } from "./context/AppContext.js";
 import { detailCapableModels, editCapableModels, UPSCALE_ENGINES } from "./imageJobs.js";
-import { DEFAULT_MAC_CAPABILITIES, macUpscaleEngineBlocked } from "./macGating.js";
+import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
+
 
 // Sentinel "Move" target (sc-8341): selecting it promotes the assets into the Main Asset
 // Library (a true move) instead of linking them to a character. Namespaced so it can't
@@ -66,7 +67,7 @@ export function useAssetBatch() {
   // and the upscale engines this platform actually supports.
   const selectedAssetList = assets.filter((asset) => selectedAssetIds.has(asset.id));
   const eligibleSelected = batchEligibleAssets(selectedAssetList);
-  const availableUpscaleEngines = UPSCALE_ENGINES.filter((engine) => !macUpscaleEngineBlocked(macCapabilities, engine.key));
+  const availableUpscaleEngines = UPSCALE_ENGINES;
   const editModels = editCapableModels(imageModels);
   const detailModels = detailCapableModels(imageModels);
   // Move targets a character's assets (true move, sc-10200) — NOT the character's

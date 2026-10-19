@@ -63,6 +63,8 @@ sceneworks-image-quality = { path = "../sceneworks-image-quality" }
 # Native Candle inference stays opt-in because CUDA toolchain/runtime requirements do not belong in
 # the ordinary desktop build. The bundle owns the complete provider and LLM composition.
 backend-candle = ["dep:runtime-cuda", "dep:candle-gen", "dep:ort"]
+# AMD ROCm is a separate, SeedVR2-only worker lane. It intentionally excludes CUDA-only providers and ONNX Runtime.
+backend-rocm = ["dep:runtime-rocm", "dep:ort"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Weights-free training contract validation. The MLX and Candle implementations intentionally
@@ -101,6 +103,8 @@ mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/ml
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 # Canonical NVIDIA inference composition; enabled only by `backend-candle`.
 runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "0e4adc6f05884e6891e29dfecd32ee695efe8b18", optional = true }
+# Local ROCm bundle is developed in the sibling inference checkout and exports the same provider surface.
+runtime-rocm = { package = "runtime-rocm", path = "../../inference-rocm/crates/bundles/runtime-rocm", optional = true }
 # The shared Candle training validator is a weights-free contract dependency. Keeping this direct
 # lets SceneWorks dry-run preflight use the exact optimizer/timestep/bias/loss parser the production
 # family trainers use instead of maintaining a second, inevitably drifting enum mirror.

@@ -904,6 +904,39 @@ fn api_sidecar_command(app: &AppHandle) -> Result<Command, String> {
         .map_err(|error| error.to_string())
 }
 
+#[cfg(target_os = "windows")]
+fn rocm_worker_enabled(app: &AppHandle) -> bool {
+    let Ok(root) = bundled_resources_dir(app) else {
+        return false;
+    };
+    std::fs::read_to_string(root.join("rocm-worker").join("backend.txt"))
+        .is_ok_and(|backend| backend.trim() == "rocm")
+}
+
+#[cfg(target_os = "windows")]
+fn apply_rocm_loader_env(mut command: Command) -> Command {
+    let mut dirs = Vec::new();
+    if let Some(path) = std::env::var_os("SCENEWORKS_ROCM_RUNTIME_BIN") {
+        dirs.push(PathBuf::from(path));
+    }
+    if let Some(path) = std::env::var_os("ROCM_PATH") {
+        dirs.push(PathBuf::from(path).join("bin"));
+    }
+    if let Some(path) = std::env::var_os("HIP_PATH") {
+        dirs.push(PathBuf::from(path).join("bin"));
+    }
+    dirs.retain(|path| path.is_dir());
+    let mut paths = dirs;
+    paths.extend(
+        std::env::var_os("PATH")
+            .map_or_else(Vec::new, |path| std::env::split_paths(&path).collect()),
+    );
+    if let Ok(path) = std::env::join_paths(paths) {
+        command = command.env("PATH", path);
+    }
+    command
+}
+
 #[cfg(not(target_os = "macos"))]
 fn api_sidecar_command(app: &AppHandle) -> Result<Command, String> {
     app.shell()
@@ -1380,7 +1413,13 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     // torch fallback (there is no torch worker left to fall back to). The candle sweeps are
     // biased to Ok, so only the true generation gaps fail; the CV-aux / segment / training
     // surfaces stay served by the candle worker.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    if !rocm_worker_enabled(app) {
+        command = command
+            .env("SCENEWORKS_CANDLE_REQUIRED", "1")
+            .env("SCENEWORKS_CANDLE_UNSUPPORTED_MODE", "enforce");
+    }
+    #[cfg(target_os = "linux")]
     {
         command = command
             .env("SCENEWORKS_CANDLE_REQUIRED", "1")
@@ -1644,6 +1683,11 @@ fn gate_window(app: AppHandle) {
                     }
                     #[cfg(any(target_os = "windows", target_os = "linux"))]
                     {
+                        #[cfg(target_os = "windows")]
+                        if rocm_worker_enabled(&app) {
+                            supervise_rocm_worker(app);
+                            return;
+                        }
                         // Epic 5483 Phase 7 (sc-5563): off-Mac is candle-only — the Python
                         // torch worker is no longer spawned (its venv + bundle were dropped),
                         // exactly as macOS went MLX-only in sc-3492. The Windows/Linux candle
@@ -2579,6 +2623,50 @@ fn supervise_candle_worker(app: AppHandle) {
             // LAN mode (epic 4484): the API now requires the password as an access
             // token, so the candle worker must send it on every API call or it'd be
             // 401'd. `None` in the default loopback mode (no-op unless LAN is on).
+            if let Some(token) = lan_access_token() {
+                command = command.env("SCENEWORKS_ACCESS_TOKEN", token);
+            }
+            Ok(command)
+        },
+    );
+}
+
+/// Spawn the separately-built AMD worker sidecar. Its binary comes from the
+/// isolated `amd/` Cargo workspace; the API process stays backend-neutral.
+#[cfg(target_os = "windows")]
+fn supervise_rocm_worker(app: AppHandle) {
+    supervise_worker(
+        app,
+        "rocm",
+        "rocm-worker-local",
+        candle_worker_slot,
+        record_candle_worker_pid,
+        |child| kill_pid(child.pid()),
+        |sidecar, ctx| {
+            let mut command = apply_rocm_loader_env(sidecar)
+                .env("SCENEWORKS_WORKER_ONLY", "1")
+                .env("SCENEWORKS_GPU_ID", "rocm")
+                .env("SCENEWORKS_WORKER_ID", ctx.worker_id)
+                .env("SCENEWORKS_API_URL", ctx.api_url)
+                .env("SCENEWORKS_PARENT_PID", std::process::id().to_string())
+                .env(
+                    "SCENEWORKS_DATA_DIR",
+                    resolved_data_dir().to_string_lossy().to_string(),
+                )
+                .env(
+                    "SCENEWORKS_CONFIG_DIR",
+                    config_dir().to_string_lossy().to_string(),
+                );
+            command = inject_huggingface_cache_env(command, ctx.hf_home);
+            if let Some(ffmpeg) = resolve_bundled_ffmpeg(ctx.app)? {
+                command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
+            }
+            if let Some(token) = crate::settings::read_hf_token()? {
+                command = command.env("HF_TOKEN", token);
+            }
+            if let Some(credentials) = crate::settings::credentials_env_json()? {
+                command = command.env("SCENEWORKS_CREDENTIALS", credentials);
+            }
             if let Some(token) = lan_access_token() {
                 command = command.env("SCENEWORKS_ACCESS_TOKEN", token);
             }
@@ -3557,6 +3645,10 @@ async fn cuda_device_preflight(app: &AppHandle) -> Result<(), String> {
     // keeps the candle lane dormant, there is no CUDA worker to protect, and a non-candle
     // sidecar's `cuda_preflight` is a no-op anyway — so skip the spawn rather than pay for a
     // process that cannot fail meaningfully.
+    #[cfg(target_os = "windows")]
+    if rocm_worker_enabled(app) {
+        return Ok(());
+    }
     if !candle_runtime_present(app) {
         return Ok(());
     }
@@ -3599,6 +3691,35 @@ async fn cuda_device_preflight(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+async fn rocm_device_preflight(app: &AppHandle) -> Result<(), String> {
+    let command = apply_rocm_loader_env(
+        app.shell()
+            .sidecar("sceneworks-api")
+            .map_err(|error| error.to_string())?
+            .env("SCENEWORKS_GPU_CHECK", "1"),
+    );
+    let output = match tokio::time::timeout(CUDA_PREFLIGHT_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => return Err(format!("Could not start the AMD ROCm preflight: {error}")),
+        Err(_) => {
+            return Err("The AMD ROCm device did not respond to SceneWorks preflight.".into());
+        }
+    };
+    if output.status.success() {
+        return Ok(());
+    }
+    let message = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if message.is_empty() {
+        Err(format!(
+            "The AMD ROCm preflight failed ({:?}).",
+            output.status.code()
+        ))
+    } else {
+        Err(message)
+    }
+}
+
 /// Record a non-blocking GPU-preflight outcome next to the candle worker's own log, which is
 /// where anyone diagnosing "why did generation fail" already looks.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -3626,9 +3747,16 @@ async fn run_startup(app: AppHandle) {
     // candle feature on the desktop crate to gate on; failing fast before a 2.7 GB
     // download is the whole point).
     #[cfg(target_os = "windows")]
-    if let Err(error) = cuda_preflight() {
-        emit(&app, "error", error, true);
-        return;
+    {
+        let result = if rocm_worker_enabled(&app) {
+            rocm_device_preflight(&app).await
+        } else {
+            cuda_preflight()
+        };
+        if let Err(error) = result {
+            emit(&app, "error", error, true);
+            return;
+        }
     }
     #[cfg(target_os = "linux")]
     if let Err(error) = linux_cuda_preflight() {
@@ -3642,18 +3770,20 @@ async fn run_startup(app: AppHandle) {
     // a version marker; emits per-component progress to the setup screen. On failure,
     // surface it and abort (same slot the removed Python-venv provisioning used).
     #[cfg(target_os = "windows")]
-    if let Err(error) = crate::cuda_provision::provision(&app).await {
-        emit(
-            &app,
-            "error",
-            format!(
-                "GPU runtime setup failed: {error}. To install on a disconnected machine, \
-                 pre-stage the runtime and set SCENEWORKS_GPU_RUNTIME_DIR — see \
-                 docs/offline-install.md."
-            ),
-            true,
-        );
-        return;
+    if !rocm_worker_enabled(&app) {
+        if let Err(error) = crate::cuda_provision::provision(&app).await {
+            emit(
+                &app,
+                "error",
+                format!(
+                    "GPU runtime setup failed: {error}. To install on a disconnected machine, \
+                     pre-stage the runtime and set SCENEWORKS_GPU_RUNTIME_DIR — see \
+                     docs/offline-install.md."
+                ),
+                true,
+            );
+            return;
+        }
     }
     #[cfg(target_os = "linux")]
     if let Err(error) = crate::linux_cuda_provision::provision(&app).await {

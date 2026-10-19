@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["worker-shim"]
+
+# Keep the AMD dependency graph independent from SceneWorks' NVIDIA/CUDA graph.
+# These patches apply only when Cargo is invoked from this workspace.
+[patch."https://github.com/huggingface/candle"]
+candle-core = { path = "../candle-rocm-test/candle/candle-core" }
+candle-nn = { path = "../candle-rocm-test/candle/candle-nn" }
+candle-transformers = { path = "../candle-rocm-test/candle/candle-transformers" }
+candle-flash-attn = { path = "../candle-rocm-test/candle/candle-flash-attn" }
+[patch."https://github.com/SceneWorks/inference"]
+sceneworks-gen-core = { path = "../inference-rocm/crates/contracts/gen-core" }
+core-llm = { path = "../inference-rocm/crates/contracts/core-llm" }
+candle-gen = { path = "../inference-rocm/crates/media/candle-gen/candle-gen" }

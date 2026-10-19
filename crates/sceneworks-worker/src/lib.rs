@@ -64,19 +64,19 @@ use uuid::Uuid;
 // Windows/Linux build it stays excluded, so its accessors are never uncalled-dead there.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod advanced;
 mod api_client;
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 mod asset_media;
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 mod image_sampling;
 // Shared one-child PNG persistence for upscale (Mac + candle) and smart-select (Mac).
@@ -86,7 +86,7 @@ mod image_sampling;
 // lane rather than only where an upscaler backend compiles. The non-test build is unchanged.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm")),
     test
 ))]
 mod single_child_asset;
@@ -644,7 +644,7 @@ mod control_training_jobs;
 // (the Mac CoreML path needs no equivalent). Shared by pose_jobs (DWPose, sc-5496) +
 // person_jobs (YOLO, sc-5498), and Real-ESRGAN (sc-5499) next — gated to the candle GPU
 // lane only.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm")))]
 mod ort_cuda;
 // SCRFD 5-point face-landmark extraction (epic 4422, sc-4433): native-MLX SCRFD on Mac, plus the
 // candle SCRFD/ArcFace stack on the Windows/Linux candle lane (sc-5497, epic 5482) — the same
@@ -663,7 +663,7 @@ mod kps_jobs;
 // lane, and SeedVR2 is backend-neutral (`crate::inference_runtime::load("seedvr2")`).
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 mod upscale_jobs;
 // YOLO11 person detection + selected-person ByteTrack tracking (epic 3482, sc-3488/sc-3633;
@@ -736,7 +736,7 @@ use kps_jobs::*;
 use pose_jobs::*;
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 use upscale_jobs::*;
 
@@ -1118,6 +1118,62 @@ fn classify_probe_outcome(probe: Result<(), String>, gpu_id: &str) -> GpuHealth 
     GpuHealth::Unusable { reason }
 }
 
+// ─── AMD ROCm health probe ────────────────────────────────────────────────────────────────
+
+/// Whether the ROCm GPU worker should run its startup probe: only a GPU worker on a
+/// backend-rocm build with a non-CPU, non-MLX gpu_id.
+#[cfg(all(not(target_os = "macos"), feature = "backend-rocm"))]
+fn should_run_rocm_preflight(settings: &Settings) -> bool {
+    settings.gpu_id != "cpu" && settings.gpu_id != "mlx"
+}
+
+/// Run the ROCm probe and classify the outcome. No logging of its own — the startup caller
+/// logs once loudly; the recheck caller stays quiet about already-reported failures.
+#[cfg(all(not(target_os = "macos"), feature = "backend-rocm"))]
+async fn probe_rocm_health(settings: &Settings) -> GpuHealth {
+    if !should_run_rocm_preflight(settings) {
+        return GpuHealth::Usable;
+    }
+    let probe = tokio::task::spawn_blocking(rocm_preflight).await;
+    let outcome = match probe {
+        Ok(result) => result,
+        Err(error) => Err(format!("the ROCm preflight probe did not complete: {error}")),
+    };
+    match outcome {
+        Ok(()) => GpuHealth::Usable,
+        // All ROCm probe failures are treated as blocking: an AMD worker has no
+        // CUDA/OOM transient path, so every non-Ok result means "HIP stack is broken".
+        Err(reason) => GpuHealth::Unusable { reason },
+    }
+}
+
+/// ROCm startup health probe — `cuda_startup_health` equivalent for the AMD lane.
+#[cfg(all(not(target_os = "macos"), feature = "backend-rocm"))]
+async fn rocm_startup_health(settings: &Settings) -> GpuHealth {
+    let health = probe_rocm_health(settings).await;
+    if let Some(reason) = health.reason() {
+        tracing::error!(
+            event = "rocm_preflight_failed",
+            gpuId = %settings.gpu_id,
+            reason = %reason,
+            "SceneWorks ROCm GPU worker cannot acquire a HIP device; generation capabilities withheld"
+        );
+    }
+    health
+}
+
+/// No-op on every build without the ROCm lane.
+#[cfg(not(all(not(target_os = "macos"), feature = "backend-rocm")))]
+async fn rocm_startup_health(_settings: &Settings) -> GpuHealth {
+    GpuHealth::Usable
+}
+
+/// No-op on every build without the ROCm lane.
+#[cfg(not(all(not(target_os = "macos"), feature = "backend-rocm")))]
+async fn probe_rocm_health(_settings: &Settings) -> GpuHealth {
+    GpuHealth::Usable
+}
+
 /// How often an UNHEALTHY worker re-runs the CUDA probe (sc-16260 AC 4).
 ///
 /// The startup probe is a single sample, so without this a host repaired underneath a running
@@ -1161,7 +1217,9 @@ async fn recheck_gpu_health(
     health: &mut GpuHealth,
 ) -> WorkerResult<()> {
     let previous = health.reason().map(str::to_owned);
-    let next = probe_cuda_health(settings).await;
+    // Re-run whichever probe is active on this build.
+    let cuda = probe_cuda_health(settings).await;
+    let next = if cuda.is_usable() { probe_rocm_health(settings).await } else { cuda };
     let reason = next.reason().map(str::to_owned);
     *health = next;
     match reason {
@@ -1221,7 +1279,12 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // verdict shape what this worker claims to be able to do. `discover_gpu` withholds the whole
     // candle capability block on an unusable GPU, so the registration below advertises only the
     // placeholder set and no generation job can route here.
-    let mut health = cuda_startup_health(&settings).await;
+    // Run the CUDA probe (no-op on ROCm builds) then the ROCm probe (no-op on CUDA builds).
+    // On each feature exactly one probe runs; the other is a compile-time no-op.
+    let mut health = {
+        let h = cuda_startup_health(&settings).await;
+        if h.is_usable() { rocm_startup_health(&settings).await } else { h }
+    };
     let gpu = discover_gpu(&settings, &health).await;
     let api = ApiClient::new(&settings);
     let http_client = crate::downloads::streaming_download_client();
@@ -1813,15 +1876,20 @@ async fn run_utility_job(
             // (native MLX on Mac sc-4815 / candle CUDA on Windows sc-5928). Available on Mac AND the
             // Windows/CUDA candle lane; on a build without either lane `ImageUpscale` is never advertised,
             // so the job remains queued. The routing oracle admits only the engines each native lane serves.
+            // The AMD ROCm lane (backend-rocm) is admitted here too, but serves SeedVR2 only: Real-ESRGAN's
+            // `ort` upscaler has no HIP execution provider, so `worker_supports_job` refuses a
+            // Real-ESRGAN image_upscale job on a ROCm worker and it stays queued.
             #[cfg(any(
                 target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
+                all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
             ))]
             JobType::ImageUpscale => run_image_upscale_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image upscale failed.", error)),
             // Dataset Doctor one-tap upscale (sc-6539): Real-ESRGAN over flagged low-res items, then
             // re-point each via the API. Same engine + worker lanes as image_upscale.
+            // NOT widened to backend-rocm: this path is Real-ESRGAN-only, and ROCm has no `ort` HIP
+            // provider, so on a ROCm build it falls to the `_` arm and the job stays queued.
             #[cfg(any(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
@@ -1843,11 +1911,13 @@ async fn run_utility_job(
             // SeedVR2 video upscaling (epic 4811): one-step super-resolution — native MLX on Mac (sc-4816)
             // / candle CUDA on Windows (sc-5928). SceneWorks' first video upscaler: decodes the source
             // clip, runs the temporal-chunked 5D upscale, re-encodes, and passes the source audio through.
-            // Available on Mac + the Windows/CUDA candle lane; elsewhere `VideoUpscale` is never advertised
-            // (no torch path), so it falls to the `_` arm and the routing oracle reports it unsupported.
+            // Available on Mac, the Windows/CUDA candle lane, AND the AMD ROCm lane (backend-rocm):
+            // `run_video_upscale_job` and the SeedVR2 provider `video` module are both widened to
+            // backend-rocm, and `rocm_gpu` advertises `VideoUpscale`. On a build with neither candle
+            // nor rocm the capability is never advertised, so it falls to the `_` arm.
             #[cfg(any(
                 target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
+                all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
             ))]
             JobType::VideoUpscale => {
                 video_jobs::seedvr2::run_video_upscale_job(api, settings, &job)

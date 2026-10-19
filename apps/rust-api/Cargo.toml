@@ -60,6 +60,9 @@ embed-web = ["dep:rust-embed", "dep:mime_guess"]
 # See crates/sceneworks-worker/Cargo.toml's `backend-candle` for the providers it
 # pulls. (sc-5559)
 backend-candle = ["sceneworks-worker/backend-candle"]
+# AMD desktop builds enable this only through the isolated amd/ workspace. That
+# workspace supplies the local Candle ROCm patches without affecting CUDA builds.
+backend-rocm = ["sceneworks-worker/backend-rocm"]
 
 [dev-dependencies]
 # Construct SQLite BUSY errors directly in the API error-contract test without

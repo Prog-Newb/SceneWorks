@@ -260,11 +260,33 @@ if (buildPlan.candle) {
     });
   }
   verifyCandleQuantFatbin(buildPlan.computeCap);
+} else if (buildPlan.rocm) {
+  run(npmCmd, ["run", "web:build"]);
+  run("cargo", [
+    "build",
+    "--manifest-path",
+    join(repoRoot, "amd", "Cargo.toml"),
+    "-p",
+    "sceneworks-rocm-worker",
+    "--bin",
+    "sceneworks-api",
+    "--features",
+    "embedded-api",
+    "--release",
+  ], { CANDLE_ROCM_ARCH: process.env.CANDLE_ROCM_ARCH || "gfx1100" });
 } else {
   run(npmCmd, ["run", buildPlan.npmScript], buildPlan.env);
 }
 
-const src = join(repoRoot, "target", "release", `sceneworks-rust-api${exe}`);
+const src = buildPlan.rocm
+  ? join(
+      repoRoot,
+      "amd",
+      "target",
+      "release",
+      `sceneworks-api${exe}`,
+    )
+  : join(repoRoot, "target", "release", `sceneworks-rust-api${exe}`);
 const outDir = join(desktopDir, "binaries");
 mkdirSync(outDir, { recursive: true });
 const dest = join(outDir, `sceneworks-api-${triple}${exe}`);
@@ -273,6 +295,19 @@ if (!exe) {
   chmodSync(dest, 0o755);
 }
 console.log(`build-sidecar: staged ${dest}`);
+
+// ROCm stays in its isolated Cargo workspace so ordinary NVIDIA builds never
+// resolve the local HIP/Candle patches. The API target above shares the normal
+// entry point and embeds the ROCm-enabled worker through the shim's feature graph.
+const rocmWorkerDir = join(desktopDir, "rocm-worker");
+mkdirSync(rocmWorkerDir, { recursive: true });
+if (buildPlan.rocm) {
+  writeFileSync(join(rocmWorkerDir, "backend.txt"), "rocm\n");
+  console.log(`build-sidecar: staged ROCm backend marker`);
+} else {
+  writeFileSync(join(rocmWorkerDir, "backend.txt"), "disabled\n");
+  console.log(`build-sidecar: ROCm worker disabled for this build`);
+}
 
 // The Rust DWPose detector (sc-3487) dlopens onnxruntime at runtime via
 // ORT_DYLIB_PATH (set in setup.rs), bundled as a Tauri resource

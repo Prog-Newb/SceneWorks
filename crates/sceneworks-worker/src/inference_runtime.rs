@@ -13,18 +13,20 @@ use gen_core::core_llm::{LoadSpec as TextLoadSpec, ModelRequirements, TextLlm, T
 use gen_core::{AudioTransform, Generator, LoadSpec, ProviderRegistry, VoiceEmbedder};
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 use gen_core::{Captioner, ImageEmbedder, ModelRegistration, TextEmbedder, Trainer};
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use runtime_cuda as platform_runtime;
+#[cfg(all(not(target_os = "macos"), feature = "backend-rocm", not(feature = "backend-candle")))]
+use runtime_rocm as platform_runtime;
 #[cfg(target_os = "macos")]
 use runtime_macos as platform_runtime;
 
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 fn catalog() -> &'static platform_runtime::RuntimeCatalog {
     static CATALOG: OnceLock<platform_runtime::RuntimeCatalog> = OnceLock::new();
@@ -43,7 +45,7 @@ fn catalog() -> &'static platform_runtime::RuntimeCatalog {
 pub(crate) fn capability_snapshot_json() -> Option<serde_json::Value> {
     #[cfg(any(
         target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
+        all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
     ))]
     {
         Some(catalog().snapshot().to_json())
@@ -51,7 +53,7 @@ pub(crate) fn capability_snapshot_json() -> Option<serde_json::Value> {
 
     #[cfg(not(any(
         target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
+        all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
     )))]
     {
         None
@@ -61,7 +63,7 @@ pub(crate) fn capability_snapshot_json() -> Option<serde_json::Value> {
 pub(crate) fn media() -> &'static ProviderRegistry {
     #[cfg(any(
         target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
+        all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
     ))]
     {
         catalog().media()
@@ -69,7 +71,7 @@ pub(crate) fn media() -> &'static ProviderRegistry {
 
     #[cfg(not(any(
         target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
+        all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
     )))]
     {
         static EMPTY: OnceLock<ProviderRegistry> = OnceLock::new();
@@ -99,7 +101,7 @@ pub(crate) fn trainer_descriptor(id: &str) -> Option<gen_core::TrainerDescriptor
 pub(crate) fn audio() -> Option<&'static ProviderRegistry> {
     #[cfg(any(
         target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
+        all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
     ))]
     {
         catalog().audio()
@@ -107,7 +109,7 @@ pub(crate) fn audio() -> Option<&'static ProviderRegistry> {
 
     #[cfg(not(any(
         target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
+        all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
     )))]
     {
         None
@@ -208,7 +210,7 @@ pub(crate) fn load_voice_embedder(
 pub(crate) fn text() -> &'static TextLlmRegistry {
     #[cfg(any(
         target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
+        all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
     ))]
     {
         catalog().text()
@@ -216,7 +218,7 @@ pub(crate) fn text() -> &'static TextLlmRegistry {
 
     #[cfg(not(any(
         target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
+        all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
     )))]
     {
         static EMPTY: OnceLock<TextLlmRegistry> = OnceLock::new();
@@ -230,7 +232,7 @@ pub(crate) fn text() -> &'static TextLlmRegistry {
 
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(crate) fn generators() -> impl ExactSizeIterator<Item = &'static ModelRegistration> {
     media().generators()
@@ -243,7 +245,7 @@ pub(crate) fn generators() -> impl ExactSizeIterator<Item = &'static ModelRegist
 /// every current media descriptor advertises `&[]`, so the seam that reads this is a no-op today.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(crate) fn media_descriptor(id: &str) -> Option<gen_core::ModelDescriptor> {
     media()
@@ -265,7 +267,7 @@ pub(crate) fn load(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Genera
 
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(crate) fn load_trainer(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Trainer>> {
     media().load_trainer(id, spec)
@@ -273,7 +275,7 @@ pub(crate) fn load_trainer(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dy
 
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(crate) fn load_captioner(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Captioner>> {
     media().load_captioner(id, spec)
@@ -281,7 +283,7 @@ pub(crate) fn load_captioner(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<
 
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(crate) fn load_image_embedder(
     id: &str,
@@ -292,7 +294,7 @@ pub(crate) fn load_image_embedder(
 
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(crate) fn load_text_embedder(
     id: &str,
@@ -321,7 +323,7 @@ mod tests {
             assert_eq!(text_count, 2);
         }
 
-        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        #[cfg(all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm")))]
         {
             assert!(media_count > 40);
             assert_eq!(text_count, 2);
@@ -329,7 +331,7 @@ mod tests {
 
         #[cfg(not(any(
             target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
+            all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
         )))]
         {
             assert_eq!(media_count, 0);

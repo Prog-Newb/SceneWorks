@@ -1203,11 +1203,11 @@ pub(super) fn scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
 /// tokenizer always comes from `model_dir`. Read in place, never copied.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 #[derive(Clone)]
 #[cfg_attr(
-    not(all(not(target_os = "macos"), feature = "backend-candle")),
+    not(all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))),
     allow(dead_code)
 )]
 pub(super) struct ComfyuiWanExperts {
@@ -1250,7 +1250,7 @@ impl ComfyuiWanExperts {
 /// prompt-enhance) default off for Wan; the Wan-only `moe_expert` rides on `adapters`.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) struct VideoGenInput {
     pub(super) engine_id: &'static str,
@@ -1327,7 +1327,7 @@ pub(super) struct VideoGenInput {
 
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 impl Default for VideoGenInput {
     fn default() -> Self {
@@ -1372,7 +1372,7 @@ impl Default for VideoGenInput {
 
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     LoadSpec {
@@ -1420,7 +1420,7 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
 /// The engine fills the audio track (LTX) or leaves it `None` (Wan).
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) fn run_loaded_video_generation(
     generator: &dyn Generator,
@@ -1516,7 +1516,7 @@ pub(super) fn run_video_generation(
 /// unusually large/slow model or disk.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -1527,7 +1527,7 @@ pub(super) const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// itself re-hanging on the join.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 const VIDEO_STALL_GRACE: Duration = Duration::from_secs(60);
 
@@ -1535,7 +1535,7 @@ const VIDEO_STALL_GRACE: Duration = Duration::from_secs(60);
 /// integer number of seconds) when set, else [`VIDEO_STALL_TIMEOUT`].
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 fn video_stall_timeout() -> Duration {
     parse_stall_timeout(std::env::var("SCENEWORKS_VIDEO_STALL_SECS").ok())
@@ -1545,7 +1545,7 @@ fn video_stall_timeout() -> Duration {
 /// falling back to [`VIDEO_STALL_TIMEOUT`] when unset, blank, non-numeric, or zero.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) fn parse_stall_timeout(raw: Option<String>) -> Duration {
     raw.and_then(|raw| raw.trim().parse::<u64>().ok())
@@ -1564,7 +1564,7 @@ pub(super) fn parse_stall_timeout(raw: Option<String>) -> Duration {
 /// worker. Mirrors the image path's `begin_image_cancel` (sc-5515).
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(crate) async fn begin_video_cancel(
     api: &ApiClient,
@@ -1595,7 +1595,7 @@ pub(crate) async fn begin_video_cancel(
 /// backend — e.g. a candle video engine before it adopts the unified framework.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 fn video_engine_sampling_surface(engine_id: &str) -> (Vec<&'static str>, Vec<&'static str>) {
     crate::inference_runtime::generators()
@@ -1619,7 +1619,7 @@ fn video_engine_sampling_surface(engine_id: &str) -> (Vec<&'static str>, Vec<&'s
 /// what actually ran). Captured like `log_engine_id`, before the move at the spawn.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) struct VideoSettingsSnapshot {
     pub(super) quant: Option<Quant>,
@@ -1634,7 +1634,7 @@ pub(super) struct VideoSettingsSnapshot {
 
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 impl VideoSettingsSnapshot {
     fn from_input(input: &VideoGenInput) -> Self {
@@ -1672,7 +1672,7 @@ impl VideoSettingsSnapshot {
 /// `mlxQuantize: null` for this tier.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) fn video_quant_label(quant: Option<Quant>) -> (Option<String>, Option<u32>) {
     match quant {
@@ -1692,7 +1692,7 @@ pub(super) fn video_quant_label(quant: Option<Quant>) -> (Option<String>, Option
 /// than a fabricated value the worker can't know without loading the engine config.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) fn build_video_metrics(
     mut metrics: GenerationMetrics,
@@ -1737,7 +1737,7 @@ pub(super) fn build_video_metrics(
 /// ([`video_stall_timeout`]) fails a wedged job loudly rather than letting it look alive forever.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) async fn generate_video(
     api: &ApiClient,
@@ -1755,8 +1755,33 @@ pub(super) async fn generate_video(
         advanced,
         input,
         crate::inference_runtime::load,
+        None,
     )
     .await
+}
+
+/// Sub-range of the job progress bar that ONE [`generate_video_using`] call owns, with an optional
+/// message prefix.
+///
+/// A single-shot generation owns the whole Generating band and passes `None`, keeping the historic
+/// 0.25..0.55. A STREAMING caller - the SeedVR2 upscale, which runs one generation per 64-frame
+/// worker window - owns only its window slice. Without this, each window mapped its own denoise
+/// steps across the ENTIRE band and overwrote the caller's correct per-window post, so a
+/// 675-window job reported 41% after 8 windows: 1.1% of the real work (measured 2026-10-16).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
+))]
+pub(super) struct GenProgressWindow {
+    /// Fraction this call starts at.
+    pub(super) lo: f64,
+    /// Fraction this call reaches once its own steps finish.
+    pub(super) hi: f64,
+    /// Prefixed to the step message, e.g. "Upscaling window 8/675".
+    pub(super) label: Option<String>,
+    /// Whole-job seconds-remaining from the streaming driver, re-posted on every inner step so
+    /// the field is not blanked between windows. `None` until the driver can project honestly.
+    pub(super) eta: Option<f64>,
 }
 
 /// [`generate_video`] with the engine loader supplied by the caller (sc-12318).
@@ -1773,7 +1798,7 @@ pub(super) async fn generate_video(
 /// no `(engine_id, spec)` key to load from, so it ignores `load_generator` and stays uncovered here.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) async fn generate_video_using(
     api: &ApiClient,
@@ -1785,6 +1810,7 @@ pub(super) async fn generate_video_using(
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
+    progress_window: Option<GenProgressWindow>,
 ) -> WorkerResult<DecodedVideo> {
     // Per-generation sampler / scheduler axis for video (epic 7114 P5, sc-7127). The handlers leave
     // `input.sampler`/`scheduler` `None`; read them from the caller's already-parsed `advanced` block
@@ -1794,6 +1820,9 @@ pub(super) async fn generate_video_using(
     // dropped to the engine default + a `sampling_knob_unsupported` event, never a hard-fail. Taking
     // `advanced` by reference avoids re-parsing the whole payload into a throwaway VideoRequest per
     // generation (F-118).
+    // SeedVR2 (the only provider on the ROCm lane) has no sampler/scheduler knobs, and these helpers live in the
+    // macOS/CUDA-only base.rs harness, so the N3 guard is compiled out of ROCm-only builds.
+    #[cfg(not(all(feature = "backend-rocm", not(feature = "backend-candle"))))]
     {
         let (raw_sampler, raw_scheduler, raw_shift) =
             crate::image_jobs::read_advanced_sampling_knobs(advanced);
@@ -1959,6 +1988,18 @@ pub(super) async fn generate_video_using(
     let mut phase_timer = crate::job_metrics::PhaseTimer::new(Instant::now());
     // Effective denoise step count from the Step event (sc-10406).
     let mut video_effective_steps: Option<u32> = None;
+    // Progress sub-range this call owns; see `GenProgressWindow`. `None` => the whole Generating
+    // band, which is what every single-shot generation wants.
+    let (pf_lo, pf_span, pf_decode, pf_load, pf_label, pf_eta) = match &progress_window {
+        Some(w) => (w.lo, (w.hi - w.lo).max(0.0), w.hi, w.lo, w.label.clone(), w.eta),
+        None => (0.25, 0.30, 0.58, 0.24, None, None),
+    };
+    // Measured per-step ETA for a SINGLE-SHOT generation, so wan / ltx / vace / mochi / krea /
+    // scail2 all report one. Suppressed when `progress_window` is set: a streaming caller's window
+    // is a fraction of the job, and an inner per-window ETA would badly understate what is left -
+    // that caller's own driver posts the whole-job figure instead.
+    let mut step_clock: Option<(Instant, u32)> = None;
+    let mut step_eta: Option<f64> = None;
     // Run the progress loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003). The stall/
     // abandon watchdog inside the loop still handles the hard-wedge case via `abandoned`.
@@ -1992,10 +2033,26 @@ pub(super) async fn generate_video_using(
                     // Phase-boundary capture (sc-10405), borrowing so `progress` is
                     // still owned by the fraction/message match below.
                     match &progress {
-                        Progress::Step { total, .. } => {
+                        Progress::Step { current, total } => {
                             phase_timer.mark_sample_step(Instant::now());
                             if video_effective_steps.is_none() {
                                 video_effective_steps = Some(*total);
+                            }
+                            // Measured seconds-per-step, not guessed: the first Step starts the
+                            // clock and every later one divides elapsed by steps actually done.
+                            match step_clock {
+                                None => step_clock = Some((Instant::now(), *current)),
+                                Some((started, base)) => {
+                                    let done = (*current).saturating_sub(base);
+                                    if done > 0 {
+                                        let per_step =
+                                            started.elapsed().as_secs_f64() / f64::from(done);
+                                        step_eta = Some(
+                                            per_step
+                                                * f64::from((*total).saturating_sub(*current)),
+                                        );
+                                    }
+                                }
                             }
                         }
                         Progress::Decoding => phase_timer.mark_decoding(Instant::now()),
@@ -2005,19 +2062,22 @@ pub(super) async fn generate_video_using(
                         Progress::Step { current, total } => (
                             JobStatus::Running,
                             ProgressStage::Generating,
-                            0.25 + 0.30 * (current as f64 / total.max(1) as f64),
-                            format!("Generating frames — step {current}/{total}."),
+                            pf_lo + pf_span * (current as f64 / total.max(1) as f64),
+                            match &pf_label {
+                                Some(label) => format!("{label} — step {current}/{total}."),
+                                None => format!("Generating frames — step {current}/{total}."),
+                            },
                         ),
                         Progress::Decoding => (
                             JobStatus::Running,
                             ProgressStage::Generating,
-                            0.58,
+                            pf_decode,
                             "Decoding frames.".to_owned(),
                         ),
                         Progress::Loading(phase) => (
                             JobStatus::LoadingModel,
                             ProgressStage::LoadingModel,
-                            0.24,
+                            pf_load,
                             match phase {
                                 LoadPhase::TextEncoder => "Loading text encoder.",
                                 LoadPhase::Renderer => "Loading render components.",
@@ -2028,13 +2088,17 @@ pub(super) async fn generate_video_using(
                     update_job(
                         api,
                         &job.id,
-                        video_progress(
+                        video_progress_with_eta(
                             status,
                             stage,
                             fraction,
                             &message,
                             None,
                             backend,
+                            // Windowed: re-post the OUTER whole-job figure on every inner
+                            // post. Passing None here would NULL the field the driver just
+                            // set, and the ~64 inner posts per window always win the race.
+                            if progress_window.is_some() { pf_eta } else { step_eta },
                         ),
                     )
                     .await?;

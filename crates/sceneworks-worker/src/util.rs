@@ -143,7 +143,7 @@ pub(crate) async fn with_hf_auth(
 /// helper ungated makes it dead code under `-D warnings` (sc-11175, Linux parity fix).
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(crate) fn resolve_env_file_pin(
     key: &str,

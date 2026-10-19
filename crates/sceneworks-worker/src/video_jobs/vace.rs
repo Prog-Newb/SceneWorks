@@ -424,7 +424,7 @@ pub(super) fn resolve_character_references(
 /// Convert an `image::RgbImage` (the rasterized mask) to an engine [`Image`].
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), any(feature = "backend-candle", feature = "backend-rocm"))
 ))]
 pub(super) fn rgb_image_to_engine(image: image::RgbImage) -> Image {
     Image {

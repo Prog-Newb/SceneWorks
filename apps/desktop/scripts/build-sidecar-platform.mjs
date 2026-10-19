@@ -7,6 +7,15 @@ export function shouldBuildCandle(platform, desktopCandle) {
 }
 
 export function sidecarBuildPlan(platform, env = {}) {
+  const rocm = platform === "win32" && env.SCENEWORKS_DESKTOP_BACKEND === "rocm";
+  if (rocm) {
+    return {
+      candle: false,
+      rocm: true,
+      npmScript: "api:build:embedded",
+      env: { VITE_API_BASE_URL: "", SCENEWORKS_DESKTOP_BACKEND: "rocm" },
+    };
+  }
   const candle = shouldBuildCandle(
     platform,
     env.SCENEWORKS_DESKTOP_CANDLE,

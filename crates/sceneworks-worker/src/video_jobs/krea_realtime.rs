@@ -843,6 +843,7 @@ pub(super) async fn generate_krea_realtime_using(
         &request.advanced,
         input,
         load_generator,
+        None,
     )
     .await?;
     let coverage = krea_realtime_lora_coverage(&decoded.adapter_apply_reports);
