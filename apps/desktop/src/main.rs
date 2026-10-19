@@ -1,9 +1,8 @@
 // Hide the extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// On-demand keychain credential socket for the MLX worker (sc-5891). macOS-only:
-// it replaces the eager spawn-time keychain reads that prompted at every launch.
-#[cfg(target_os = "macos")]
+// On-demand OS-credential bridge for the API sidecar on every desktop platform
+// and the MLX worker on macOS (sc-5891, sc-23730).
 mod cred_ipc;
 // First-run CUDA/onnxruntime redist downloader (Windows candle build): the heavy GPU
 // runtime DLLs are no longer bundled (NSIS ~2 GB limit) — they're fetched on first
@@ -72,7 +71,14 @@ fn main() {
             Ok(())
         })
         .manage(setup::Managed::default())
+        .manage(update::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
+            update::get_update_status,
+            // On-demand check from Settings (sc-8663).
+            update::check_for_app_update,
+            update::download_app_update,
+            update::install_app_update,
+            update::discard_app_update,
             setup::start_setup,
             setup::get_session_logs,
             settings::get_app_settings,
@@ -83,6 +89,9 @@ fn main() {
             settings::choose_folder,
             settings::set_data_dir,
             settings::choose_data_dir,
+            // Relocating an unavailable model library (sc-19709).
+            settings::set_model_library,
+            settings::restart_app,
             settings::reveal_in_os,
             // Save an asset to a user-chosen destination + resolve an asset's
             // project-relative path to its absolute on-disk path (sc-8726).
@@ -96,6 +105,7 @@ fn main() {
             settings::get_gpu_info,
             // GPU memory cap (epic 7819).
             settings::set_gpu_memory_limit,
+            settings::set_resolved_cache_policy,
             // Live MLX memory telemetry for the Settings readout (epic 7819, sc-7825).
             settings::get_gpu_telemetry,
             // LAN remote access (epic 4484, stories 4/5).

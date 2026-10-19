@@ -13,6 +13,9 @@ export const MAC_NOT_AVAILABLE_LABEL = "Not available on Mac (MLX only)";
 // non-Mac / observe-mode deployments). Every helper below short-circuits to "not blocked".
 export const DEFAULT_MAC_CAPABILITIES = {
   macGatingActive: false,
+  // sc-19570 — the off-Mac twin (see candleGating.js). Inert here for the same reason
+  // `macGatingActive` is: until the capabilities endpoint responds, nothing is gated.
+  candleGatingActive: false,
   platform: "",
   notAvailableLabel: MAC_NOT_AVAILABLE_LABEL,
   features: {},
@@ -129,6 +132,11 @@ export function macUpscaleEngineBlocked(caps, engine) {
   }
   if (engine === "aura-sr") {
     return caps?.features?.imageUpscaleAuraSr?.supported !== true;
+  }
+  // Iris restoration (sc-25683): platform-intrinsic like SeedVR2 (native MLX on Mac, Candle on
+  // Windows/Linux). Whether the task is INSTALLED is a separate gate (upscaleEngines.js).
+  if (engine === "iris") {
+    return caps?.features?.imageUpscaleIris?.supported !== true;
   }
   return false;
 }

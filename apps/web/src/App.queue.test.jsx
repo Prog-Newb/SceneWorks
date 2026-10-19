@@ -126,8 +126,8 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     expect(container.textContent).toContain("Fixture GPU 0");
-    expect(container.textContent).toContain("20.0 GB");
-    expect(container.textContent).toContain("4.0 GB / 24.0 GB");
+    expect(container.textContent).toContain("20.0 GiB");
+    expect(container.textContent).toContain("4.0 GiB / 24.0 GiB");
     expect(container.textContent).toContain("12%");
     expect(container.textContent).not.toContain("CPU utility worker");
     expect(container.textContent).not.toContain("Placeholder GPU");
@@ -204,6 +204,52 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Canceled before a worker started.");
     expect(container.textContent).not.toContain("Queued");
     expect(container.textContent).not.toContain("Waiting for an available GPU worker.");
+  });
+
+  it("submits the chosen compute policy when Queue duplicates a pre-policy YuE2 job", async () => {
+    const legacy = {
+      id: "old-yue2", type: "audio_generate", status: "completed", attempts: 1,
+      projectId: "project-1", projectName: "Project 1", requestedGpu: "auto",
+      payload: {
+        model: "yue2", yue2: {
+          kind: "create", lyrics: "[verse]\\nla", runId: "yue2run_old", precision: "default",
+        },
+      },
+      createdAt: "2026-05-19T09:00:00Z", updatedAt: "2026-05-19T09:00:00Z",
+    };
+    let duplicateBody;
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) return Promise.resolve(response({ status: "ok", authRequired: false }));
+      if (path.endsWith("/access")) return Promise.resolve(response({ authRequired: false }));
+      if (path.endsWith("/projects")) return Promise.resolve(response([{ id: "project-1", name: "Project 1" }]));
+      if (path.endsWith("/workers")) return Promise.resolve(response([]));
+      if (path.endsWith("/jobs/old-yue2/duplicate")) {
+        duplicateBody = JSON.parse(options.body);
+        return Promise.resolve(response({ ...legacy, id: "new-yue2" }));
+      }
+      if (path.endsWith("/jobs")) return Promise.resolve(response([legacy]));
+      return Promise.resolve(response([]));
+    });
+    root = createRoot(container);
+    await act(async () => root.render(<App />));
+    await settle();
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue").click();
+    });
+    await settle();
+    const choice = document.body.querySelector('select[aria-label="Compute precision for duplicate"]');
+    const duplicate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Duplicate");
+    expect(duplicate.disabled).toBe(true);
+    await act(async () => {
+      choice.value = "bf16";
+      choice.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => duplicate.click());
+    await settle();
+    expect(duplicateBody.payloadChanges.yue2.computePolicy).toBe("bf16");
+    expect(duplicateBody.payloadChanges.yue2).not.toHaveProperty("precision");
+    expect(duplicateBody.payloadChanges).toHaveProperty("duplicatedAt");
   });
 
   it("keeps fresher SSE job state when a post-action refresh returns stale data", async () => {
@@ -776,6 +822,132 @@ describe("SceneWorks app shell", () => {
     expect(cancelButton.disabled).toBe(true);
   });
 
+  it("selects waiting jobs to move to the top and shows the durable queue order", async () => {
+    const prioritizeJobs = vi.fn(() => Promise.resolve(true));
+    const job = (id, overrides = {}) => ({
+      id,
+      type: "image_generate",
+      status: "queued",
+      stage: "queued",
+      progress: 0,
+      projectId: "project-1",
+      projectName: "Project 1",
+      requestedGpu: "auto",
+      payload: { prompt: id },
+      attempts: 1,
+      createdAt: "2026-05-19T09:00:00Z",
+      ...overrides,
+    });
+    const running = job("job-running", {
+      status: "running",
+      stage: "generating",
+      progress: 0.4,
+      createdAt: "2026-05-19T09:03:00Z",
+    });
+    const ordinary = job("job-ordinary", { createdAt: "2026-05-19T09:01:00Z" });
+    const automatic = job("job-refine", {
+      type: "prompt_refine",
+      payload: { prompt: "automatic refinement" },
+      queueRank: 7,
+      createdAt: "2026-05-19T09:02:00Z",
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Project 1" },
+            createPlaceholderJob: (event) => event.preventDefault(),
+            filteredJobs: [ordinary, running, automatic],
+            gpuOptions: ["auto", "0"],
+            jobAction: () => {},
+            prioritizeJobs,
+            projectFilter: "all",
+            projects: [{ id: "project-1", name: "Project 1" }],
+            requestedGpu: "auto",
+            setProjectFilter: () => {},
+            setRequestedGpu: () => {},
+            visibleWorkers: [],
+          },
+          <QueueScreen />,
+        ),
+      );
+    });
+
+    const titles = [...container.querySelectorAll(".worker-progress-card__title")].map((node) => node.textContent);
+    expect(titles[0]).toContain("job-running");
+    expect(titles[1]).toContain("automatic refinement");
+    expect(titles[2]).toContain("job-ordinary");
+    expect(container.querySelectorAll(".queue-priority-badge")).toHaveLength(1);
+    expect(container.querySelectorAll('.queue-job-selection input[type="checkbox"]')).toHaveLength(2);
+
+    const moveButton = [...container.querySelectorAll("button")].find((button) => button.textContent.startsWith("Move to top"));
+    expect(moveButton.disabled).toBe(true);
+    const ordinaryCheckbox = container.querySelector('input[aria-label*="job-ordinary"]');
+    await act(async () => {
+      ordinaryCheckbox.click();
+    });
+    expect(moveButton.textContent).toBe("Move to top (1)");
+    expect(moveButton.disabled).toBe(false);
+
+    await act(async () => {
+      moveButton.click();
+    });
+    expect(prioritizeJobs).toHaveBeenCalledWith(["job-ordinary"]);
+    expect(moveButton.textContent).toBe("Move to top");
+    expect(moveButton.disabled).toBe(true);
+  });
+
+  it("reveals the full original prompt from a shortened Queue title", async () => {
+    const prompt = "A cinematic aerial view of a coastal city at blue hour with ferries crossing a glowing harbor";
+    const queuedJob = {
+      id: "job-long-prompt",
+      type: "video_generate",
+      title: "Generate Video — A cinematic aerial view of a coastal city…",
+      status: "queued",
+      stage: "queued",
+      progress: 0,
+      projectId: "project-1",
+      projectName: "Project 1",
+      requestedGpu: "auto",
+      payload: { prompt },
+      attempts: 1,
+      createdAt: "2026-05-19T09:00:00Z",
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Project 1" },
+            createPlaceholderJob: (event) => event.preventDefault(),
+            filteredJobs: [queuedJob],
+            gpuOptions: ["auto", "0"],
+            jobAction: () => {},
+            projectFilter: "all",
+            projects: [{ id: "project-1", name: "Project 1" }],
+            requestedGpu: "auto",
+            setProjectFilter: () => {},
+            setRequestedGpu: () => {},
+            visibleWorkers: [],
+          },
+          <QueueScreen />,
+        ),
+      );
+    });
+
+    const title = container.querySelector(".worker-progress-card__title");
+    const toggle = container.querySelector(".worker-progress-card__title-toggle");
+    expect(title.textContent).toBe(queuedJob.title);
+    expect(toggle.textContent).toBe("Show full prompt");
+
+    await act(async () => toggle.click());
+    expect(title.textContent).toBe(`Generate Video — ${prompt}`);
+    expect(toggle.textContent).toBe("Show less");
+  });
+
   it("dismisses an individual completed queue item via the per-card × (issue #1556)", async () => {
     const clearJob = vi.fn(() => Promise.resolve());
     const completedJob = {
@@ -863,7 +1035,7 @@ describe("SceneWorks app shell", () => {
       root.render(withAppContext({ ...queueProps, visibleWorkers: [worker] }, <QueueScreen />));
     });
 
-    expect(container.textContent).toContain("20.0 GB");
+    expect(container.textContent).toContain("20.0 GiB");
     expect(container.textContent).toContain("12%");
 
     await act(async () => {
@@ -883,9 +1055,9 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    expect(container.textContent).toContain("12.0 GB / 24.0 GB");
+    expect(container.textContent).toContain("12.0 GiB / 24.0 GiB");
     expect(container.textContent).toContain("67%");
-    expect(container.textContent).not.toContain("20.0 GB");
+    expect(container.textContent).not.toContain("20.0 GiB");
   });
 
 });

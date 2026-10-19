@@ -158,6 +158,7 @@ export function CharacterStudio() {
     purgeAsset,
     imageModels,
     models = [],
+    modelCatalogStatus = "ready",
     jobs = [],
     latestImageAssets,
     loras,
@@ -201,7 +202,7 @@ export function CharacterStudio() {
   // jobAction may be missing in test contexts that wrap CharacterStudio with a
   // stub provider; guard so the buttons just no-op there.
   const onCancelCharacterJob = jobAction ? (job) => jobAction(job, "cancel") : undefined;
-  const onRetryCharacterJob = jobAction ? (job) => jobAction(job, "retry") : undefined;
+  const onRetryCharacterJob = jobAction ? (job, payload) => jobAction(job, "retry", { body: payload ?? {} }) : undefined;
   const onDuplicateCharacterJob = jobAction ? (job) => jobAction(job, "duplicate") : undefined;
   const onOpenCharacterJobQueue = setActiveView ? () => setActiveView("Queue") : undefined;
   const onSendImage = sendCharacterToImage;
@@ -583,7 +584,7 @@ export function CharacterStudio() {
       name: lora.name ?? lora.id,
       sourcePath: lora.installedPath ?? lora.source?.path ?? null,
       triggerWords: lora.triggerWords ?? [],
-      defaultWeight: lora.defaultWeight ?? 0.8,
+      defaultWeight: lora.defaultWeight ?? 1.0,
       compatibility: { families: extractFamilies(lora) },
       scope: lora.scope ?? "global",
     });
@@ -830,6 +831,7 @@ export function CharacterStudio() {
             >
               <ModelAvailabilityGate
                 ready={angleModels.length > 0}
+                initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
                 title="Angle Set needs an angle-capable model"
                 description="Generating character angle sets needs a model like InstantID (RealVisXL). Download one to get started."
                 offers={angleOffers}
@@ -874,6 +876,7 @@ export function CharacterStudio() {
             >
               <ModelAvailabilityGate
                 ready={poseModels.length > 0}
+                initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
                 title="Pose Library needs a pose-capable model"
                 description="Generating character poses needs a model like InstantID (RealVisXL). Download one to get started."
                 offers={poseOffers}

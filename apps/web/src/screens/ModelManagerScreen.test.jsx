@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { click } from "../testUtils/dom.js";
+import { click, setSelect } from "../testUtils/dom.js";
 
 // sc-12068: model / LoRA / tier deletes confirm through the shared desktop-safe appConfirm
 // dialog rather than the raw window.confirm, which silently no-ops inside the Tauri WebView.
@@ -95,6 +95,90 @@ const SD3_5_MODEL = {
     { provider: "huggingface", repo: "stabilityai/stable-diffusion-3.5-large", files: ["transformer/*"] },
   ],
   ui: { description: "Gated SD3.5 Large model." },
+};
+
+// MiniMax-H3 (sc-17227): the first model that needs a LICENCE ACKNOWLEDGMENT WITHOUT a Hugging
+// Face credential. `MiniMaxAI/MiniMax-H3` is a PUBLIC repo — there is no token to add and no
+// access to request — but the MiniMax H3 Community License is non-transferable (§II) and binds
+// the user directly, and §V.2 obliges SceneWorks to notify each user that its use restrictions
+// apply before providing access. So: `requiresLicenseAcknowledgment` WITHOUT `gated`, plus the
+// `licenseNotice` prose that is the notification, plus the §IV.2 `ui.attribution` string.
+const MINIMAX_H3_LICENSE_NOTICE =
+  "The MiniMax H3 Community License grants a NON-TRANSFERABLE licence (§II). Its Applicable " +
+  "Territory (§V.4) excludes the European Union, the United Kingdom, the Republic of Korea and " +
+  "the United States of America, and Exhibit A item 12 requires you to disclose that content is " +
+  "machine-generated when you publish it.";
+const LICENSE_ACK_ONLY_MODEL = {
+  id: "minimax_h3",
+  name: "MiniMax-H3",
+  type: "video",
+  family: "minimax-h3",
+  installState: "missing",
+  downloadable: true,
+  requiresLicenseAcknowledgment: true,
+  licenseUrl: "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+  licenseNotice: MINIMAX_H3_LICENSE_NOTICE,
+  downloads: [{ provider: "huggingface", repo: "SceneWorks/minimax-h3-mlx", files: ["q4/transformer/*"] }],
+  ui: { attribution: "Powered by MiniMax H3", description: "Joint video + audio generation." },
+};
+
+// sc-24108: the same licence shape, but INSTALLED. `licenseGateApplies` is
+// `requiresLicenseAcknowledgment && downloadOnOffer`, so once every byte is on disk the gate box
+// stops rendering — which used to take the restriction off every surface in the app with it. This
+// fixture is the regression: nothing left to download, and the terms must still be readable.
+const QWEN_2_1_LICENSE_NOTICE =
+  "Qwen-Image 2.1's weights are governed by the Qwen RESEARCH LICENSE AGREEMENT. §1(i) and §2(a) " +
+  "grant rights FOR NON-COMMERCIAL PURPOSES ONLY, where Non-Commercial means research or " +
+  "evaluation purposes only; §2(b) requires a separate commercial licence from Hangzhou Tongyi " +
+  "Laboratory.";
+const INSTALLED_LICENSED_MODEL = {
+  id: "qwen_image_2_1",
+  name: "Qwen Image 2.1",
+  type: "image",
+  family: "qwen-image-2-1",
+  installState: "installed",
+  installed: true,
+  downloadable: true,
+  updateAvailable: false,
+  requiresLicenseAcknowledgment: true,
+  nonCommercial: true,
+  licenseUrl:
+    "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE",
+  licenseNotice: QWEN_2_1_LICENSE_NOTICE,
+  downloads: [{ provider: "huggingface", repo: "Qwen/Qwen-Image-2.1", files: [] }],
+  ui: { description: "Qwen-Image 2.1 text-to-image target (research licence)." },
+};
+
+// The shape MiniMax-H3 ACTUALLY ships in (sc-17227): a quant matrix. A tiered model renders the
+// per-tier download panel INSTEAD of the single Download button, so proving the single-variant
+// button is blocked proves nothing about the path a real H3 user takes. Declaration is not
+// reachability — this fixture puts the acknowledgment gate on the tier panel.
+const LICENSE_ACK_TIERED_MODEL = {
+  ...LICENSE_ACK_ONLY_MODEL,
+  hasVariantMatrix: true,
+  variants: [
+    { variant: "bf16", installed: false, installState: "missing", cacheState: "missing", downloadSizeBytes: 75120439132 },
+    { variant: "q8", installed: false, installState: "missing", cacheState: "missing", downloadSizeBytes: 37560219566 },
+    { variant: "q4", installed: false, installState: "missing", cacheState: "missing", downloadSizeBytes: 18780109783 },
+  ],
+};
+
+// sc-17227 review BLOCKER 2 — the PARTIALLY-installed quant matrix, which is where the first fix
+// left an unrecoverable dead end. `install_state_for` (apps/rust-api/src/models.rs) marks a matrix
+// model `installed` when ANY tier is present, so a user who installed q4 and left q8/bf16 for
+// later reports `installState: "installed"` with no update pending — while the tier panel is still
+// offering the two missing tiers. The predicate `!installed || updateAvailable` therefore rendered
+// no notice and no checkbox on a card whose download controls were live, and the choke point then
+// refused the click with "accept the license on the MiniMax-H3 card". Reachable on every desktop
+// relaunch, where the stored acknowledgment does not survive.
+const LICENSE_ACK_PARTIAL_MATRIX_MODEL = {
+  ...LICENSE_ACK_TIERED_MODEL,
+  installState: "installed",
+  variants: [
+    { variant: "bf16", installed: false, installState: "missing", cacheState: "missing", downloadSizeBytes: 75120439132 },
+    { variant: "q8", installed: false, installState: "missing", cacheState: "missing", downloadSizeBytes: 37560219566 },
+    { variant: "q4", installed: true, installState: "installed", cacheState: "complete", downloadSizeBytes: 18780109783 },
+  ],
 };
 
 // A quant-matrix model whose q8 tier is TORN (sc-13383): its files are partly present, so the API
@@ -241,7 +325,9 @@ describe("ModelManagerScreen gated-model notice", () => {
 
   it("renders no gated notice for a non-gated model", async () => {
     await render([PLAIN_MODEL]);
-    expect(invoke).not.toHaveBeenCalledWith("list_credentials", undefined);
+    // The keychain IS read on every catalog now — the import panel's Civitai / Hugging Face
+    // sources are offered whether or not the catalog holds a gated model (sc-20650). What must
+    // stay absent is the CARD's credential UI.
     expect(container.textContent).not.toContain("Gated download");
     expect(container.querySelector(".model-gated-notice")).toBeNull();
   });
@@ -337,6 +423,389 @@ describe("ModelManagerScreen gated-model notice", () => {
     expect(downloadButton.disabled).toBe(false);
   });
 
+  // sc-17227: the acknowledgment gate is decoupled from the HF credential. A model that declares
+  // `requiresLicenseAcknowledgment` WITHOUT `gated` raises the gate and shows NO credential UI —
+  // no keychain lookup, no "Add token in Settings", no "Request access on Hugging Face" — because
+  // its repo is public and there is nothing to add or request. Before the decoupling this model
+  // either got no gate at all (`gated` absent) or demanded a credential that does not exist.
+  it("gates a public-repo model on the license alone, with no credential UI (sc-17227)", async () => {
+    await render([LICENSE_ACK_ONLY_MODEL]);
+    await selectTab(container, "Video Models");
+    expect(container.querySelector(".model-gated-notice")).toBeTruthy();
+    // The credential half is entirely absent FROM THE CARD. (The keychain read itself is no longer
+    // keyed on the catalog holding a gated model: the import panel's Civitai / Hugging Face sources
+    // need it on every catalog — sc-20650. The card must still show none of it.)
+    expect(container.textContent).not.toContain("Gated download");
+    expect(container.textContent).not.toContain("Add token in Settings");
+    expect(container.textContent).not.toContain("Request access on Hugging Face");
+    expect(container.textContent).toContain("License acknowledgment required");
+    // The licence half is present: the "Review license" link and the acknowledgment checkbox.
+    const links = [...container.querySelectorAll(".model-gated-actions a")];
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe("Review license");
+    expect(links[0].getAttribute("href")).toBe("https://huggingface.co/MiniMaxAI/MiniMax-H3");
+    expect(container.querySelector(".model-license-ack input")).toBeTruthy();
+  });
+
+  // sc-17227: the load-bearing half of the decoupling. The download must stay BLOCKED until the
+  // box is checked, exactly as for a credential-gated model — decoupling must not soften the gate.
+  it("blocks a license-acknowledgment download until the box is checked (sc-17227)", async () => {
+    await render([LICENSE_ACK_ONLY_MODEL]);
+    await selectTab(container, "Video Models");
+    const downloadButton = [...container.querySelectorAll(".model-card-footer-actions button")].find(
+      (button) => button.textContent.startsWith("Download"),
+    );
+    expect(downloadButton).toBeTruthy();
+    expect(downloadButton.disabled).toBe(true);
+    expect(downloadButton.getAttribute("title")).toBe("Accept the license above before downloading.");
+
+    // Clicking while blocked queues nothing.
+    await click(downloadButton);
+    expect(createModelDownloadJob).not.toHaveBeenCalled();
+
+    // Accepting unblocks it, and only then does the download queue.
+    const ackCheckbox = container.querySelector(".model-license-ack input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked").set.call(
+        ackCheckbox,
+        true,
+      );
+      ackCheckbox.dispatchEvent(new window.Event("click", { bubbles: true }));
+    });
+    expect(downloadButton.disabled).toBe(false);
+    await click(downloadButton);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "minimax_h3" }),
+    );
+  });
+
+  // sc-17227: MiniMax H3 Community License §V.2 requires notifying each user that the §V /
+  // Exhibit A restrictions apply BEFORE providing access. A bare "accept the license" checkbox
+  // does not do that, so the manifest's `licenseNotice` renders inside the gate box.
+  it("shows the manifest license notice inside the gate (sc-17227)", async () => {
+    await render([LICENSE_ACK_ONLY_MODEL]);
+    await selectTab(container, "Video Models");
+    const terms = container.querySelector(".model-gated-notice .model-license-terms");
+    expect(terms).toBeTruthy();
+    expect(terms.textContent).toBe(MINIMAX_H3_LICENSE_NOTICE);
+    // The specific restrictions, not a generic "read the license" line.
+    expect(terms.textContent).toContain("NON-TRANSFERABLE");
+    expect(terms.textContent).toContain("United States of America");
+    expect(terms.textContent).toContain("machine-generated");
+  });
+
+  // sc-24108: the acceptance criterion is "shown before download AND in model details". The gate
+  // above is only the first half — it is keyed on `downloadOnOffer`, so an INSTALLED model renders
+  // no gate, and before this the licence disappeared from the app entirely at that point. The
+  // persistent summary is the second half: same notice, no checkbox, nothing blocked.
+  it("keeps the licence readable on an INSTALLED model, outside the gate (sc-24108)", async () => {
+    await render([INSTALLED_LICENSED_MODEL]);
+    await selectTab(container, "Image Models");
+
+    // Precondition — the gate is genuinely gone, so this is not the gate under another name.
+    expect(container.querySelector(".model-gated-notice")).toBeNull();
+    expect(container.querySelector(".model-license-ack")).toBeNull();
+
+    const summary = container.querySelector(".model-license-summary");
+    expect(summary).toBeTruthy();
+    // The licence NAME, resolved from the bundled-licence corpus rather than invented.
+    expect(summary.textContent).toContain("Qwen RESEARCH LICENSE AGREEMENT");
+    expect(summary.textContent).toContain("Non-commercial");
+    // A link to the full text.
+    const link = summary.querySelector("a");
+    expect(link.getAttribute("href")).toBe(INSTALLED_LICENSED_MODEL.licenseUrl);
+    // The full notice, present in the DOM but behind a DEFAULT-COLLAPSED disclosure.
+    const disclosure = summary.querySelector("details");
+    expect(disclosure).toBeTruthy();
+    expect(disclosure.open).toBe(false);
+    expect(disclosure.querySelector(".model-license-terms").textContent).toBe(
+      QWEN_2_1_LICENSE_NOTICE,
+    );
+    expect(disclosure.textContent).toContain("NON-COMMERCIAL PURPOSES ONLY");
+  });
+
+  // sc-24108: and it is a SUMMARY, not a second gate — the same several paragraphs must not print
+  // twice while the pre-download gate is still on screen.
+  it("does not duplicate the notice while the pre-download gate is showing (sc-24108)", async () => {
+    await render([{ ...INSTALLED_LICENSED_MODEL, installState: "missing", installed: false }]);
+    await selectTab(container, "Image Models");
+    expect(container.querySelector(".model-gated-notice")).toBeTruthy();
+    expect(container.querySelector(".model-license-summary")).toBeNull();
+    expect(container.querySelectorAll(".model-license-terms")).toHaveLength(1);
+  });
+
+  // sc-17227: MiniMax H3 Community License §IV.2 — "You shall prominently display 'MiniMax H3' on
+  // the user interface". `ui.attribution` renders as its own line on the card, not folded into the
+  // description prose, and carries the exact string with a space (not the hyphenated repo name).
+  it("renders the license-required UI attribution on the model card (sc-17227)", async () => {
+    await render([LICENSE_ACK_ONLY_MODEL]);
+    await selectTab(container, "Video Models");
+    const attribution = container.querySelector(".model-card-attribution");
+    expect(attribution).toBeTruthy();
+    expect(attribution.textContent).toBe("Powered by MiniMax H3");
+    expect(attribution.textContent).toContain("MiniMax H3");
+    // A model that declares no attribution renders no such line — this is per-model, not global.
+    await render([PLAIN_MODEL]);
+    expect(container.querySelector(".model-card-attribution")).toBeNull();
+  });
+
+  // sc-17227: the localStorage seeding paths used to key on `gated`, so a returning user's accept
+  // would never re-seed for an acknowledgment-only model and the gate would re-block every visit.
+  it("seeds and re-seeds the ack for an acknowledgment-only model (sc-17227)", async () => {
+    window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
+    // Mount with an empty catalog first so the once-only useState initializer sees nothing; the
+    // catalog then resolves, which is the `useEffect([models])` re-seed path (sc-7873).
+    await render([]);
+    await render([LICENSE_ACK_ONLY_MODEL]);
+    await selectTab(container, "Video Models");
+    const ackCheckbox = container.querySelector(".model-license-ack input");
+    expect(ackCheckbox).toBeTruthy();
+    expect(ackCheckbox.checked).toBe(true);
+    const downloadButton = [...container.querySelectorAll(".model-card-footer-actions button")].find(
+      (button) => button.textContent.startsWith("Download"),
+    );
+    expect(downloadButton.disabled).toBe(false);
+  });
+
+  // sc-17227: the tier-panel path. MiniMax-H3 is a quant-matrix model, so a real user never sees
+  // the single Download button — they see the per-tier panel. Every tier checkbox and the panel's
+  // download button must stay disabled until the licence is accepted, and only then may a tier
+  // install. Without this, the gate would be provably right on a path H3 does not take.
+  it("blocks every tier of a license-acknowledgment quant matrix until accepted (sc-17227)", async () => {
+    await render([LICENSE_ACK_TIERED_MODEL]);
+    await selectTab(container, "Video Models");
+    const tierCheckboxes = [...container.querySelectorAll(".model-tier-select input")];
+    expect(tierCheckboxes).toHaveLength(3);
+    for (const box of tierCheckboxes) {
+      expect(box.disabled, "tier checkbox is disabled while unacknowledged").toBe(true);
+    }
+    const tierDownload = container.querySelector(".model-tier-actions button");
+    expect(tierDownload).toBeTruthy();
+    expect(tierDownload.disabled).toBe(true);
+    expect(tierDownload.getAttribute("title")).toBe("Accept the license above before downloading.");
+    await click(tierDownload);
+    expect(createModelDownloadJob).not.toHaveBeenCalled();
+
+    // Accept → the tiers become selectable and the suggested tier can install.
+    const ackCheckbox = container.querySelector(".model-license-ack input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked").set.call(
+        ackCheckbox,
+        true,
+      );
+      ackCheckbox.dispatchEvent(new window.Event("click", { bubbles: true }));
+    });
+    for (const box of [...container.querySelectorAll(".model-tier-select input")]) {
+      expect(box.disabled).toBe(false);
+    }
+    const unblocked = container.querySelector(".model-tier-actions button");
+    expect(unblocked.disabled).toBe(false);
+    await click(unblocked);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "minimax_h3" }),
+      expect.objectContaining({ variant: expect.any(String) }),
+    );
+  });
+
+  // sc-17227: an INSTALLED model shows no gate — the acknowledgment is a pre-download step, and
+  // re-blocking an installed model would strand it. Same rule the credential gate already follows.
+  it("shows no license gate once an acknowledgment-only model is installed (sc-17227)", async () => {
+    await render([{ ...LICENSE_ACK_ONLY_MODEL, installState: "installed" }]);
+    await selectTab(container, "Video Models");
+    expect(container.querySelector(".model-gated-notice")).toBeNull();
+    expect(container.querySelector(".model-license-ack")).toBeNull();
+  });
+
+  // sc-17227 review BLOCKER 2 — a model-level "installed" that still has tiers to fetch. The card
+  // must render the gate, because the tier panel below it is still offering downloads. Without
+  // this the acknowledgment was UNREACHABLE: no checkbox to tick, live tier controls, and a choke
+  // point that refused the click by telling the user to tick a checkbox that was not there.
+  it("raises the gate on a partially-installed quant matrix (sc-17227)", async () => {
+    await render([LICENSE_ACK_PARTIAL_MATRIX_MODEL]);
+    await selectTab(container, "Video Models");
+
+    // The notice and the acknowledgment checkbox are on the card — the recovery the dead end
+    // removed.
+    expect(container.querySelector(".model-gated-notice")).toBeTruthy();
+    const ackCheckbox = container.querySelector(".model-license-ack input");
+    expect(ackCheckbox, "the acknowledgment checkbox must be reachable").toBeTruthy();
+    expect(ackCheckbox.checked).toBe(false);
+
+    // And every control that could start a download is blocked. bf16/q8 are blocked BY THE GATE
+    // (they were selectable before this fix); q4 is disabled because it is already installed, which
+    // is a different reason and must not be read as gate coverage.
+    const tierRows = [...container.querySelectorAll(".model-tier-row")];
+    expect(tierRows).toHaveLength(3);
+    const tierState = tierRows.map((row) => ({
+      installed: row.querySelector(".status-badge").textContent === "installed",
+      disabled: row.querySelector(".model-tier-select input").disabled,
+    }));
+    expect(tierState).toEqual([
+      { installed: false, disabled: true },
+      { installed: false, disabled: true },
+      { installed: true, disabled: true },
+    ]);
+    const tierDownload = container.querySelector(".model-tier-actions button");
+    expect(tierDownload.disabled).toBe(true);
+    expect(tierDownload.getAttribute("title")).toBe("Accept the license above before downloading.");
+    await click(tierDownload);
+    expect(createModelDownloadJob).not.toHaveBeenCalled();
+
+    // Accepting on this very card recovers the flow: the two missing tiers become selectable while
+    // the installed one stays disabled, and a tier can then install.
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked").set.call(
+        ackCheckbox,
+        true,
+      );
+      ackCheckbox.dispatchEvent(new window.Event("click", { bubbles: true }));
+    });
+    expect(
+      [...container.querySelectorAll(".model-tier-select input")].map((box) => box.disabled),
+    ).toEqual([false, false, true]);
+    // Tier rows are ordered bf16 → q8 → q4, so the first checkbox is the bf16 tier. Toggling it
+    // needs the native `checked` setter: a dispatched MouseEvent runs no activation behavior in
+    // jsdom, so React's onChange would read the unchanged value.
+    const bf16 = container.querySelector(".model-tier-select input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked").set.call(
+        bf16,
+        true,
+      );
+      bf16.dispatchEvent(new window.Event("click", { bubbles: true }));
+    });
+    const unblocked = container.querySelector(".model-tier-actions button");
+    expect(unblocked.disabled).toBe(false);
+    await click(unblocked);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "minimax_h3" }),
+      expect.objectContaining({ variant: "bf16" }),
+    );
+  });
+
+  // sc-17227 review BLOCKER 2, the other half: a FULLY-installed matrix has nothing left to
+  // download, so it shows no gate. This is what stops the fix above from degenerating into
+  // "always show the notice", which would re-block finished installs with a pre-download step.
+  it("shows no gate on a fully-installed quant matrix (sc-17227)", async () => {
+    await render([
+      {
+        ...LICENSE_ACK_PARTIAL_MATRIX_MODEL,
+        variants: LICENSE_ACK_PARTIAL_MATRIX_MODEL.variants.map((variant) => ({
+          ...variant,
+          installed: true,
+          installState: "installed",
+          cacheState: "complete",
+        })),
+      },
+    ]);
+    await selectTab(container, "Video Models");
+    expect(container.querySelector(".model-tier-row")).toBeTruthy();
+    expect(container.querySelector(".model-gated-notice")).toBeNull();
+    expect(container.querySelector(".model-license-ack")).toBeNull();
+  });
+
+  // sc-17227 BLOCKER 1, Update-button surface. The convert-at-install "Update" control is a
+  // DOWNLOAD (`handleUpdateModel` → `onDownloadModel`) and it was the one download control the
+  // gate did not cover, because the gate keyed on `!installed` alone. A `breaking_update` with
+  // stale files present reports exactly the shape below — `installState: "missing"` with
+  // `updateAvailable: true` — so the notice rendered but this button stayed live next to it.
+  it("blocks the convert-at-install Update button until the license is accepted (sc-17227)", async () => {
+    await render([
+      {
+        ...LICENSE_ACK_ONLY_MODEL,
+        installState: "missing",
+        updateAvailable: true,
+        mlxConversionState: "converted",
+      },
+    ]);
+    await selectTab(container, "Video Models");
+    const updateButton = [...container.querySelectorAll(".mlx-status button")].find(
+      (button) => button.textContent === "Update",
+    );
+    expect(updateButton, "the MLX Update button").toBeTruthy();
+    expect(updateButton.disabled).toBe(true);
+    expect(updateButton.getAttribute("title")).toBe("Accept the license above before downloading.");
+    await click(updateButton);
+    expect(createModelDownloadJob).not.toHaveBeenCalled();
+
+    const ackCheckbox = container.querySelector(".model-license-ack input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked").set.call(
+        ackCheckbox,
+        true,
+      );
+      ackCheckbox.dispatchEvent(new window.Event("click", { bubbles: true }));
+    });
+    expect(updateButton.disabled).toBe(false);
+    await click(updateButton);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "minimax_h3" }),
+    );
+  });
+
+  // sc-17227: the gate follows the DOWNLOAD, not the install state. An installed model offering an
+  // update is about to fetch new weights under the same licence, so the notice must come back —
+  // otherwise the choke point would refuse the Update with no surface on which to re-accept, which
+  // is reachable in practice because desktop localStorage does not survive a relaunch.
+  it("re-raises the gate on an installed model when an update is offered (sc-17227)", async () => {
+    await render([
+      {
+        ...LICENSE_ACK_ONLY_MODEL,
+        installState: "installed",
+        updateAvailable: true,
+        mlxConversionState: "converted",
+      },
+    ]);
+    await selectTab(container, "Video Models");
+    expect(container.querySelector(".model-gated-notice")).toBeTruthy();
+    expect(container.querySelector(".model-license-ack input")).toBeTruthy();
+    const updateButton = [...container.querySelectorAll(".mlx-status button")].find(
+      (button) => button.textContent === "Update",
+    );
+    expect(updateButton.disabled).toBe(true);
+  });
+
+  // sc-17227 review MINOR 1. Mutating the `useState` initializer's predicate back to `model.gated`
+  // left all 64 tests green, because the sc-7873 `useEffect([models])` re-seed runs on mount too
+  // and `act` flushes it before any assertion — so no DOM-based test can tell the two apart.
+  //
+  // The initializer's actual job is the FIRST PAINT: a returning user must not see the gate flash
+  // blocked before an effect corrects it. `renderToString` is the one render path that runs the
+  // initializer and NOT the effects, so it isolates exactly that. Mounted with the catalog already
+  // populated — the case the async-catalog test above deliberately does not cover.
+  it("seeds the ack in the initializer itself, before any effect runs (sc-17227)", async () => {
+    window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
+    const { renderToString } = await import("react-dom/server");
+    const markup = renderToString(
+      <AppContext.Provider
+        value={{
+          activeProject: null,
+          jobs: [],
+          loras: [],
+          // Typed `image` purely so the card lands on the default tab: there is no click to
+          // switch tabs in a string render. The gate reads no model type.
+          models: [{ ...LICENSE_ACK_ONLY_MODEL, type: "image" }],
+          presets: [],
+          jobAction: () => {},
+          setActiveView,
+          deleteLora: () => {},
+          deleteModel: () => {},
+          createModelDownloadJob,
+          createModelConvertJob: () => {},
+          createLoraImportJob: () => {},
+          createModelImportJob: () => {},
+        }}
+      >
+        <ModelManagerScreen />
+      </AppContext.Provider>,
+    );
+    // The acknowledgment checkbox is rendered checked on the very first pass, and the Download
+    // button is not carrying the blocked title. Both come from the initializer alone.
+    expect(markup).toContain('class="model-license-ack"');
+    expect(markup).toMatch(/model-license-ack[^]*?checked=""/);
+    expect(markup).not.toContain("Accept the license above before downloading.");
+  });
+
   it("offers a one-click Fix on a torn tier that repairs by re-downloading it (sc-13383)", async () => {
     await render([TORN_TIER_MODEL]);
     const tierRows = [...container.querySelectorAll(".model-tier-row")];
@@ -357,6 +826,44 @@ describe("ModelManagerScreen gated-model notice", () => {
       { variant: "q8" },
     );
   });
+
+  it("repairs MiniMax-H3 bf16's missing encoder while q4 remains installed", async () => {
+    const model = {
+      ...TORN_TIER_MODEL,
+      id: "minimax_h3",
+      name: "MiniMax-H3",
+      family: "minimax-h3",
+      cacheState: "incomplete",
+      repairAvailable: true,
+      variants: [
+        {
+          variant: "bf16",
+          installed: false,
+          installState: "missing",
+          cacheState: "incomplete",
+          missingRequiredFiles: ["MiniMaxAI/MiniMax-H3/text_encoder/config.json"],
+        },
+        { variant: "q8", installed: false, installState: "missing", cacheState: "missing" },
+        { variant: "q4", installed: true, installState: "installed", cacheState: "complete" },
+      ],
+    };
+    await render([model]);
+    const rows = [...container.querySelectorAll(".model-tier-row")];
+    const bf16 = rows[0]; // Tier order is bf16, q8, q4.
+    expect(bf16.querySelector(".status-badge").textContent).toBe("incomplete");
+    const fix = [...bf16.querySelectorAll("button")].find((button) => button.textContent === "Fix");
+    expect(fix.title).toContain("text_encoder/config.json");
+    expect(fix.disabled).toBe(false);
+    await click(fix);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "minimax_h3" }), { variant: "bf16" });
+    createModelDownloadJob.mockClear();
+    await click(container.querySelector(".model-card-primary"));
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "minimax_h3" }), { variant: "bf16" });
+    for (const tier of ["Q4", "Q8"]) {
+      const row = rows.find((candidate) => candidate.textContent.includes(tier));
+      expect([...row.querySelectorAll("button")].some((button) => button.textContent === "Fix")).toBe(false);
+    }
+  });
 });
 
 const WAN_MOE_MODEL = {
@@ -367,6 +874,25 @@ const WAN_MOE_MODEL = {
   installState: "ready",
   ui: { description: "Wan A14B MoE video model." },
 };
+
+const LTX_MODELS = [
+  {
+    id: "ltx_2_3",
+    name: "LTX-2.3",
+    type: "video",
+    family: "ltx-video",
+    loraCompatibility: { families: ["ltx-video"] },
+    installState: "ready",
+  },
+  {
+    id: "ltx_2_5",
+    name: "LTX-2.5",
+    type: "video",
+    family: "ltx-video",
+    loraCompatibility: { families: ["ltx-video"] },
+    installState: "ready",
+  },
+];
 
 function setNativeValue(element, value) {
   const proto = element.tagName === "SELECT" ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
@@ -401,12 +927,12 @@ describe("ModelManagerScreen Wan A14B MoE LoRA import (sc-1991)", () => {
     vi.restoreAllMocks();
   });
 
-  async function render() {
+  async function render(models = [WAN_MOE_MODEL]) {
     const value = {
       activeProject: null,
       jobs: [],
       loras: [],
-      models: [WAN_MOE_MODEL],
+      models,
       presets: [],
       jobAction: () => {},
       setActiveView: () => {},
@@ -452,9 +978,13 @@ describe("ModelManagerScreen Wan A14B MoE LoRA import (sc-1991)", () => {
     });
   }
 
-  async function selectWanVideoFamily() {
+  async function selectFamily(family) {
     const familySelect = labelStartingWith("Family").querySelector("select");
-    await change(familySelect, "wan-video");
+    await change(familySelect, family);
+  }
+
+  async function selectWanVideoFamily() {
+    await selectFamily("wan-video");
   }
 
   it("defaults the LoRA import to Upload mode", async () => {
@@ -505,6 +1035,43 @@ describe("ModelManagerScreen Wan A14B MoE LoRA import (sc-1991)", () => {
     const payload = createLoraImportJob.mock.calls[0][0];
     expect(payload.family).toBe("wan-video");
     expect(payload.baseModel).toBe("wan_2_2_t2v_14b");
+  });
+
+  it("requires and submits an LTX-family base without exposing Wan's paired-file slot", async () => {
+    await render([WAN_MOE_MODEL, ...LTX_MODELS]);
+    await selectFamily("ltx-video");
+
+    const baseModelLabel = labelStartingWith("Base model");
+    const baseSelect = baseModelLabel.querySelector("select");
+    expect([...baseSelect.options].map((option) => option.value)).toEqual([
+      "",
+      "ltx_2_3",
+      "ltx_2_5",
+    ]);
+    expect(baseModelLabel.textContent).not.toContain("Wan 2.2");
+    expect(labelStartingWith("Low-noise expert")).toBeUndefined();
+
+    await act(async () => {
+      [...loraForm().querySelectorAll("button")].find((button) => button.textContent === "URL").click();
+    });
+    await change(
+      labelStartingWith("Source URL").querySelector("input"),
+      "https://example.com/ltx-style.safetensors",
+    );
+    const queue = [...loraForm().querySelectorAll("button")].find(
+      (button) => button.textContent === "Queue Import",
+    );
+    expect(queue.disabled).toBe(true);
+
+    await change(baseSelect, "ltx_2_5");
+    expect(queue.disabled).toBe(false);
+    await act(async () => {
+      loraForm().dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    const payload = createLoraImportJob.mock.calls.at(-1)[0];
+    expect(payload).toMatchObject({ family: "ltx-video", baseModel: "ltx_2_5" });
+    expect(payload.secondaryFile).toBeUndefined();
   });
 
   // Distilled variants whose model `family` differs from their LoRA-compatibility
@@ -585,12 +1152,14 @@ describe("ModelManagerScreen type-grouped layout", () => {
     jobs = [],
     createModelDownloadJob = () => {},
     createLoraDownloadJob = () => {},
+    updateLora,
   } = {}) {
     const value = {
       activeProject: null,
       jobs,
       loras,
       models,
+      updateLora,
       presets: [],
       workersById: new Map(),
       visibleWorkers: [],
@@ -618,6 +1187,8 @@ describe("ModelManagerScreen type-grouped layout", () => {
     { id: "z_image_turbo", name: "Z-Image-Turbo", type: "image", family: "z-image", capabilities: ["text_to_image"], installState: "missing" },
     { id: "wan_t2v", name: "Wan T2V", type: "video", family: "wan-video", capabilities: ["text_to_video"], installState: "missing" },
     { id: "real_esrgan", name: "Real-ESRGAN", type: "utility", family: "real-esrgan", capabilities: [], installState: "missing" },
+    { id: "starvector_1b", name: "StarVector-1B", type: "vector", family: "starvector", capabilities: ["image_to_svg"], installState: "missing", cacheState: "missing", downloadable: true },
+    { id: "starvector_8b", name: "StarVector-8B", type: "vector", family: "starvector", capabilities: ["image_to_svg"], installState: "missing", cacheState: "missing", downloadable: true },
   ];
 
   function tabLabels() {
@@ -626,8 +1197,8 @@ describe("ModelManagerScreen type-grouped layout", () => {
 
   it("renders a tab per model type in fixed order, each scoped to its own type", async () => {
     await render({ models: MODELS });
-    // Five fixed tabs; the model tabs carry a total-count badge (Audio + LoRAs are 0 here).
-    expect(tabLabels()).toEqual(["Image Models1", "Video Models1", "Audio Models0", "Utility Models1", "LoRAs0"]);
+    // Six fixed tabs; the model tabs carry a total-count badge (Audio + LoRAs are 0 here).
+    expect(tabLabels()).toEqual(["Image Models1", "Video Models1", "Audio Models0", "Vector Models2", "Utility Models1", "LoRAs0"]);
     // The default (Image) tab shows only its own type's card.
     expect(container.querySelectorAll(".model-card").length).toBe(1);
     expect(container.textContent).toContain("Z-Image-Turbo");
@@ -638,11 +1209,17 @@ describe("ModelManagerScreen type-grouped layout", () => {
     expect(container.textContent).not.toContain("Z-Image-Turbo");
     await selectTab(container, "Utility Models");
     expect(container.textContent).toContain("Real-ESRGAN");
+    await selectTab(container, "Vector Models");
+    expect(container.textContent).toContain("StarVector-1B");
+    expect(container.textContent).toContain("StarVector-8B");
+    expect(container.textContent).toContain("Image to SVG");
+    expect(container.textContent).not.toContain("Text to SVG");
+    expect(container.textContent).toContain("Download");
   });
 
-  it("always shows all five tabs, with a zero count and empty state for an unpopulated type", async () => {
+  it("always shows all six tabs, with a zero count and empty state for an unpopulated type", async () => {
     await render({ models: [MODELS[0]] });
-    expect(tabLabels()).toEqual(["Image Models1", "Video Models0", "Audio Models0", "Utility Models0", "LoRAs0"]);
+    expect(tabLabels()).toEqual(["Image Models1", "Video Models0", "Audio Models0", "Vector Models0", "Utility Models0", "LoRAs0"]);
     await selectTab(container, "Video Models");
     expect(container.querySelector(".models-empty")).toBeTruthy();
     expect(container.textContent).toContain("No models match your search.");
@@ -766,6 +1343,80 @@ describe("ModelManagerScreen type-grouped layout", () => {
     );
   });
 
+  // sc-25684 (E4): the three Iris-3B TASK installs share one upstream repo but are three catalog
+  // entries with their own closures. Each card reports its OWN state off the API row — the
+  // generation card is incomplete when only its Qwen3-VL text encoder is missing and its Fix
+  // re-fetches the generation entry; the depth card stays installed (it needs no encoder); the
+  // restoration card is a plain Download — and all three resolve to the one Apache-2.0 Iris licence
+  // component the About → Licenses screen lists.
+  it("reports each Iris task install on its own card and repairs only the incomplete one (sc-25684)", async () => {
+    const createModelDownloadJob = vi.fn();
+    await render({
+      createModelDownloadJob,
+      models: [
+        {
+          id: "iris_3b",
+          name: "Iris 3B",
+          type: "image",
+          family: "iris",
+          capabilities: ["text_to_image"],
+          installState: "missing",
+          cacheState: "incomplete",
+          repairAvailable: true,
+          missingRequiredFiles: ["Qwen/Qwen3-VL-4B-Instruct@ebb281e/config.json"],
+          downloadable: true,
+        },
+        {
+          id: "iris_3b_depth",
+          name: "Iris 3B Depth",
+          type: "utility",
+          family: "iris",
+          capabilities: [],
+          installState: "installed",
+          cacheState: "complete",
+          downloadable: true,
+        },
+        {
+          id: "iris_3b_restore",
+          name: "Iris 3B Restoration",
+          type: "utility",
+          family: "iris",
+          capabilities: [],
+          installState: "missing",
+          cacheState: "missing",
+          downloadable: true,
+        },
+      ],
+    });
+    const card = (name) =>
+      [...container.querySelectorAll(".model-card")].find(
+        (candidate) => candidate.querySelector(".model-card-title")?.textContent.includes(name),
+      );
+    const buttons = (element) => [...element.querySelectorAll("button")].map((button) => button.textContent);
+
+    const generation = card("Iris 3B");
+    expect(generation.textContent).toContain("incomplete");
+    expect(generation.textContent).toContain("Qwen3-VL-4B-Instruct");
+    const fix = [...generation.querySelectorAll("button")].find((button) => button.textContent === "Fix");
+    expect(fix, "the generation card offers a repair").toBeTruthy();
+    await click(fix);
+    expect(createModelDownloadJob).toHaveBeenCalledTimes(1);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "iris_3b" }));
+
+    await selectTab(container, "Utility Models");
+    const depth = card("Iris 3B Depth");
+    const restore = card("Iris 3B Restoration");
+    expect(depth.querySelector(".model-card-status").textContent).toContain("installed");
+    expect(buttons(depth)).not.toContain("Fix");
+    expect(restore.querySelector(".model-card-status").textContent).toContain("missing");
+    expect(buttons(restore)).not.toContain("Fix");
+
+    const { licenseComponentForModel } = await import("../data/bundledLicenses.js");
+    const components = ["iris_3b", "iris_3b_depth", "iris_3b_restore"].map((id) => licenseComponentForModel(id));
+    expect(new Set(components.map((component) => component?.id))).toEqual(new Set(["iris-3b"]));
+    expect(components[0].license).toBe("Apache-2.0");
+  });
+
   // On the LoRAs tab, User LoRAs are grouped by family into `.models-subsection`s
   // (h4 heading); the Built-In / User scope sections are `.models-section`s (h3).
   function userFamilyHeadings() {
@@ -806,6 +1457,66 @@ describe("ModelManagerScreen type-grouped layout", () => {
     });
     await selectTab(container, "LoRAs");
     expect(userFamilyHeadings()).toEqual(["flux", "Other / compatible"]);
+  });
+
+  // sc-24163 (epic 24107 E10): a stored LoRA whose family could not be resolved is assigned one
+  // in place — the row offers "Choose family", the editor lists the catalog's LoRA families, and
+  // Save sends `family`; once assigned, the matching model's picker offers it and the other does not.
+  it("lets the user choose the family of an unresolved LoRA, which the matching picker then offers", async () => {
+    const { loraMatchesModel } = await import("../presetUtils.js");
+    const qwen21 = { id: "qwen_image_2_1", name: "Qwen Image 2.1", type: "image", family: "qwen-image-2-1", loraCompatibility: { families: ["qwen-image-2-1"] }, capabilities: ["text_to_image"], installState: "installed" };
+    const qwen2512 = { id: "qwen_image", name: "Qwen Image", type: "image", family: "qwen-image", loraCompatibility: { families: ["qwen-image"] }, capabilities: ["text_to_image"], installState: "installed" };
+    const unresolved = { id: "mystery", name: "Mystery", scope: "global", installState: "installed" };
+    const updateLora = vi.fn(async (lora, updates) => ({ ...lora, ...updates }));
+    await render({
+      models: [qwen21, qwen2512],
+      loras: [unresolved, { id: "known", name: "Known", family: "qwen-image", scope: "global", installState: "installed" }],
+      updateLora,
+    });
+    await selectTab(container, "LoRAs");
+    const rowFor = (name) => [...container.querySelectorAll(".lora-row")].find((row) => row.textContent.includes(name));
+    const buttonIn = (row, text) => [...row.querySelectorAll("button")].find((node) => node.textContent.trim() === text);
+    // A resolved LoRA keeps the plain Edit, and its editor has no family control.
+    expect(buttonIn(rowFor("Known"), "Choose family")).toBeUndefined();
+    await click(buttonIn(rowFor("Known"), "Edit"));
+    expect(rowFor("Known").textContent).not.toContain("Unresolved family");
+    await click(buttonIn(rowFor("Known"), "Cancel"));
+
+    expect(loraMatchesModel(unresolved, qwen21)).toBe(false);
+    await click(buttonIn(rowFor("Mystery"), "Choose family"));
+    const select = [...rowFor("Mystery").querySelectorAll("label")]
+      .find((label) => label.textContent.startsWith("Unresolved family — choose"))
+      ?.querySelector("select");
+    expect([...select.options].map((option) => option.value)).toEqual(["", "qwen-image", "qwen-image-2-1"]);
+    await act(async () => setSelect(select, "qwen-image-2-1"));
+    await click(buttonIn(rowFor("Mystery"), "Save"));
+
+    expect(updateLora).toHaveBeenCalledTimes(1);
+    expect(updateLora.mock.calls[0][0]).toMatchObject({ id: "mystery" });
+    expect(updateLora.mock.calls[0][1]).toEqual({ triggerWords: [], notes: "", family: "qwen-image-2-1" });
+    const assigned = await updateLora.mock.results[0].value;
+    expect(loraMatchesModel(assigned, qwen21)).toBe(true);
+    expect(loraMatchesModel(assigned, qwen2512)).toBe(false);
+  });
+
+  // sc-24163 (round 2): an external (ComfyUI-folder) row has no manifest to write the family to —
+  // the API refuses it — so it never offers the chooser; it says to import a copy instead.
+  it("points an unresolved external LoRA at importing a copy instead of offering the chooser", async () => {
+    const updateLora = vi.fn();
+    await render({
+      models: [{ id: "qwen_image_2_1", name: "Qwen Image 2.1", type: "image", family: "qwen-image-2-1", loraCompatibility: { families: ["qwen-image-2-1"] }, capabilities: ["text_to_image"], installState: "installed" }],
+      loras: [{ id: "external_mystery", name: "Comfy Mystery", scope: "external", installState: "installed" }],
+      updateLora,
+    });
+    await selectTab(container, "LoRAs");
+    const row = [...container.querySelectorAll(".lora-row")].find((node) => node.textContent.includes("Comfy Mystery"));
+    expect(row.textContent).toContain("Import a copy to choose its family.");
+    expect([...row.querySelectorAll("button")].some((node) => node.textContent.trim() === "Choose family")).toBe(false);
+    const edit = [...row.querySelectorAll("button")].find((node) => node.textContent.trim() === "Edit");
+    if (edit) {
+      await click(edit);
+      expect(row.textContent).not.toContain("Unresolved family");
+    }
   });
 
   it("separates built-in LoRAs from user LoRAs into their own sections", async () => {
@@ -1038,7 +1749,7 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
   // carrying variant / installState / downloadSizeBytes / footprint. Tiers are sized so the RAM
   // suggestion lands on q4 at 32 GB (budget 28.8 GB: q4 estimated peak 18 GB fits; q8/bf16 overflow)
   // and on bf16 at 512 GB (budget 460.8 GB: bf16 estimated peak 38 GB fits).
-  function matrixModel({ installed = [] } = {}) {
+  function matrixModel({ installed = [], pending = [], notDeletable = [] } = {}) {
     // diskGb (on-disk footprint, req #1 — this is what the row must render) is deliberately distinct
     // from downloadGb (compressed download) so the assertions prove the displayed size comes from
     // footprint.diskSizeBytes, not downloadSizeBytes. The RAM suggestion keys off diskGb.
@@ -1057,8 +1768,18 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
       hasVariantMatrix: true,
       variants: tiers.map((tier) => ({
         variant: tier.variant,
-        installState: installed.includes(tier.variant) ? "installed" : "missing",
+        // sc-24112: `pending` is the API's third install state for a declared-but-unpublished
+        // tier, and `tierDeletable: false` is how it reports a tier the per-tier delete cannot
+        // reclaim on its own (a whole-repo row with no `files` scope).
+        installState: pending.includes(tier.variant)
+          ? "pending"
+          : installed.includes(tier.variant)
+            ? "installed"
+            : "missing",
         cacheState: installed.includes(tier.variant) ? "complete" : "missing",
+        pendingArtifact: pending.includes(tier.variant),
+        tierDeletable:
+          !pending.includes(tier.variant) && !notDeletable.includes(tier.variant),
         downloadSizeBytes: tier.downloadGb * GB,
         footprint: { diskSizeBytes: tier.diskGb * GB, residentMemoryBytes: null, peakMemoryBytes: null },
       })),
@@ -1177,14 +1898,38 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     expect(labels[0]).toContain("bf16");
     expect(labels[2]).toContain("Q4");
     // Sizes render the ON-DISK footprint (req #1: footprint.diskSizeBytes), not the smaller
-    // compressed downloadSizeBytes. bf16 disk = 24 GB (download 20 GB), q4 disk = 4 GB (download 3 GB).
-    expect(container.textContent).toContain("24.0 GB");
-    expect(container.textContent).toContain("4.0 GB");
-    expect(container.textContent).not.toContain("20.0 GB");
-    expect(container.textContent).not.toContain("3.0 GB");
+    // compressed downloadSizeBytes. bf16 disk = 24 GiB (download 20 GiB), q4 disk = 4 GiB (download 3 GiB).
+    expect(container.textContent).toContain("24.0 GiB");
+    expect(container.textContent).toContain("4.0 GiB");
+    expect(container.textContent).not.toContain("20.0 GiB");
+    expect(container.textContent).not.toContain("3.0 GiB");
     // The installed tier reports installed; the others report not installed.
     const q8Row = rows.find((row) => row.querySelector(".model-tier-label").textContent.includes("Q8"));
     expect(q8Row.querySelector(".status-badge").textContent).toBe("installed");
+  });
+
+  it("keeps every complete SCAIL-2 package tier visible and installed in Model Manager", async () => {
+    const scail = {
+      ...matrixModel({ installed: ["q4", "q8", "bf16"] }),
+      id: "scail2_14b",
+      name: "SCAIL-2",
+      type: "video",
+      family: "scail2",
+    };
+    await render([scail]);
+    await selectTab(container, "Video Models");
+
+    const rows = tierRows();
+    expect(rows.map((row) => row.querySelector(".model-tier-label").textContent)).toEqual([
+      expect.stringContaining("bf16"),
+      expect.stringContaining("Q8"),
+      expect.stringContaining("Q4"),
+    ]);
+    expect(rows.map((row) => row.querySelector(".status-badge").textContent)).toEqual([
+      "installed",
+      "installed",
+      "installed",
+    ]);
   });
 
   // sc-12279 (issue #850): a TORN tier — some of its files cached, some not — used to render as "not
@@ -1293,6 +2038,79 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
       expect.objectContaining({ id: "z_image_turbo" }),
       "q8",
     );
+  });
+
+  // sc-24112: a DECLARED-but-unpublished tier (`pendingArtifact`). The catalog advertises it so the
+  // tier axis is real before the bytes exist — the memory ladder, the fit gates and this panel are
+  // all built against it — but its artifact is not on the Hub yet and its revision is the null-SHA
+  // placeholder. The API refuses the download with the reason, so the row must NOT offer a
+  // checkbox that would queue a fetch that cannot resolve; it says why instead.
+  it("offers no download for a tier whose artifact is not published yet", async () => {
+    await render([
+      matrixModel({
+        installed: ["bf16"],
+        pending: ["q4", "q8"],
+      }),
+    ]);
+    const rowFor = (label) =>
+      tierRows().find((row) => row.querySelector(".model-tier-label").textContent.includes(label));
+    for (const label of ["Q4", "Q8"]) {
+      const row = rowFor(label);
+      expect(row.querySelector("input").disabled).toBe(true);
+      expect(row.querySelector(".status-badge").textContent).toBe("not published yet");
+      // …and nothing to reclaim, because nothing was ever fetched.
+      expect(row.querySelector(".model-tier-delete")).toBeNull();
+    }
+    // The published tier is unaffected: still listed, still selectable-as-installed.
+    expect(rowFor("bf16").querySelector(".status-badge").textContent).toBe("installed");
+  });
+
+  // sc-22999 / sc-23000: a locally DERIVED tier (YuE2 q8 / q4, `derivationPending`) IS installable —
+  // its download fetches the original and the worker derives the tier — so, unlike an unpublished
+  // artifact, its row stays selectable and its download is queued for exactly that tier.
+  it("offers a derivation-pending tier for install, labelled as derived here", async () => {
+    const base = matrixModel({ installed: ["bf16"] });
+    const model = {
+      ...base,
+      variants: base.variants.map((variant) =>
+        variant.variant === "bf16"
+          ? variant
+          : { ...variant, installState: "derivationPending", derivationPending: true },
+      ),
+    };
+    await render([model]);
+    const q4 = tierRows().find((row) => row.querySelector(".model-tier-label").textContent.includes("Q4"));
+    expect(q4.querySelector(".status-badge").textContent).toBe("derived on this machine");
+    const box = q4.querySelector("input");
+    expect(box.disabled).toBe(false);
+    if (!box.checked) {
+      await click(box);
+    }
+    const download = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.startsWith("Download Q4"),
+    );
+    expect(download?.disabled).toBe(false);
+    await click(download);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "z_image_turbo" }), { variant: "q4" });
+  });
+
+  // sc-24112: the per-tier delete is offered only for a tier the API can actually reclaim ALONE.
+  // A whole-repo tier (`files: []` — `qwen_image_2_1`'s bf16 IS the upstream snapshot) is the model
+  // rather than a slice of it, and `DELETE /models/:id/variants/:variant` refuses it with "delete
+  // the whole model instead". Before this story every variant row carried a file glob and the API's
+  // own comment assumed it always would, so the button was offered unconditionally on an installed
+  // tier — which would now render a Delete that always errors.
+  it("hides the per-tier delete on an installed tier the API cannot reclaim alone", async () => {
+    await render([
+      matrixModel({ installed: ["bf16", "q8"], notDeletable: ["bf16"] }),
+    ]);
+    const rowFor = (label) =>
+      tierRows().find((row) => row.querySelector(".model-tier-label").textContent.includes(label));
+    expect(rowFor("bf16").querySelector(".status-badge").textContent).toBe("installed");
+    expect(rowFor("bf16").querySelector(".model-tier-delete")).toBeNull();
+    // A scoped sibling still reclaims normally, so this is a per-row fact and not the control
+    // being switched off.
+    expect(rowFor("Q8").querySelector(".model-tier-delete")).toBeTruthy();
   });
 
   // sc-12025: convert-at-install models (mlxTiers, e.g. Anima) render no download panel, so they get
@@ -1427,18 +2245,37 @@ describe("ModelManagerScreen convert-at-install Update button", () => {
     await selectTab(container, "Video Models"); // convertModel is a video model
     const updateButton = mlxButtons().find((button) => button.textContent === "Update");
     expect(updateButton).toBeTruthy();
-    // The stale converted state does NOT also render the disabled "MLX ready" button.
-    expect(mlxButtons().some((button) => button.textContent === "MLX ready")).toBe(false);
+    // The stale converted state does NOT also render the disabled "Converted" button.
+    expect(mlxButtons().some((button) => button.textContent === "Converted")).toBe(false);
     await click(updateButton);
     expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "ltx_2_3_eros" }));
   });
 
-  it("shows the normal MLX-ready state (no Update button) when up to date", async () => {
+  it("shows the normal converted state (no Update button) when up to date", async () => {
     await render([convertModel({ updateAvailable: false })]);
     await selectTab(container, "Video Models"); // convertModel is a video model
     expect(mlxButtons().some((button) => button.textContent === "Update")).toBe(false);
-    expect(mlxButtons().some((button) => button.textContent === "MLX ready")).toBe(true);
+    expect(mlxButtons().some((button) => button.textContent === "Converted")).toBe(true);
     expect(createModelDownloadJob).not.toHaveBeenCalled();
+  });
+
+  // sc-20529: the conversion block is no longer macOS-only. `apply_mac_and_mlx_fields` emits
+  // `mlxConversionState` on Windows/Linux for a convert-at-install model whose converter has a real
+  // candle twin (`flux2_klein_9b_true_v2`), where the candle converter writes a diffusers dir for
+  // CUDA — so every string this block renders must name the ACTION, not the macOS backend.
+  // Mutation witness: restore any of "Convert to MLX" / "MLX ready" / "convert it to MLX" /
+  // "Converted to MLX and ready." / the "MLX" badge and this goes red.
+  it("keeps the conversion block's copy device-neutral", async () => {
+    for (const state of ["ready", "needs_source", "needs_conversion", "converted"]) {
+      await render([convertModel({ mlxConversionState: state, updateAvailable: false })]);
+      await selectTab(container, "Video Models"); // convertModel is a video model
+      const block = container.querySelector(".mlx-status");
+      expect(block, `${state}: the conversion block must render`).toBeTruthy();
+      expect(
+        block.textContent.includes("MLX"),
+        `${state}: conversion copy must not name MLX — this block renders on Windows/Linux too (got ${JSON.stringify(block.textContent)})`,
+      ).toBe(false);
+    }
   });
 
   it("shows and runs the update action for a usable stale non-converted model", async () => {
@@ -1531,6 +2368,7 @@ describe("ModelManagerScreen model & LoRA delete confirms (sc-12068)", () => {
     name: "Z-Image-Turbo",
     type: "image",
     family: "z-image",
+    catalogScope: "builtin",
     capabilities: ["text_to_image"],
     installState: "installed",
     removable: true,
@@ -1538,6 +2376,32 @@ describe("ModelManagerScreen model & LoRA delete confirms (sc-12068)", () => {
 
   const modelDeleteButton = () =>
     [...container.querySelectorAll(".model-card .danger-action")].find((button) => button.textContent === "Delete");
+
+  it("renders complete and partial cleanup tombstones as delete-only cards", async () => {
+    for (const [installState, cacheState] of [
+      ["installed", "complete"],
+      ["missing", "incomplete"],
+    ]) {
+      await render({
+        models: [{
+          id: "ltx_2_3_eros",
+          name: "LTX-2.3 10Eros",
+          type: "video",
+          family: "ltx-video",
+          installState,
+          cacheState,
+          platformCleanupOnly: true,
+          downloadable: false,
+          removable: true,
+        }],
+      });
+      await selectTab(container, "Video Models");
+      const card = container.querySelector(".model-card");
+      expect(card?.textContent).toContain("no longer available on this platform");
+      expect(modelDeleteButton()).toBeTruthy();
+      expect([...card.querySelectorAll("button")].map((button) => button.textContent)).toEqual(["Delete"]);
+    }
+  });
 
   it("confirms a model delete via appConfirm (danger) and removes it when accepted", async () => {
     appConfirmMock.mockReset();
@@ -1550,7 +2414,13 @@ describe("ModelManagerScreen model & LoRA delete confirms (sc-12068)", () => {
     await flushConfirm();
 
     expect(appConfirmMock).toHaveBeenCalledWith(
-      expect.objectContaining({ title: "Delete model?", tone: "danger" }),
+      expect.objectContaining({
+        title: "Delete model?",
+        tone: "danger",
+        message: expect.stringContaining(
+          "Deleting removes a user overlay or SceneWorks-owned local files when present",
+        ),
+      }),
     );
     expect(deleteModel).toHaveBeenCalledWith(expect.objectContaining({ id: "z_image_turbo" }));
   });
@@ -1729,8 +2599,8 @@ describe("ModelManagerScreen Audio Models tab + capability chips (sc-13406)", ()
   it("registers an Audio Models tab with a per-type count that lists only audio models", async () => {
     await render([IMAGE_MODEL, KOKORO, ACE_STEP, OPENVOICE]);
     const tabLabels = [...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent);
-    // Fixed order: Image, Video, Audio, Utility, LoRAs. Audio carries a total-of-3 badge.
-    expect(tabLabels).toEqual(["Image Models1", "Video Models0", "Audio Models3", "Utility Models0", "LoRAs0"]);
+    // Fixed order: Image, Video, Audio, Vector, Utility, LoRAs. Audio carries a total-of-3 badge.
+    expect(tabLabels).toEqual(["Image Models1", "Video Models0", "Audio Models3", "Vector Models0", "Utility Models0", "LoRAs0"]);
     // Default (Image) tab shows only the image card, not the audio ones.
     expect(container.textContent).toContain("Z-Image-Turbo");
     expect(cardFor("Kokoro 82M (Speech)")).toBeUndefined();

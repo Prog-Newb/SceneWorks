@@ -71,10 +71,21 @@ pub(crate) struct PromptRefineRequest {
     /// HF repo string of the model the worker should load (the worker resolves by repo,
     /// not by catalog id). The web sends the vision model's repo for the vision tasks.
     pub(crate) model: Option<String>,
+    /// Native planner reasoning control (`disabled`, `enabled`, or `auto`). Only the film-plan task
+    /// forwards it; other prompt-refine products retain their established model defaults.
+    pub(crate) thinking_mode: Option<String>,
     /// Plain-text describe style for `image_describe` (epic 8203, sc-8205): `"prose"`
     /// (default) or `"tags"` (booru/danbooru tags for anime SDXL checkpoints). Forwarded
     /// verbatim; the worker parses it (unknown/absent → prose).
     pub(crate) caption_style: Option<String>,
+    /// Compressed KV cache opt-in for this generation (sc-20682): `"off"` or `"qualified"`.
+    /// Absent leaves the worker's own default (`SCENEWORKS_LLM_KV_COMPRESSION`, off unless set).
+    /// `"qualified"` never forces compression: the engine runs compressed only for a single
+    /// sequence on a model matching one of its two measured architectures (Llama-3.2-3B-Instruct,
+    /// dense Qwen3-1.7B) within that row's context range (`docs/kv-baseline-harness.md`); batched,
+    /// short and other-model requests run dense with a reason, and the job result's
+    /// `generation.kvCache` records what ran.
+    pub(crate) kv_compression: Option<String>,
 }
 
 /// On-demand "compare image to another" likeness request (epic 4406, sc-4415). Scores a CANDIDATE
@@ -401,6 +412,7 @@ pub(crate) struct TimelineCreateRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TimelineSaveRequest {
     pub(crate) timeline: Value,
+    pub(crate) expected_revision: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -412,6 +424,11 @@ pub(crate) struct TimelineExportRequest {
     pub(crate) fps: u32,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
+    /// The export is for a commercial use (sc-22999, epic 22988 E2). An export that places an
+    /// asset whose usage policy refuses commercial use (YuE2 audio) is refused with the pointer
+    /// to the commercially eligible alternative. Absent ⇒ not declared commercial.
+    #[serde(default)]
+    pub(crate) commercial_use: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -472,6 +489,17 @@ pub(crate) struct TrainingCaptionJobRequest {
     pub(crate) captioner: String,
     #[serde(default = "default_training_caption_model")]
     pub(crate) model_name_or_path: String,
+    /// Caption mode (sc-24829): `default` (the full-scene JoyCaption prompt), `subjectOnly` (the
+    /// worker's subject-only prompt) or `triggerOnly` (exactly the trigger words, no captioner).
+    /// Unknown strings deserialize to `CaptionMode::Unknown` and are refused by validation.
+    #[serde(default = "default_training_caption_mode")]
+    pub(crate) mode: sceneworks_core::training::CaptionMode,
+    /// Trigger words for the job (sc-24829): filled into every captioned item that carries none of
+    /// its own, in every mode — so a trigger-only caption has words to write, and default /
+    /// subject-only captions get them prepended. Limits mirror the caption dialog
+    /// (`captionTriggerWordLimits` in `joyCaptionPrompts.js`).
+    #[serde(default)]
+    pub(crate) trigger_words: Vec<String>,
     #[serde(default)]
     pub(crate) recaption: bool,
     #[serde(default = "default_requested_gpu")]
@@ -527,6 +555,10 @@ pub(crate) struct DatasetParquetImportJobRequest {
     /// Case-insensitive caption substrings. A matching row is always rejected.
     #[serde(default)]
     pub(crate) caption_excludes: Vec<String>,
+    /// Extra columns imported as per-item named captions (`captions: {column: text}`), the
+    /// HF-style multi-field caption source the Iris trainer's `caption_field(s)` read (sc-25685).
+    #[serde(default)]
+    pub(crate) caption_field_columns: Vec<String>,
 }
 
 fn default_parquet_url_column() -> String {
@@ -560,6 +592,36 @@ pub(crate) struct DatasetFaceAnalysisJobRequest {
     /// Restrict the pass to these dataset item ids; when absent, every item is analyzed.
     #[serde(default)]
     pub(crate) item_ids: Option<Vec<String>>,
+}
+
+/// Request to generate SAM3 subject masks over a training dataset (sc-2126). The segmenter is fixed
+/// (SAM3 "person"), so the request only carries GPU routing and an optional item subset.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetSubjectMaskJobRequest {
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    /// Restrict the pass to these dataset item ids; when absent, every item is masked.
+    #[serde(default)]
+    pub(crate) item_ids: Option<Vec<String>>,
+}
+
+/// The subject-mask worker POSTs its generated masks here (sc-2126). Each mask is a base64 PNG keyed
+/// by its image's content hash.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetSubjectMasksBody {
+    /// The segmentation space the masks came from (e.g. `sam3-person`). Recorded for diagnostics.
+    pub(crate) space: String,
+    pub(crate) items: Vec<DatasetSubjectMaskRecordBody>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetSubjectMaskRecordBody {
+    pub(crate) content_hash: String,
+    /// Standard-alphabet base64 of the mask PNG.
+    pub(crate) mask_png: String,
 }
 
 /// The analysis worker POSTs its computed CLIP embeddings here to persist the sidecar (sc-6535) —
@@ -703,6 +765,11 @@ pub(crate) struct ImageJobRequest {
     #[serde(default = "default_image_mode")]
     pub(crate) mode: String,
     pub(crate) prompt: String,
+    /// A NATIVE prompt batch (sc-25681): prompts the model renders together in one pass, only for a
+    /// model declaring `image.maxPromptBatchImages` (Iris-3B). `prompt` must equal `prompts[0]`.
+    /// Typed so serde forwards it; empty (and omitted from the job payload) for an ordinary request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) prompts: Vec<String>,
     #[serde(default)]
     pub(crate) negative_prompt: String,
     #[serde(default = "default_image_model")]
@@ -791,6 +858,130 @@ pub(crate) struct ImageJobRequest {
     pub(crate) upscale: ImageUpscaleRequest,
     #[serde(default)]
     pub(crate) advanced: JsonObject,
+    /// Server-authored link for a disclosed composed workflow. Public callers cannot use this to
+    /// influence routing; the workflow route creates it after selecting the parent id.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow_parent_id: Option<String>,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum VectorMode {
+    ImageToSvg,
+    TextToSvg,
+}
+
+impl VectorMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ImageToSvg => "image_to_svg",
+            Self::TextToSvg => "text_to_svg",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct VectorSampling {
+    pub(crate) temperature: f32,
+    pub(crate) top_p: f32,
+    pub(crate) top_k: u32,
+    pub(crate) repetition_penalty: f32,
+    pub(crate) repetition_context: u32,
+    pub(crate) seed: Option<u64>,
+}
+
+impl Default for VectorSampling {
+    fn default() -> Self {
+        Self {
+            temperature: 0.2,
+            top_p: 0.9,
+            top_k: 0,
+            repetition_penalty: 1.0,
+            repetition_context: 0,
+            seed: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct VectorDetailBudget {
+    pub(crate) max_new_tokens: u32,
+    pub(crate) max_svg_bytes: u32,
+    pub(crate) max_wall_time_ms: u64,
+}
+
+pub(crate) const MAX_VECTOR_WALL_TIME_MS: u64 = 300_000;
+
+impl Default for VectorDetailBudget {
+    fn default() -> Self {
+        Self {
+            // Omitted requests retain the product's conservative cost default. Detailed callers
+            // explicitly select the advertised model-specific context-derived capacity.
+            max_new_tokens: 4_000,
+            max_svg_bytes: 256 * 1_024,
+            max_wall_time_ms: MAX_VECTOR_WALL_TIME_MS,
+        }
+    }
+}
+
+/// Typed Vector Studio request. SVG source is provider output only; callers can supply raster and
+/// text conditioning, but never raw SVG for the worker to publish.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct VectorRequest {
+    pub(crate) project_id: String,
+    #[serde(default)]
+    pub(crate) project_name: Option<String>,
+    pub(crate) mode: VectorMode,
+    pub(crate) model: String,
+    #[serde(default)]
+    pub(crate) source_asset_id: Option<String>,
+    #[serde(default)]
+    pub(crate) prompt: String,
+    #[serde(default)]
+    pub(crate) sampling: VectorSampling,
+    #[serde(default)]
+    pub(crate) detail_budget: VectorDetailBudget,
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+}
+
+/// Disclosed prompt-to-vector composition. This never means native text-to-SVG: the prompt is
+/// rendered by an ordinary text-to-image model and the resulting retained raster is submitted to
+/// the vector model in image_to_svg mode.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct VectorPromptWorkflowRequest {
+    pub(crate) project_id: String,
+    #[serde(default)]
+    pub(crate) project_name: Option<String>,
+    pub(crate) prompt: String,
+    #[serde(default)]
+    pub(crate) negative_prompt: String,
+    pub(crate) raster_model: String,
+    pub(crate) vector_model: String,
+    #[serde(default)]
+    pub(crate) seed: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) height: Option<u32>,
+    #[serde(default)]
+    pub(crate) sampling: VectorSampling,
+    #[serde(default)]
+    pub(crate) detail_budget: VectorDetailBudget,
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    /// Optional immutable identities used only by replay. Fresh requests omit them; the API stamps
+    /// authoritative revisions. Replay supplies them and fails typed if the catalog has moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expected_raster_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expected_vector_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -952,6 +1143,21 @@ pub(crate) struct VideoJobRequest {
     /// The worker pushes it as a second `Conditioning::VideoClip`.
     #[serde(default)]
     pub(crate) reference_clip_asset_id: Option<String>,
+    /// Reference **audio** clips for a multi-modal reference video mode (sc-17160,
+    /// MiniMax-H3 Ref2VA). The audio sibling of [`Self::reference_asset_ids`]: the worker
+    /// resolves each id through the project-scoped asset guard and pushes one
+    /// `Conditioning::ReferenceAudio` per entry.
+    ///
+    /// Serialized unconditionally, exactly like the two id lists above, so the enqueued
+    /// payload has one shape and a replay reader never has to distinguish "absent" from
+    /// "empty" (the sc-12345 lesson).
+    ///
+    /// Bounded twice: by the payload-sanity blanket `MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS`
+    /// in `validate_video_job`, and — the binding one — by the model's declared
+    /// `limits.maxReferenceAudioAssets`, which defaults to 0 so no already-shipped video
+    /// model accepts one.
+    #[serde(default)]
+    pub(crate) reference_audio_asset_ids: Vec<String>,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
     #[serde(default)]
@@ -1086,12 +1292,67 @@ pub(crate) struct AudioJobRequest {
     /// Bounded to a blanket sane 0..=1 range here; the converter re-checks it (finite, >= 0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) match_strength: Option<f32>,
+    /// Segmented-song controls (YuE lyrics2song, sc-19384). `segments` = how many lyric segments to
+    /// render, `maxNewTokensPerSegment` = the stage-1 token budget per segment, `repetitionPenalty` =
+    /// the stage-1 sampler penalty. Ride the worker-side `AudioParams` fields of the same names;
+    /// accepted only for a model whose manifest advertises `audio.supportsSegmentedLyrics` /
+    /// `audio.supportsRepetitionPenalty`. `None` ⇒ the model default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) segments: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_new_tokens_per_segment: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) repetition_penalty: Option<f32>,
+    /// Guidance on/off (sc-19384). `false` switches classifier-free guidance off (the worker sends a
+    /// `0.0` scale, which a segmented-song model reads as "no CFG") and may not be combined with a
+    /// `guidance` scale; `true`/absent sends `guidance` as given (absent ⇒ the model's schedule).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) guidance_enabled: Option<bool>,
+    /// In-context-learning reference mode for a YuE `_icl` checkpoint (sc-19384): `"single"` (one
+    /// mixed clip, `iclReferenceAssetId`) or `"dual"` (`iclVocalAssetId` + `iclInstrumentalAssetId`).
+    /// Library `type: "audio"` asset ids, resolved project-scoped by the worker. Distinct from
+    /// `referenceAudioAssetId`, which routes a job onto the voice-clone chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) icl_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) icl_reference_asset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) icl_vocal_asset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) icl_instrumental_asset_id: Option<String>,
+    /// The window of the ICL reference the prompt uses, in seconds (sc-19384). `None` ⇒ the model's
+    /// default window (YuE: 0–30 s); an absent end ⇒ to the clip end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) icl_start_secs: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) icl_end_secs: Option<f32>,
+    /// Weight tier (`bf16` / `q8` / `q4`) for a model that ships physical per-tier downloads (YuE,
+    /// sc-19384). Must name one of the model's `downloads[].variant` tiers. `None` ⇒ the default
+    /// tier when installed, else the first installed tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) quant_tier: Option<String>,
+    /// Output limiter for a segmented-song model (YuE, upstream `--rescale`, sc-19384): `"clamp"`
+    /// (hard clip at ±0.99, the default) or `"rescale"` (scale the whole stem so its peak is 0.99).
+    /// `None` ⇒ the model default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) output_limiter: Option<String>,
     #[serde(default)]
     pub(crate) seed: Option<i64>,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
     #[serde(default)]
     pub(crate) advanced: JsonObject,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConditionalComponentsDownloadRequest {
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    /// The caller asserts the user accepted the declaring entry's licence (sc-23002); required when
+    /// the entry carries `requiresLicenseAcknowledgment`, exactly as on the model install.
+    #[serde(default)]
+    pub(crate) license_acknowledged: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1104,6 +1365,23 @@ pub(crate) struct ModelDownloadRequest {
     /// else the first supported entry) — the back-compat single-variant behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) variant: Option<String>,
+    /// The caller asserts the user has accepted the license of the weights this request FETCHES
+    /// (sc-17227). Read by `create_model_download_job` and `create_lora_download_job`, which share
+    /// this body. Consulted when the catalog entry the path id names carries
+    /// `requiresLicenseAcknowledgment`, AND when any repo the request would queue resolves against
+    /// `license_acknowledgment_repo_index` — the same repo-keyed gate `POST /api/v1/jobs` applies,
+    /// so the typed and generic doors answer the same repo the same way. The gated repos are
+    /// PUBLIC and therefore have no credential check to fail behind. Defaults to `false`, so a
+    /// client that does not know about the field is refused rather than let through: the
+    /// acknowledgment must be affirmatively asserted, never assumed.
+    #[serde(default)]
+    pub(crate) license_acknowledged: bool,
+    /// The option to install for each co-requisite choice group the model declares (sc-22998),
+    /// e.g. `{"decoder": "legacy"}` for YuE2. A group left out installs its manifest default; an
+    /// unknown group or option is a 400, never replaced by another option. Only model downloads
+    /// read it: the LoRA route that shares this body refuses a non-empty map.
+    #[serde(default)]
+    pub(crate) choices: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1120,9 +1398,85 @@ pub(crate) struct ModelConvertRequest {
     pub(crate) quantize_group_size: Option<u32>,
 }
 
+/// Which ownership mode an import installs under (epic 20398).
+///
+/// Only `managed` — SceneWorks copies the bytes into its own storage and owns their lifecycle — is
+/// served by this route, and it is the default, so every request that predates the field (and every
+/// legacy flat `repo`/`sourceUrl`/`sourcePath` body) normalises to it. Linked ownership references
+/// a user's library in place and is compiled by
+/// `sceneworks_core::checkpoint_plan_store::compile_linked` against an APPROVED root, which is a
+/// different operation with a different trust boundary — it never arrives as an import job, so an
+/// unknown or `linked` value is refused here rather than silently treated as managed (E7).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum OwnershipModeV1 {
+    #[default]
+    Managed,
+}
+
+/// The discriminated import source (epic 20398, sc-20636). One variant per managed source, so a
+/// request states which source it is instead of the server inferring it from which of three
+/// mutually-exclusive flat fields happens to be set.
+///
+/// The legacy flat fields on [`ModelImportRequest`] remain accepted and normalise onto exactly
+/// these variants, so both spellings reach the same ingest.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) enum ModelImportSourceV1 {
+    /// A file uploaded in the same multipart request. The staged path is filled in server-side from
+    /// the `file` part and is never accepted from client JSON.
+    #[serde(rename_all = "camelCase")]
+    Upload {
+        #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+        staged_path: Option<String>,
+    },
+    /// A copy of a file or directory the user already has in an app-managed root. The source is
+    /// only ever read.
+    #[serde(rename_all = "camelCase")]
+    LocalPath { path: String },
+    /// A plain download URL. A stored credential matching its host is applied by the worker.
+    #[serde(rename_all = "camelCase")]
+    Url {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_sha256: Option<String>,
+    },
+    /// A Hugging Face repo snapshot.
+    #[serde(rename_all = "camelCase")]
+    HuggingFace {
+        repo: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<String>,
+        #[serde(default)]
+        files: Vec<String>,
+    },
+    /// A Civitai download. Distinct from [`Self::Url`] only in what it RECORDS: the model version
+    /// and file identities Civitai assigns, so the install's provenance names the exact artifact
+    /// rather than just a URL that may be re-pointed. The transfer itself is the same
+    /// credential-attaching URL download — Civitai has no separate download stack.
+    #[serde(rename_all = "camelCase")]
+    Civitai {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_version_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_sha256: Option<String>,
+    },
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModelImportRequest {
+    /// Absent means `managed`: a client that predates the field gets the ownership every import
+    /// already had.
+    #[serde(default)]
+    pub(crate) ownership_mode: OwnershipModeV1,
+    /// The discriminated source. When absent, the flat `repo`/`sourceUrl`/`sourcePath` fields below
+    /// are normalised into one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source: Option<ModelImportSourceV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1135,6 +1489,16 @@ pub(crate) struct ModelImportRequest {
     pub(crate) source_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) source_path: Option<String>,
+    /// Linked (in-place) ownership: the approved library root the checkpoint lives under
+    /// (epic 20398, sc-20635). Paired with [`Self::linked_relative_path`]; the two together are
+    /// the checkpoint's durable identity, and no absolute path is ever accepted or persisted (E6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) linked_root_id: Option<String>,
+    /// The checkpoint's path relative to its approved root, `/`-separated. Confined by
+    /// `CheckpointPlanStore`: absolute, `..`-bearing and backslash-separated paths are refused,
+    /// and a path whose canonical target escapes the root is refused again at compile time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) linked_relative_path: Option<String>,
     #[serde(default)]
     pub(crate) files: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1144,6 +1508,14 @@ pub(crate) struct ModelImportRequest {
     /// repo imports are verified automatically from HF's own per-file digests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) expected_sha256: Option<String>,
+    /// The caller asserts the user has accepted the licence of the model this import FETCHES
+    /// (sc-17227). Consulted only when `repo`/`sourceUrl` resolves to a catalog entry carrying
+    /// `requiresLicenseAcknowledgment` — the same repo-keyed gate `POST /api/v1/jobs` applies —
+    /// and defaults to `false` so a client that has never heard of the field is refused rather
+    /// than let through. Serialized onto the queued job (and only when true) so a retry of an
+    /// authorized import re-validates against the assertion the original request carried.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub(crate) license_acknowledged: bool,
     #[serde(default, skip_deserializing, skip_serializing_if = "bool_is_false")]
     pub(crate) uploaded_source_path: bool,
 }
@@ -1183,6 +1555,14 @@ pub(crate) struct LoraImportRequest {
     /// repo imports are verified automatically from HF's own per-file digests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) expected_sha256: Option<String>,
+    /// The caller asserts the user has accepted the licence of the model this import FETCHES
+    /// (sc-17227) — the same field, default, and meaning as on [`ModelImportRequest`]. A LoRA
+    /// import takes a caller-supplied `repo`/`sourceUrl` and never looks it up in the LoRA catalog,
+    /// so it can name a licence-restricted MODEL repo; the gate is keyed on that repo, not on
+    /// anything the LoRA catalog declares. Serialized onto the queued job only when true, so a
+    /// retry of an authorized import re-validates against the assertion the request carried.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub(crate) license_acknowledged: bool,
     #[serde(default = "default_lora_scope")]
     pub(crate) scope: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1206,6 +1586,10 @@ pub(crate) struct LoraUpdateRequest {
     pub(crate) trigger_words: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) notes: Option<String>,
+    /// User-assigned architecture family (sc-24163). Accepted ONLY when the adapter file's own
+    /// header does not resolve a family — a detected family always wins.
+    #[serde(default)]
+    pub(crate) family: Option<String>,
 }
 
 /// Query params identifying a single catalog LoRA across scopes, shared by the

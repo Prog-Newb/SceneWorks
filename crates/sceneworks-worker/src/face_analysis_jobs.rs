@@ -37,7 +37,8 @@ const CANCEL_MESSAGE: &str = "Dataset face analysis canceled by user.";
 
 // MLX face stack (macOS): the same SCRFD + ArcFace the InstantID/kps paths use, loaded directly (not
 // through a registry — the `FaceEmbedder` contract has no gen-core registration).
-#[cfg(target_os = "macos")]
+// Production loads go through `crate::image_jobs::read_weights`; the tests still load directly.
+#[cfg(all(target_os = "macos", test))]
 use runtime_macos::media::weights::Weights;
 #[cfg(target_os = "macos")]
 use runtime_macos::providers::face::FaceAnalysis;
@@ -110,12 +111,14 @@ impl CatalogFaceDetector {
     pub(crate) fn load(weights_dir: &Path) -> WorkerResult<Self> {
         #[cfg(target_os = "macos")]
         {
-            let scrfd =
-                Weights::from_file(weights_dir.join(crate::image_jobs::INSTANTID_SCRFD_FILE))
-                    .map_err(|error| WorkerError::Engine(format!("SCRFD weights: {error}")))?;
-            let arcface =
-                Weights::from_file(weights_dir.join(crate::image_jobs::INSTANTID_ARCFACE_FILE))
-                    .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
+            let scrfd = crate::image_jobs::read_weights(
+                weights_dir.join(crate::image_jobs::INSTANTID_SCRFD_FILE),
+            )
+            .map_err(|error| WorkerError::Engine(format!("SCRFD weights: {error}")))?;
+            let arcface = crate::image_jobs::read_weights(
+                weights_dir.join(crate::image_jobs::INSTANTID_ARCFACE_FILE),
+            )
+            .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
             let analysis = FaceAnalysis::load(&scrfd, &arcface)
                 .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
             Ok(Self {
@@ -247,10 +250,13 @@ fn analyze_faces(
     cancel: CancelFlag,
     tx: tokio::sync::mpsc::Sender<usize>,
 ) -> WorkerResult<Vec<FaceAnalysisRecord>> {
-    let scrfd = Weights::from_file(weights_dir.join(crate::image_jobs::INSTANTID_SCRFD_FILE))
-        .map_err(|error| WorkerError::Engine(format!("SCRFD weights: {error}")))?;
-    let arcface = Weights::from_file(weights_dir.join(crate::image_jobs::INSTANTID_ARCFACE_FILE))
-        .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
+    let scrfd =
+        crate::image_jobs::read_weights(weights_dir.join(crate::image_jobs::INSTANTID_SCRFD_FILE))
+            .map_err(|error| WorkerError::Engine(format!("SCRFD weights: {error}")))?;
+    let arcface = crate::image_jobs::read_weights(
+        weights_dir.join(crate::image_jobs::INSTANTID_ARCFACE_FILE),
+    )
+    .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
     let analysis = FaceAnalysis::load(&scrfd, &arcface)
         .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
     embed_largest_faces(
@@ -396,6 +402,7 @@ pub(crate) async fn run_dataset_face_analysis_job(
         saving_message: "Saving face records.",
         join_error_label: "dataset face analysis task join",
         item_message: &|index, total| format!("Analyzed face {} of {}.", index + 1, total),
+        post_chunk_bytes: None,
     };
     run_batched_analysis_job(
         api,
@@ -408,9 +415,11 @@ pub(crate) async fn run_dataset_face_analysis_job(
         rx,
         blocking,
         face_records_payload,
-        |records, stored| {
+        |records, mut responses| {
+            // One POST (`post_chunk_bytes: None`), so exactly one response.
+            let stored = responses.pop().unwrap_or(Value::Null);
             let with_face = records.iter().filter(|r| !r.embedding.is_empty()).count();
-            analysis_progress(
+            Ok(analysis_progress(
                 JobStatus::Completed,
                 ProgressStage::Completed,
                 1.0,
@@ -420,7 +429,7 @@ pub(crate) async fn run_dataset_face_analysis_job(
                 ),
                 Some(face_result(&dataset_id, records.len(), with_face, stored)),
                 backend,
-            )
+            ))
         },
     )
     .await?;

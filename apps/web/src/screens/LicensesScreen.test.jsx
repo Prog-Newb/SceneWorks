@@ -1,9 +1,15 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LicensesScreen } from "./LicensesScreen.jsx";
 import { bundledLicenses } from "../data/bundledLicenses.js";
+
+function bundledNoticePath(url) {
+  return decodeURIComponent(String(url).replace(/^\/@fs/, "").split("?")[0])
+    .replace(/^\/(?=[A-Za-z]:\/)/, "");
+}
 
 // The corpus is imported from apps/desktop/licenses/ at build time, so these tests
 // assert against the real bundled notices rather than a mock.
@@ -12,6 +18,10 @@ describe("LicensesScreen", () => {
   let root;
 
   beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const path = bundledNoticePath(url);
+      return { ok: true, status: 200, text: async () => readFileSync(path, "utf8") };
+    }));
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -20,6 +30,7 @@ describe("LicensesScreen", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    vi.unstubAllGlobals();
   });
 
   async function render() {
@@ -27,6 +38,14 @@ describe("LicensesScreen", () => {
       root.render(<LicensesScreen />);
     });
   }
+
+  it("normalizes Vite Windows drive paths while preserving POSIX absolute paths", () => {
+    expect(bundledNoticePath("/@fs/C:/repo/licenses/Qwen%20Research.txt?import&raw"))
+      .toBe("C:/repo/licenses/Qwen Research.txt");
+    expect(bundledNoticePath("/@fs/home/user/licenses/Qwen%20Research.txt?import&raw"))
+      .toBe("/home/user/licenses/Qwen Research.txt");
+    expect(bundledNoticePath("/home/user/licenses/notice.txt")).toBe("/home/user/licenses/notice.txt");
+  });
 
   it("lists every bundled component", async () => {
     await render();
@@ -122,6 +141,68 @@ describe("LicensesScreen", () => {
     );
   });
 
+  it("surfaces the LTX-2.5 Community License and the Gemma 4 Apache-2.0 + Prohibited Use Policy documents (sc-18785)", async () => {
+    await render();
+    const ltx25 = [...container.querySelectorAll(".licenses-item")].find((b) =>
+      b.textContent.includes("LTX-2.5"),
+    );
+    expect(ltx25).toBeTruthy();
+    await act(async () => ltx25.click());
+    // Default document is the LTX-2.x Community License Agreement dated 2026-08-11 — a
+    // different, later text than LTX-2.3's January 5, 2026 agreement.
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "LTX-2.x Community License Agreement",
+    );
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "License date: August 11, 2026",
+    );
+
+    const tabs = [...container.querySelectorAll(".segmented-control button")];
+    const apacheTab = tabs.find((b) => b.textContent.includes("Apache License 2.0"));
+    expect(apacheTab).toBeTruthy();
+    await act(async () => apacheTab.click());
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "Apache License",
+    );
+
+    const prohibitedTab = tabs.find((b) => b.textContent.includes("Prohibited Use Policy"));
+    expect(prohibitedTab).toBeTruthy();
+    await act(async () => prohibitedTab.click());
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "Gemma Prohibited Use Policy",
+    );
+
+    const noticeTab = tabs.find((b) => b.textContent.includes("provenance"));
+    expect(noticeTab).toBeTruthy();
+    await act(async () => noticeTab.click());
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "Diff against LTX-2.3's bundled license",
+    );
+  });
+
+  it("binds the public LTX IC-LoRA rehost to its full license and immutable provenance", async () => {
+    await render();
+    const loras = [...container.querySelectorAll(".licenses-item")].find((button) =>
+      button.textContent.includes("LTX-2.3 IC-LoRA HDR and LipDub"),
+    );
+    expect(loras).toBeTruthy();
+    await act(async () => loras.click());
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "LTX-2 Community License Agreement",
+    );
+
+    const noticeTab = [...container.querySelectorAll(".segmented-control button")].find((button) =>
+      button.textContent.includes("immutable provenance"),
+    );
+    expect(noticeTab).toBeTruthy();
+    await act(async () => noticeTab.click());
+    const notice = container.querySelector(".licenses-text").textContent;
+    expect(notice).toContain("ca287bbae91f939481b3b36764d1e8b2cfb6160b");
+    expect(notice).toContain("ltx-2.3-22b-ic-lora-hdr-0.9.safetensors");
+    expect(notice).toContain("ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors");
+    expect(notice).toContain("ltx-2.3-22b-ic-lora-dubit-0.9.safetensors");
+  });
+
   it("switches between a component's license documents", async () => {
     await render();
     // ffmpeg has two docs (notice + GPL text); pick the GPL tab.
@@ -132,5 +213,41 @@ describe("LicensesScreen", () => {
     expect(container.querySelector(".licenses-text").textContent).toContain(
       "GNU GENERAL PUBLIC LICENSE",
     );
+  });
+
+  it("attributes both conditional cover weights and the native port under distinct noncommercial notices", async () => {
+    await render();
+    const expected = [
+      ["SheetSage2 weights", "m-a-p/SheetSage2"],
+      ["MERT-v2-FullSong weights", "m-a-p/MERT-v2-FullSong"],
+      ["Native SheetSage2 and MERT-v2-FullSong transcription port", "candle-audio-sheetsage2"],
+    ];
+    for (const [name, provenance] of expected) {
+      const item = [...container.querySelectorAll(".licenses-item")].find((button) => button.textContent.includes(name));
+      expect(item, name).toBeTruthy();
+      await act(async () => item.click());
+      expect(container.querySelector(".licenses-facts").textContent).toContain("CC-BY-NC-4.0");
+      expect(container.querySelector(".licenses-usage").textContent).toContain("noncommercial");
+      const notice = container.querySelector(".licenses-text").textContent;
+      expect(notice).toContain("Attribution-NonCommercial 4.0 International Public License");
+      expect(notice).toContain(provenance);
+    }
+    expect(bundledLicenses.filter((entry) => entry.models.includes("yue2")).map((entry) => entry.id)).toEqual(["yue2"]);
+  });
+
+  it("reports a bundled-text load failure and offers a retry", async () => {
+    await render();
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("local asset unavailable")));
+    const sam = [...container.querySelectorAll(".licenses-item")].find((button) =>
+      button.textContent.includes("SAM 3"),
+    );
+    await act(async () => {
+      sam.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Could not load this bundled license text");
+    expect(container.textContent).toContain("local asset unavailable");
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Retry license text")).toBe(true);
   });
 });

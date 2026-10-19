@@ -23,6 +23,7 @@ import { basename, extname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const SOURCE_EXTENSIONS = new Set([
+  ".abc",
   ".bat",
   ".c",
   ".cc",
@@ -59,16 +60,20 @@ export const SOURCE_EXTENSIONS = new Set([
   ".mdx",
   ".mjs",
   ".mts",
+  ".orig",
   ".plist",
   ".ps1",
   ".py",
   ".rs",
   ".scss",
   ".sh",
+  ".sha256",
   ".snap",
+  ".spdx",
   ".sql",
   ".svelte",
   ".svg",
+  ".stderr",
   ".toml",
   ".ts",
   ".tsv",
@@ -81,15 +86,19 @@ export const SOURCE_EXTENSIONS = new Set([
 ]);
 
 export const SOURCE_BASENAMES = new Set([
+  ".appimageignore",
   ".dockerignore",
   ".env",
   ".gitattributes",
   ".gitignore",
   ".gitkeep",
   "Containerfile",
+  "COPYRIGHT",
   "Dockerfile",
   "Justfile",
   "LICENSE",
+  "LICENSE_APACHE-2.0",
+  "LICENSE_MIT",
   "Makefile",
   "pre-commit",
   "pre-push",

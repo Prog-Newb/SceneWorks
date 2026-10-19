@@ -1,3 +1,4 @@
+import { AssetVedaOutcome, VedaOutcome } from "./VedaOutcome.jsx";
 import React, { useEffect, useMemo, useState } from "react";
 import { actionStatuses, terminalStatuses } from "../jobTypes.js";
 import { formatSeconds, liveElapsedSeconds, percent } from "../formatting.js";
@@ -15,6 +16,45 @@ import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { deriveWorkerHardware, findWorkerForJob, liveMeters } from "../workers.js";
 import { AssetMedia, AssetThumbnail, assetUrl, posterUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
+import { AudioTrackBadge } from "./AudioTrackBadge.jsx";
+import { ModelAttribution } from "./ModelAttribution.jsx";
+// Keep chunk failures local to this optional result detail. A retry must create a new lazy
+// component: React.lazy caches rejected imports as well as successful ones.
+export class PrefixKvCacheDetailBoundary extends React.Component {
+  static loadDetail() {
+    return import("./PrefixKvCacheDetail.jsx");
+  }
+
+  createDetail = () => React.lazy(() =>
+    PrefixKvCacheDetailBoundary.loadDetail()
+      .then((module) => ({ default: module.PrefixKvCacheDetail })),
+  );
+
+  state = { error: null, Detail: this.createDetail() };
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div role="alert">
+          Prompt cache details could not be loaded.{" "}
+          <button type="button" onClick={() => this.setState({ error: null, Detail: this.createDetail() })}>
+            Try again
+          </button>
+        </div>
+      );
+    }
+    const { Detail } = this.state;
+    return (
+      <React.Suspense fallback={<p role="status">Loading prompt cache details…</p>}>
+        <Detail job={this.props.job} />
+      </React.Suspense>
+    );
+  }
+}
 
 // Human duration for a seconds-remaining ESTIMATE. Deliberately not `formatSeconds`, which is
 // built for elapsed time: it emits `${minutes}m ${remainder}s` with no rounding, so a raw
@@ -105,6 +145,7 @@ const STATUS_LABEL = {
   // Accepted but awaiting the API-side async prompt rewrite (Ideogram 4 auto-caption, sc-9120)
   // before it becomes claimable. Non-terminal, so the card renders it as an in-flight job.
   pending_caption: "Preparing prompt",
+  pending_workflow: "Creating source image",
   running: "Running",
   completed: "Complete",
   canceled: "Cancelled",
@@ -129,6 +170,62 @@ function truncatePrompt(text, max = PROMPT_TITLE_TRUNCATE) {
   return `${(lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
 }
 
+function promptTitleDetails(job) {
+  const payload = job?.payload ?? {};
+  switch (job?.type) {
+    case "prompt_refine":
+      return {
+        prefix: "Prompt Refine",
+        prompt: payload.prompt ?? "",
+        max: SHORT_PROMPT_TITLE_TRUNCATE,
+        fallback: "(empty prompt)",
+      };
+    case "image_generate":
+    case "image_edit":
+    case "image_vqa":
+    case "image_interleave":
+      if (payload.characterId && payload.characterName) return null;
+      return {
+        prefix: "Generate Image",
+        prompt: payload.prompt ?? "",
+        max: PROMPT_TITLE_TRUNCATE,
+        fallback: "(no prompt)",
+      };
+    case "video_generate":
+    case "video_extend":
+    case "video_bridge":
+      return {
+        prefix: "Generate Video",
+        prompt: payload.prompt ?? "",
+        max: PROMPT_TITLE_TRUNCATE,
+        fallback: "(no prompt)",
+      };
+    case "audio_generate":
+      return {
+        prefix: "Generate Audio",
+        prompt: payload.prompt ?? "",
+        max: PROMPT_TITLE_TRUNCATE,
+        fallback: "(no prompt)",
+      };
+    case "person_replace":
+      return {
+        prefix: "Person Replace",
+        prompt: payload.prompt ?? "",
+        max: PROMPT_TITLE_TRUNCATE,
+        fallback: "(no prompt)",
+      };
+    default:
+      return null;
+  }
+}
+
+function derivePromptJobTitle(job, truncate) {
+  const details = promptTitleDetails(job);
+  if (!details) return null;
+  const prompt = truncate ? truncatePrompt(details.prompt, details.max) : details.prompt;
+  return `${details.prefix} — ${prompt || details.fallback}`;
+}
+
 // Title derivation. After sc-2087 lands the server writes `job.title` directly.
 // Until then, derive client-side from payload fields per the design spec. The
 // fallbacks here intentionally mirror the table at docs/design/worker-progress-card.md
@@ -136,6 +233,8 @@ function truncatePrompt(text, max = PROMPT_TITLE_TRUNCATE) {
 export function deriveJobTitle(job) {
   if (job?.title) return job.title;
   const payload = job?.payload ?? {};
+  const promptTitle = derivePromptJobTitle(job, true);
+  if (promptTitle) return promptTitle;
   switch (job?.type) {
     case "lora_train":
       return `Training Run — ${payload.loraName ?? payload.outputName ?? payload.targetName ?? payload.plan?.output?.loraId ?? payload.loraId ?? "(unnamed LoRA)"}`;
@@ -147,29 +246,22 @@ export function deriveJobTitle(job) {
       return `Model Import — ${payload.modelName ?? payload.filename ?? payload.modelId ?? "(unnamed)"}`;
     case "lora_import":
       return `LoRA Import — ${payload.loraName ?? payload.filename ?? payload.loraId ?? "(unnamed)"}`;
-    case "prompt_refine":
-      return `Prompt Refine — ${truncatePrompt(payload.prompt ?? "", SHORT_PROMPT_TITLE_TRUNCATE) || "(empty prompt)"}`;
     case "image_generate":
     case "image_edit":
     case "image_vqa":
     case "image_interleave":
-      if (payload.characterId && payload.characterName) {
-        return `Character Turnaround — ${payload.characterName}`;
-      }
-      return `Generate Image — ${truncatePrompt(payload.prompt ?? "") || "(no prompt)"}`;
-    case "video_generate":
-    case "video_extend":
-    case "video_bridge":
-      return `Generate Video — ${truncatePrompt(payload.prompt ?? "") || "(no prompt)"}`;
+      return `Character Turnaround — ${payload.characterName}`;
     case "video_upscale":
       return `Upscale Video — ${payload.displayName || "source clip"}`;
-    case "audio_generate":
-      return `Generate Audio — ${truncatePrompt(payload.prompt ?? "") || "(no prompt)"}`;
-    case "person_replace":
-      return `Person Replace — ${truncatePrompt(payload.prompt ?? "") || "(no prompt)"}`;
     default:
       return defaultChipLabel(job?.type ?? "job");
   }
+}
+
+// Queue cards can opt into revealing the original prompt even when the server's
+// human-readable title has already been shortened.
+export function deriveFullJobTitle(job) {
+  return derivePromptJobTitle(job, false) ?? deriveJobTitle(job);
 }
 
 function shortJobId(id) {
@@ -333,6 +425,7 @@ function ThumbnailGrid({ assets, variant, onThumbnailClick, isRunning, expectedC
           <>
             <AssetThumbnail asset={asset} className="worker-progress-card__thumb-media" />
             <LikenessBadge asset={asset} />
+            <AudioTrackBadge asset={asset} />
           </>
         );
         const label = asset.displayName && variant === "image-grid" ? (
@@ -426,7 +519,12 @@ function VideoThumbnail({ assets, onThumbnailClick }) {
       onContextMenu={suppressThumbnailContextMenu}
     >
       {src ? (
-        <AssetMedia asset={asset} className="worker-progress-card__video" />
+        <>
+          <AssetMedia asset={asset} className="worker-progress-card__video" />
+          {/* sc-19577 — the queue card is where a just-finished render is first seen, and for the
+              joint audio+video family it is where "did this one come out with sound?" is asked. */}
+          <AudioTrackBadge asset={asset} />
+        </>
       ) : poster ? (
         <img alt="" className="worker-progress-card__video" src={poster} />
       ) : (
@@ -639,6 +737,7 @@ export function WorkerProgressCard({
   onDuplicate,
   onOpenQueue,
   hideOpenQueue = false,
+  allowTitleExpansion = false,
   className,
   thumbnailsVariant = "hidden",
   thumbnailAssets,
@@ -647,6 +746,8 @@ export function WorkerProgressCard({
   expectedThumbnailCount,
   onThumbnailClick,
 }) {
+  const [titleExpanded, setTitleExpanded] = useState(false);
+  const [duplicateComputePolicy, setDuplicateComputePolicy] = useState("");
   const { workersById, visibleWorkers } = useAppLive();
   // Catalog read (sc-16965). `models` is a low-churn static field, so reading it through
   // useAppStatic() does not add a job/worker-tick subscription this card did not already have.
@@ -713,6 +814,11 @@ export function WorkerProgressCard({
   const canClear = !!onClear && isTerminal;
   const canRetryBase = actionStatuses.has(job.status) && attempts < MAX_ATTEMPTS;
   const canRetry = onRetry && canRetryBase && !isModelDownload;
+  // sc-25785: a training retry either resumes from the checkpoint the API recorded when the run
+  // stopped, or explicitly restarts from step 0 (a bare retry would inherit a resumed plan's flag).
+  const isTraining = job.type === "lora_train" || job.type === "control_training";
+  const resumeStep = job.result?.resumeCheckpointStep;
+  const canResumeTraining = canRetry && isTraining && job.status !== "completed" && Number.isInteger(resumeStep);
   const canResumeDownload = onRetry && canRetryBase && isModelDownload && job.status !== "completed";
   const canFreshDownload =
     onFreshRetry &&
@@ -721,10 +827,15 @@ export function WorkerProgressCard({
     job.status !== "completed" &&
     (attempts > 1 || ["resume", "fresh"].includes(job.payload?.downloadAction));
   const canDuplicate = onDuplicate && canRetryBase && !isModelDownload;
+  const legacyYue2Duplicate = canDuplicate && job.payload?.model === "yue2" &&
+    job.payload?.yue2?.kind !== "transcribe" && !job.payload?.yue2?.computePolicy;
   const showOpenQueue = !!onOpenQueue && !hideOpenQueue;
 
   const chipLabel = getJobTypeChip(job.type);
   const title = deriveJobTitle(job);
+  const fullTitle = allowTitleExpansion ? deriveFullJobTitle(job) : title;
+  const canExpandTitle = allowTitleExpansion && fullTitle !== title;
+  const displayedTitle = titleExpanded && canExpandTitle ? fullTitle : title;
   const idShort = shortJobId(job.id);
 
   return (
@@ -750,9 +861,32 @@ export function WorkerProgressCard({
         </div>
       </header>
       <div className="worker-progress-card__title-row">
-        <h3 className="worker-progress-card__title" title={title}>{title}</h3>
+        <div className="worker-progress-card__title-content">
+          <h3
+            className={`worker-progress-card__title${titleExpanded && canExpandTitle ? " expanded" : ""}`}
+            title={fullTitle}
+          >
+            {displayedTitle}
+          </h3>
+          {canExpandTitle ? (
+            <button
+              aria-expanded={titleExpanded}
+              className="worker-progress-card__title-toggle"
+              onClick={() => setTitleExpanded((expanded) => !expanded)}
+              type="button"
+            >
+              {titleExpanded ? "Show less" : "Show full prompt"}
+            </button>
+          ) : null}
+        </div>
         <code className="worker-progress-card__id" title={job.id}>{idShort}</code>
       </div>
+      {/* Licence-required attribution (sc-17227 §IV.2, sc-17161). The queue is a generation
+          surface — it is what the user watches while the model runs — and `job.payload.model` is
+          only an id, so the string is resolved from the catalog entry rather than stored on the
+          job. `modelForJob` returns null for a job whose model is not in the catalog, and a model
+          that declares no attribution renders nothing. */}
+      <ModelAttribution model={modelForJob(job, models)} />
       <div className="worker-progress-card__hardware">
         <HardwarePills {...hardware} />
         {hardware.device === "GPU" ? (
@@ -797,6 +931,11 @@ export function WorkerProgressCard({
       {job.error ? (
         <p className="worker-progress-card__message error">{job.error}</p>
       ) : null}
+      {/* sc-25908: which prompt path the render ran (cached / prefill) for a provider that prices
+          a prefix KV cache; renders nothing for every other job. */}
+      {Array.isArray(job.result?.prefixKvCache) && job.result.prefixKvCache.length > 0 ? (
+        <PrefixKvCacheDetailBoundary job={job} />
+      ) : null}
       <div className="worker-progress-card__actions">
         {canCancel ? (
           <button
@@ -826,16 +965,54 @@ export function WorkerProgressCard({
             Retry Download
           </button>
         ) : null}
+        {canResumeTraining ? (
+          <button className="secondary-action" onClick={() => onRetry(job, { resume: true })} type="button">
+            Resume from step {resumeStep}
+          </button>
+        ) : null}
         {canRetry ? (
-          <button className="secondary-action" onClick={() => onRetry(job)} type="button">Retry</button>
+          <button
+            className="secondary-action"
+            onClick={() => (isTraining ? onRetry(job, { resume: false }) : onRetry(job))}
+            type="button"
+          >
+            {isTraining ? "Restart from step 0" : "Retry"}
+          </button>
         ) : null}
         {canDuplicate ? (
-          <button className="secondary-action" onClick={() => onDuplicate(job)} type="button">Duplicate</button>
+          <>
+            {legacyYue2Duplicate ? (
+              <label>
+                Compute precision for duplicate
+                <select
+                  aria-label="Compute precision for duplicate"
+                  onChange={(event) => setDuplicateComputePolicy(event.target.value)}
+                  value={duplicateComputePolicy}
+                >
+                  <option value="">Choose precision</option>
+                  <option value="auto">Auto</option>
+                  <option value="bf16">BF16</option>
+                  <option value="fp32">FP32</option>
+                </select>
+              </label>
+            ) : null}
+            <button
+              className="secondary-action"
+              disabled={legacyYue2Duplicate && !duplicateComputePolicy}
+              onClick={() => onDuplicate(job, legacyYue2Duplicate ? duplicateComputePolicy : undefined)}
+              type="button"
+            >Duplicate</button>
+          </>
         ) : null}
         {showOpenQueue ? (
           <button className="secondary-action" onClick={() => onOpenQueue(job)} type="button">View in Queue</button>
         ) : null}
       </div>
+      {thumbnailAssets?.[0]?.recipe?.rawAdapterSettings?.vedaExecution ? (
+        <AssetVedaOutcome asset={thumbnailAssets[0]} />
+      ) : (
+        <VedaOutcome raw={job?.result?.assetWrites?.[0]?.rawAdapterSettings} />
+      )}
       <ThumbnailsRegion
         variant={thumbnailsVariant}
         finalAssets={thumbnailAssets}

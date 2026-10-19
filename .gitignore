@@ -60,6 +60,8 @@ cover/
 !docs/calibration/sc-16170/*.log
 !docs/calibration/sc-15833/*.log
 !docs/calibration/sc-15833/excluded/*.log
+!docs/calibration/sc-19721/*.log
+!docs/calibration/sc-18810/*.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -308,3 +310,17 @@ amd/target-rocm-continue/
 apps/desktop/rocm-worker/
 # Machine-specific ROCm paths (see set-scene-env.local.example.ps1).
 set-scene-env.local.ps1
+# film-harness run records (sc-22710) default here
+film-harness-runs/
+
+# film-harness review-eval results (sc-22714) default here
+film-harness-review-eval/
+
+# film-harness synthesized dialogue clips (sc-23404). A `dialogue` pack entry carrying `text` has
+# its WAV written into the pack directory by the run, named `<role>.tts-<sha>.wav`. It is an OUTPUT
+# — reproducible from the pack, and different bytes on every host and every model revision — so it
+# is deliberately not checked in. A pack that means to keep a recording pins `file` instead.
+*.tts-*.wav
+
+# Design-tool export preview (extensionless WebP); fails check-source-control-bytes classification
+design/system/.thumbnail

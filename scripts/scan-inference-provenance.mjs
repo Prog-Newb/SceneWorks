@@ -21,6 +21,11 @@ const WORKER_MANIFEST = path.resolve(
 );
 const INFERENCE_GIT = "https://github.com/SceneWorks/inference";
 
+// Git reports repository paths without a leading `./`, so `.` is a stable, serializable name for
+// the root Cargo manifest that can never act as a match-all path prefix. An empty string is unsafe:
+// it disappears from the line-oriented inventory and is a prefix of every repository path.
+export const ROOT_CRATE_PREFIX = ".";
+
 /** The single inference revision the worker's Cargo manifest pins. Throws if it is not unique. */
 export function pinnedRevision(manifestPath = WORKER_MANIFEST) {
   const pins = new Set(
@@ -125,6 +130,12 @@ const SPECIAL_AREAS = new Map([
   ["crates/audio/candle-audio-acestep/src/vae.rs", "diffusers-source"],
   ["crates/contracts/gen-core/src/sampling/solvers.rs", "comfy-kdiffusion-solvers"],
   ["crates/contracts/gen-core/src/sampling/cfgpp.rs", "cfgpp-formula"],
+  // The Veda block-sparse attention ports (epic 25140) carry Veda-on-ComfyUI / SageAttention / LLVM
+  // partial-sort notices — distinct third-party source obligations disclosed by the
+  // `veda-sparse-source` area, not folded into the gen-core / mlx-gen-minimax-h3 architecture
+  // prefixes. Only the marker-bearing files reach the inventory; the area lists the rest too.
+  ["crates/contracts/gen-core/src/veda/topk.rs", "veda-sparse-source"],
+  ["crates/media/mlx-gen/mlx-gen-minimax-h3/src/veda/mod.rs", "veda-sparse-source"],
   // The Mage latent module transcribes Cephes (ndtri/erf/erfc) under BSD-3 — a distinct third-party
   // source obligation from the surrounding architecture port (sc-14432). Route it to its own
   // `cephes-source` area (component `cephes`) so the notice is attributed, not folded into the
@@ -146,6 +157,10 @@ const SPECIAL_AREAS = new Map([
   // obligations.
   ["crates/media/candle-gen/candle-gen-joycaption/src/prompt.rs", "joycaption-source"],
   ["crates/media/mlx-gen/src/caption/joycaption.rs", "joycaption-source"],
+  // candle-gen's build script is first-party: its only marker is the word "vendored" naming the
+  // in-repo `vendor/candle-kernels/build.rs` whose -gencode flags it parses (sc-19545). It sits
+  // outside `src/`, so the default rule would fold it into the crate's architecture-port area.
+  ["crates/media/candle-gen/candle-gen/build.rs", "first-party:crates/media/candle-gen/candle-gen/build.rs"],
 ]);
 
 function sha256(text) {
@@ -213,24 +228,17 @@ export function scanCrates(repo, revision = pinnedRevision()) {
   const owning = new Set();
   for (const file of files.filter(productionRustPath)) {
     const owner = crateDirs.find((dir) => dir === "" || file.startsWith(`${dir}/`));
-    if (owner !== undefined) owning.add(owner);
-  }
-  // A root-level `Cargo.toml` that directly owns top-level production `.rs` files yields the
-  // EMPTY-STRING prefix. `serializeCrates` would render it as a blank line and `parseCrates` drops
-  // blank lines, so the crate would vanish from the inventory. That fails on count/hash rather than
-  // failing open, but with a message that points nowhere. Reject it here instead, where the cause is
-  // legible: the coverage guard classifies by prefix, and "" is a prefix of everything.
-  if (owning.has("")) {
-    throw new Error(
-      `${revision}: the repository ROOT Cargo.toml directly owns production Rust files, which yields an empty crate prefix. ` +
-        "The crate-coverage guard classifies by prefix and \"\" matches every path, so it cannot be classified. " +
-        "Move the root crate's sources under a named crate directory, or teach scanCrates an explicit label for it.",
-    );
+    if (owner !== undefined) owning.add(owner || ROOT_CRATE_PREFIX);
   }
   return [...owning].sort((a, b) => a.localeCompare(b));
 }
 
 export function serializeCrates(crates) {
+  if (crates.some((crate) => !crate)) {
+    throw new Error(
+      `empty crate prefix is unsafe; use ${JSON.stringify(ROOT_CRATE_PREFIX)} for the root Cargo manifest`,
+    );
+  }
   return [
     "# Production-Rust crate prefixes in the pinned inference revision (scan-inference-provenance.mjs).",
     "# Every prefix here must be classified in config/inference-third-party-source.json — either by a",

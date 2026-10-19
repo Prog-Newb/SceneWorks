@@ -79,6 +79,7 @@ conditional/partial.
 | `image_edit` | ⚠️ MLX / candle, eligible edit models only | `run_utility_job` → `run_image_generate_job`; `job_is_mlx_eligible`; `image_job_is_candle_eligible` |
 | `image_vqa` | ⚠️ MLX / candle, SenseNova-U1 only | `run_utility_job` → `run_vqa_job`; `understanding_job_is_mlx_eligible` |
 | `image_interleave` | ⚠️ MLX / candle, SenseNova-U1 only | `run_utility_job` → `run_interleave_job`; `understanding_job_is_mlx_eligible` |
+| `vector_generate` | ✅ CPU utility, fixture-backed `image_to_svg` only | `run_utility_job` → `run_image_to_svg_job`; `vector_jobs::run_image_to_svg_job` |
 | `video_generate` | ⚠️ MLX / candle, eligible models and modes only | `run_utility_job` → `run_video_generate_job`; `video_job_is_mlx_eligible`; `video_job_is_candle_eligible` |
 | `video_extend` | ⚠️ MLX LTX/Wan eligible paths; candle Wan-VACE eligible path | `run_utility_job` → `run_video_generate_job`; `video_job_is_mlx_eligible`; `video_job_is_candle_eligible` |
 | `video_bridge` | ⚠️ MLX LTX/Wan eligible paths; candle Wan-VACE eligible path | `run_utility_job` → `run_video_generate_job`; `video_job_is_mlx_eligible`; `video_job_is_candle_eligible` |
@@ -91,6 +92,7 @@ conditional/partial.
 | `image_upscale` | ⚠️ MLX / candle Real-ESRGAN or SeedVR2; AuraSR dropped | `run_utility_job` → `run_image_upscale_job`; `upscale_job_is_mlx_eligible`; `upscale_job_is_candle_eligible` |
 | `image_detail` | ✅ MLX + Candle, SDXL/RealVisXL detail models only | `run_utility_job` → `run_image_detail_job`; native route predicates; GPU capabilities |
 | `image_segment` | ✅ MLX + Candle SAM3 box segmentation | `run_utility_job` → `run_image_segment_job`; native route predicates; GPU capabilities |
+| `image_depth` | ✅ MLX + Candle Iris-3B depth (raw `.npy` + preview asset) | `run_utility_job` → `depth_jobs::run_image_depth_job`; GPU capabilities |
 | `video_upscale` | ⚠️ MLX on Mac / candle off-Mac, SeedVR2 only | `run_utility_job` → `run_video_upscale_job`; `video_upscale_job_is_mlx_eligible`; `video_upscale_job_is_candle_eligible` |
 | `frame_extract` | ✅ CPU utility (FFmpeg) | `run_utility_job` → `run_frame_extract_job`; `cpu_gpu` |
 | `timeline_export` | ✅ CPU utility (FFmpeg MP4) | `run_utility_job` → `run_timeline_export_job`; `cpu_gpu` |
@@ -107,6 +109,7 @@ conditional/partial.
 | `catalog_analysis` | ⚠️ MLX / candle when constrained vision and CLIP image lanes are linked | `run_utility_job` → `run_catalog_analysis_job`; `registry_capabilities`; `mac_rust_supported`; `candle_supported` |
 | `dataset_upscale` | ✅ MLX/CoreML on Mac / candle/CUDA off-Mac | `run_utility_job` → `run_dataset_upscale_job`; `mlx_gpu`; `with_candle_capabilities` |
 | `dataset_face_analysis` | ✅ MLX face stack on Mac / candle face stack off-Mac | `run_utility_job` → `run_dataset_face_analysis_job`; `mlx_gpu`; `with_candle_capabilities` |
+| `dataset_subject_mask` | ✅ MLX SAM3 on Mac / Candle SAM3 off-Mac (person masks for training) | `run_utility_job` → `run_dataset_subject_mask_job`; routes by the `image_segment` capability (no capability of its own) |
 | `face_likeness_compare` | ✅ MLX face stack on Mac / candle face stack off-Mac | `run_utility_job` → `run_face_likeness_compare_job`; `mlx_gpu`; `with_candle_capabilities` |
 | `prompt_refine` | ⚠️ native TextLlm provider when its registry lane is linked | `run_utility_job` → `run_prompt_refine_job`; `registry_capabilities`; `mac_rust_supported`; `candle_supported` |
 <!-- job-matrix:end -->

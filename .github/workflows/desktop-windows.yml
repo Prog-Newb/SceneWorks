@@ -71,6 +71,8 @@ on:
       - "package.json"
       - ".github/actions/prepare-rust-runner/**"
       - ".github/workflows/desktop-windows.yml"
+      - "scripts/select-starvector-windows-python.ps1"
+      - "scripts/select-starvector-windows-python.test.ps1"
   workflow_dispatch:
 
 # Cancel superseded PR runs, but never cancel a main-push run — same reasoning as
@@ -132,11 +134,17 @@ jobs:
         run: npm ci --prefix apps/desktop
       - name: Validate desktop bundle configuration
         run: npm --prefix apps/desktop test
+      - name: Run StarVector Windows Python selection regression
+        shell: powershell
+        run: .\scripts\select-starvector-windows-python.test.ps1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.97.1"
           components: clippy
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+      # Save only on `main` — see the note on the `parity-rust` cache step in check.yml.
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
@@ -162,6 +170,21 @@ jobs:
         run: node apps/desktop/scripts/stage-test-sidecars.mjs
       - name: Run Windows project-registry fingerprint regression
         run: cargo test -p sceneworks-core windows_registry_cache_detects_between_window_rewrite_with_restored_mtime
+      - name: Run Windows resolved-cache and materialization safety regressions
+        run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"
+      # The checkpoint plan store's Windows-only confinement probe (sc-20635): a junction out of
+      # an approved library must fail closed. It lives in an INTEGRATION test, so neither name
+      # filter above reaches it and it needs its own `--test` target.
+      - name: Run Windows checkpoint plan store regressions
+        run: cargo test -p sceneworks-core --test checkpoint_plan_store
+      # The checkpoint inspector's Windows-only junction probe
+      # (`windows_directory_junctions_are_confined_as_reparse_points`, `#[cfg(windows)]`): a
+      # directory junction whose target leaves the checkpoint root must be diagnosed
+      # `PathEscapesRoot` with an empty inventory. It lives in its own INTEGRATION test binary
+      # beside `checkpoint_plan_store`, so it needs its own `--test` target too — without this
+      # step the probe never executes anywhere, since Windows is the only OS that compiles it.
+      - name: Run Windows checkpoint inspector regressions
+        run: cargo test -p sceneworks-core --test checkpoint_inspector
       - name: Run desktop Rust tests
         run: cargo test -p sceneworks-desktop
       - name: Check desktop Rust lint
@@ -194,6 +217,12 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select physical GPU 1 for main-push packaging
+        if: ${{ github.event_name == 'push' }}
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'CUDA_DEVICE_ORDER=PCI_BUS_ID'
+          Add-Content -Path $env:GITHUB_ENV -Value 'CUDA_VISIBLE_DEVICES=1'
       # sc-13166: same self-hosted `cuda` pool as windows-candle.yml — point this lane at
       # the real rustup toolchain bin (prepended to PATH) so it never dispatches through
       # the fragile %USERPROFILE%\.cargo\bin proxies that go dangling on rustup

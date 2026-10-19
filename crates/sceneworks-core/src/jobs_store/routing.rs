@@ -44,7 +44,14 @@ pub fn video_mode_conditioning_requirements(mode: &str) -> &'static [&'static [&
         "image_to_video" => &[&["reference"]],
         "first_last_frame" => &[&["keyframe"]],
         "video_to_video" | "multi_video_to_video" => &[&["videoClip"]],
-        "reference_to_video" => &[&["multiReference"]],
+        // Subject-reference conditioning is consumable through EITHER descriptor surface
+        // (sc-18650): the heterogeneous `multiReference` bundle (bernini, and the scail/edit
+        // convention), or the ordered singular `reference` kind — MiniMax-H3's omni-reference
+        // surface, where gen-core has no heterogeneous-reference variant and the engines instead
+        // declare the ordered vec `[Keyframe, Reference, ReferenceVideo, ReferenceAudio]` (the
+        // request's own order carries the semantics). Same in-group alternatives idiom as
+        // `replace_person` below.
+        "reference_to_video" => &[&["multiReference", "reference"]],
         "reference_video_to_video" | "ads2v" => &[&["videoClip"], &["multiReference"]],
         "replace_person" | "animate_character" => {
             &[&["controlClip"], &["reference", "multiReference"]]
@@ -152,7 +159,7 @@ pub fn canonical_video_route_probe(model: &str, mode: &str) -> Result<JobSnapsho
     // Native LTX clip append/control is structurally available only with its in-context adapter.
     // Capability facts must probe the complete runnable shape; omitting this mandatory input makes
     // both backends falsely report extend/bridge/replacement as unsupported.
-    if matches!(model, "ltx_2_3" | "ltx_2_3_eros")
+    if matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5")
         && matches!(mode, "extend_clip" | "video_bridge" | "replace_person")
     {
         payload.insert(
@@ -227,6 +234,18 @@ pub(super) fn has_nonempty_or_malformed_string(payload: &Map<String, Value>, key
     }
 }
 
+/// True when an optional string carrier is present in a shape that is neither a string nor `null`.
+/// Missing, `null`, and any string (blank included) are well-formed "not supplied or supplied"
+/// encodings; a number/bool/array/object is an authored value no route can consume and must fail
+/// closed. Use this where BOTH the populated and the absent carrier are eligible on the same gate,
+/// so [`has_nonempty_or_malformed_string`] cannot separate malformed from populated (sc-20525).
+pub(super) fn has_malformed_optional_string(payload: &Map<String, Value>, key: &str) -> bool {
+    !matches!(
+        payload.get(key),
+        None | Some(Value::Null) | Some(Value::String(_))
+    )
+}
+
 /// True when a payload key contains a non-empty JSON array.
 pub(super) fn has_nonempty_array(payload: &Map<String, Value>, key: &str) -> bool {
     payload
@@ -257,6 +276,87 @@ pub(super) fn has_nonempty_string_array(payload: &Map<String, Value>, key: &str)
                 .filter_map(Value::as_str)
                 .any(|value| !value.trim().is_empty())
         })
+}
+
+/// The builtin catalog ids served by the Qwen-Image 2.1 engines (epic 24107; Turbo, epic 25899):
+/// the base checkpoint and its distilled Turbo sibling. They are two engine ids over ONE request
+/// contract — the same ordered 1-10 reference list, the same ÷32 envelope, the same RGBA decode,
+/// the same LoRA family — so every route, guard and resolver that keys on the 2.1 request shape
+/// keys on this list rather than on the base id alone. Where the two ids genuinely differ (the
+/// trainer, the defaults, the memory figures, the recipe stamp) the code names the id it means.
+pub const QWEN_IMAGE_2_1_MODEL_IDS: &[&str] = &["qwen_image_2_1", "qwen_image_2_1_turbo"];
+
+/// Whether `model` is one of [`QWEN_IMAGE_2_1_MODEL_IDS`].
+pub fn is_qwen_image_2_1_model(model: &str) -> bool {
+    QWEN_IMAGE_2_1_MODEL_IDS.contains(&model)
+}
+
+/// The ORDERED condition-image asset ids a Qwen-Image 2.1 request carries, or `None` when a carrier
+/// is malformed (fail closed, never "not supplied").
+///
+/// Ordering is SEMANTIC for this engine, not bookkeeping: upstream numbers the images in the prompt
+/// template (`<image1>…`), the size fallback reads the LAST one, and attention is block-causal so a
+/// reference is visible only to what follows it. Swapping two entries is a DIFFERENT request. The
+/// order is therefore fixed here, once, and both backends plus the worker's payload builder read it
+/// from this one function:
+///
+///   1. `sourceAssetId` — the primary image an Image-Editor edit is about;
+///   2. `maskAssetId` — an ORDINARY reference, immediately after the source it belongs to. 2.1 has
+///      no mask tensor and performs no inpainting (S3 contract); the engine's own refusal text tells
+///      the caller to "pass the mask as an ordinary extra reference and name it in the prompt (\"use
+///      the second image as the mask\")", and second is exactly where this puts it. An annotation
+///      the user drew INTO the picture is not a mask at all — it arrives as the source itself;
+///   3. every `referenceAssetIds` entry, in submitted order;
+///   4. the singular `referenceAssetId` (Character-Studio shape).
+///
+/// The count is NOT bounded here. The ceiling lives in `limits.maxReferenceAssets` and is enforced
+/// once, at enqueue, by `video_request::image_reference_limit_error` — one manifest key, one gate,
+/// so the routing layer cannot hold a second opinion about what "too many" means. A stored job that
+/// somehow carries more is refused by the worker's resolver with the engine's own wording, which is
+/// a loud failure rather than a job nothing can claim (the sc-10523 defect).
+pub fn qwen_image_2_1_reference_ids(payload: &Map<String, Value>) -> Option<Vec<String>> {
+    fn scalar<'a>(payload: &'a Map<String, Value>, key: &str) -> Option<Option<&'a str>> {
+        match payload.get(key) {
+            None | Some(Value::Null) => Some(None),
+            Some(Value::String(value)) => Some(Some(value.trim()).filter(|id| !id.is_empty())),
+            Some(_) => None,
+        }
+    }
+
+    let mut ids: Vec<String> = Vec::new();
+    for key in ["sourceAssetId", "maskAssetId"] {
+        if let Some(id) = scalar(payload, key)? {
+            ids.push(id.to_owned());
+        }
+    }
+    match payload.get("referenceAssetIds") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(values)) => {
+            for value in values {
+                let id = value.as_str()?.trim();
+                if id.is_empty() {
+                    return None;
+                }
+                ids.push(id.to_owned());
+            }
+        }
+        Some(_) => return None,
+    }
+    if let Some(id) = scalar(payload, "referenceAssetId")? {
+        ids.push(id.to_owned());
+    }
+    // DEDUPE by asset id, keeping the FIRST occurrence — and this is a correctness fix, not tidying.
+    //
+    // The web's `editReferenceIds` leads `referenceAssetIds` with the working image while
+    // `buildEditJobBody` also sets `sourceAssetId`, so the ordinary Image-Editor payload names the
+    // same asset twice. On this engine every entry occupies one of the model's slots AND gets its
+    // own number in the prompt template, so sending it twice silently costs a slot and renumbers
+    // every reference after it — a duplicate is not a harmless repeat, it changes the render and
+    // the count the cap is measured against. First occurrence wins because the earlier slot is the
+    // one the prompt refers to.
+    let mut seen = std::collections::HashSet::with_capacity(ids.len());
+    ids.retain(|id| seen.insert(id.clone()));
+    Some(ids)
 }
 
 /// Validate the mutually-exclusive image-reference carriers used by native conditioned-image
@@ -359,7 +459,7 @@ pub(super) fn has_malformed_optional_nested_number(
         None | Some(Value::Null) => false,
         Some(Value::Object(object)) => match object.get(number_key) {
             None | Some(Value::Null) => false,
-            Some(Value::Number(value)) => value.as_f64().map_or(true, |value| !value.is_finite()),
+            Some(Value::Number(value)) => value.as_f64().is_none_or(|value| !value.is_finite()),
             Some(Value::String(value)) => value
                 .trim()
                 .parse::<f64>()
@@ -396,18 +496,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_ltx_clip_probes_include_the_required_ic_lora() {
-        for model in ["ltx_2_3", "ltx_2_3_eros"] {
+    fn canonical_ltx_clip_probes_include_the_required_ic_lora_and_honor_eros_withdrawal() {
+        for model in ["ltx_2_3", "ltx_2_3_eros", "ltx_2_5"] {
             for mode in ["extend_clip", "video_bridge", "replace_person"] {
                 let job = canonical_video_route_probe(model, mode).unwrap();
                 let loras = job.payload["loras"].as_array().unwrap();
                 assert!(crate::video_request::loras_contain_ltx_ic_lora(loras));
-                for backend in ["mlx", "candle"] {
-                    assert!(
-                        video_backend_mode_supported(backend, model, mode).unwrap(),
-                        "{backend} must admit the complete {model}/{mode} probe"
-                    );
-                }
+                assert!(video_backend_mode_supported("mlx", model, mode).unwrap());
+                assert_eq!(
+                    video_backend_mode_supported("candle", model, mode).unwrap(),
+                    model != "ltx_2_3_eros",
+                    "Candle must admit supported LTX products and reject withdrawn Eros for {mode}"
+                );
             }
             for mode in ["text_to_video", "image_to_video", "first_last_frame"] {
                 assert!(canonical_video_route_probe(model, mode)
@@ -416,6 +516,80 @@ mod tests {
                     .get("loras")
                     .is_none());
             }
+        }
+    }
+
+    #[test]
+    fn ltx_2_5_candle_admission_admits_the_full_q4_q8_bf16_ladder_across_base_and_advanced_modes() {
+        let modes = [
+            "text_to_video",
+            "image_to_video",
+            "first_last_frame",
+            "extend_clip",
+            "video_bridge",
+            "replace_person",
+        ];
+        for mode in modes {
+            for tier in [
+                json!(4),
+                json!("4"),
+                json!(8),
+                json!("8"),
+                json!(0),
+                json!("0"),
+                json!(-1),
+            ] {
+                let mut job = canonical_video_route_probe("ltx_2_5", mode).unwrap();
+                job.payload
+                    .insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
+                job.payload
+                    .entry("loras".to_owned())
+                    .or_insert_with(|| json!([]))
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({ "id": "style" }));
+                assert!(
+                    candle::video_job_is_candle_eligible(&job),
+                    "LTX-2.5 must route q4/q8/bf16 tier {tier} with a user LoRA in {mode}"
+                );
+            }
+
+            // q8 is first-class: it must route without a LoRA on the bare probe too, exactly like
+            // the MLX lane, with no residual promotion gate.
+            for tier in [json!(8), json!("8")] {
+                let mut job = canonical_video_route_probe("ltx_2_5", mode).unwrap();
+                job.payload
+                    .insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
+                assert!(
+                    candle::video_job_is_candle_eligible(&job),
+                    "LTX-2.5 q8 is a promoted candle tier and must route: {mode} {tier}"
+                );
+            }
+        }
+
+        for tier in [json!(3), json!(16), json!("bf16")] {
+            let mut ltx25 = catalog::video_mode_probe_payload("ltx_2_5", "text_to_video");
+            ltx25.insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
+            assert!(
+                !candle::video_request_candle_eligible("ltx_2_5", &ltx25),
+                "LTX-2.5 must fail closed outside q4/q8/bf16: {tier}"
+            );
+
+            let mut ltx23 = catalog::video_mode_probe_payload("ltx_2_3", "text_to_video");
+            ltx23.insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
+            assert!(
+                !candle::video_request_candle_eligible("ltx_2_3", &ltx23),
+                "LTX-2.3 must not inherit LTX-2.5's bf16 tier: {tier}"
+            );
+        }
+
+        for tier in [json!(4), json!(8), json!("8")] {
+            let mut ltx23 = catalog::video_mode_probe_payload("ltx_2_3", "text_to_video");
+            ltx23.insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
+            assert!(
+                candle::video_request_candle_eligible("ltx_2_3", &ltx23),
+                "LTX-2.3 packed tier behavior must remain unchanged: {tier}"
+            );
         }
     }
 }

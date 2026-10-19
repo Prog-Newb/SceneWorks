@@ -134,6 +134,11 @@ pub struct ImageRequest {
     pub project_id: String,
     pub mode: String,
     pub prompt: String,
+    /// A NATIVE prompt batch (sc-25681, `image.maxPromptBatchImages`): the prompts one engine call
+    /// renders together, verbatim. Empty for an ordinary request. When set, `prompt` is `prompts[0]`
+    /// (the API enforces it) and image `k` renders `prompts[k % prompts.len()]` — see
+    /// [`Self::image_prompt`].
+    pub prompts: Vec<String>,
     pub negative_prompt: String,
     pub model: String,
     /// Number of images, clamped to 1..=8.
@@ -178,6 +183,23 @@ pub struct ImageRequest {
 }
 
 impl ImageRequest {
+    /// The prompt image `index` of this job rendered: `prompt` for an ordinary request, and
+    /// `prompts[index % prompts.len()]` for a native prompt batch (prompt-minor order — the engine
+    /// renders the whole prompt list once per `count` repetition).
+    pub fn image_prompt(&self, index: usize) -> &str {
+        if self.prompts.is_empty() {
+            &self.prompt
+        } else {
+            &self.prompts[index % self.prompts.len()]
+        }
+    }
+
+    /// The images this request produces: `count`, or `prompts × count` for a native prompt batch.
+    pub fn image_count(&self) -> u32 {
+        self.count
+            .saturating_mul(u32::try_from(self.prompts.len().max(1)).unwrap_or(u32::MAX))
+    }
+
     /// Parse a job payload (the `payload` object of a `JobSnapshot`). Infallible:
     /// missing fields fall back to the Python defaults and `project_id` may be empty
     /// — the caller validates it is present (the worker rejects an empty project id).
@@ -189,10 +211,29 @@ impl ImageRequest {
         let (default_width, default_height) = default_resolution(&model_manifest_entry)
             .unwrap_or((DEFAULT_DIMENSION, DEFAULT_DIMENSION));
         let default_count = default_count(&model_manifest_entry).unwrap_or(DEFAULT_COUNT);
+        // The sanity floor yields to a model's DECLARED `limits.minDimension` below it (sc-25681):
+        // the API admits a declared envelope down to its own floor (Iris-3B renders from 16 px,
+        // Qwen-Image 2.1 from 32), and the blanket 256 here silently re-sized those requests on the
+        // worker — an accepted size that never reached the engine. Every model that declares no
+        // floor (or one at/above 256) keeps the historical clamp.
+        let min_dimension = crate::video_request::image_dimension_envelope(&model_manifest_entry)
+            .min
+            .map_or(MIN_DIMENSION, |declared| declared.min(MIN_DIMENSION));
         Self {
             project_id: string_or(payload, "projectId", ""),
             mode: nonempty_string_or(payload, "mode", DEFAULT_MODE),
             prompt: string_or(payload, "prompt", ""),
+            prompts: payload
+                .get(crate::image_sampling_controls::PROMPTS_KEY)
+                .and_then(Value::as_array)
+                .map(|prompts| {
+                    prompts
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
             negative_prompt: string_or(payload, "negativePrompt", ""),
             model: nonempty_string_or(payload, "model", DEFAULT_MODEL),
             count: clamped_u32(payload.get("count"), default_count, MIN_COUNT, MAX_COUNT),
@@ -201,13 +242,13 @@ impl ImageRequest {
             width: clamped_u32(
                 payload.get("width"),
                 default_width,
-                MIN_DIMENSION,
+                min_dimension,
                 MAX_DIMENSION,
             ),
             height: clamped_u32(
                 payload.get("height"),
                 default_height,
-                MIN_DIMENSION,
+                min_dimension,
                 MAX_DIMENSION,
             ),
             style_preset: nonempty_string_or(payload, "stylePreset", DEFAULT_STYLE_PRESET),
@@ -259,6 +300,97 @@ pub(crate) fn normalize_fit_mode(value: Option<&str>) -> String {
     } else {
         DEFAULT_FIT_MODE.to_owned()
     }
+}
+
+/// The ORDERED condition-image asset ids of a one-ordered-list image edit, or `None` when a carrier
+/// is malformed. Re-exported from the router so the API validates the EXACT list the worker will
+/// render, in the exact order — see `sceneworks_core::jobs_store::qwen_image_2_1_reference_ids` for
+/// why the order is semantic rather than bookkeeping.
+pub use crate::jobs_store::qwen_image_2_1_reference_ids as ordered_image_reference_ids;
+
+/// Reject an `edit_image` / `character_image` request for a model whose route is ONE ordered
+/// conditioning list, or `None` when the request is admissible (sc-24110).
+///
+/// The SHAPE half only. **Counting is not done here** — the cap lives in
+/// `limits.maxReferenceAssets` and is enforced once, by
+/// [`crate::video_request::image_reference_limit_error`], so there is exactly one place that knows
+/// what the ceiling is. What is left is everything else an ordered list can be wrong about:
+///
+///   1. **no references at all.** The conditioned modes ARE the conditioning call; with nothing to
+///      condition on there is no request to make. A 400 rather than a silent fall-back to
+///      text-to-image, which would render something the caller did not ask for.
+///   2. **a per-reference strength.** Upstream's condition images carry no strength and the engine
+///      refuses anything but unset-or-1.0; this says so at enqueue in the engine's own terms.
+///   3. **a malformed carrier**, which fails closed.
+///
+/// `None` for every model that declares no `limits.maxReferenceAssets` — the same declaration that
+/// arms the cap arms this, so the two halves can never be armed separately and the image models
+/// neither story touches are byte-for-byte unchanged.
+///
+/// Per-reference GEOMETRY and FORMAT are not judged here either — that needs the asset store, so it
+/// lives beside the call site (`apps/rust-api`'s `validate_ordered_image_references`).
+pub fn ordered_image_reference_error(
+    model: &str,
+    payload: &JsonObject,
+    model_manifest_entry: &JsonObject,
+) -> Option<String> {
+    let cap = crate::video_request::image_max_reference_assets(model_manifest_entry)?;
+    let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
+    // sc-24114: `image_to_image` is the declared single-reference face of the same call, so it is
+    // a CONDITIONED mode exactly like the edit modes (it needs at least one reference).
+    let conditioned_mode = matches!(mode, "edit_image" | "character_image" | "image_to_image");
+    let Some(ids) = ordered_image_reference_ids(payload) else {
+        return Some(format!(
+            "{model}: one of sourceAssetId / maskAssetId / referenceAssetId / referenceAssetIds is \
+             malformed — each must be a non-blank asset id string, and referenceAssetIds must be an \
+             array of them."
+        ));
+    };
+    if ids.is_empty() {
+        if !conditioned_mode {
+            // A plain text-to-image request: nothing to condition on, nothing to judge.
+            return None;
+        }
+        return Some(format!(
+            "{model} conditions on an ordered list of 1 to {cap} reference images, but this \
+             {mode} request supplies none. Add at least one reference, or send a text-to-image \
+             request instead."
+        ));
+    }
+    // A non-empty list IS the conditioning call whatever the mode says (the router claims it
+    // mode-independently), so a strength is refused on every mode that carries references.
+    ordered_image_reference_strength_error(model, payload)
+}
+
+/// The strength half of [`ordered_image_reference_error`], split out so the four carriers the UI
+/// and the API have historically used for this one quantity are read in one place.
+///
+/// The refusal carries the ENGINE's reason, not a SceneWorks-flavored restatement of it: a
+/// condition image on this route is composed at full weight because upstream's pipeline has no
+/// strength input at all — there is nothing to turn down. A value of exactly 1.0 is accepted (it is
+/// what "full weight" spells), and so is an absent one.
+fn ordered_image_reference_strength_error(model: &str, payload: &JsonObject) -> Option<String> {
+    let advanced = payload.get("advanced").and_then(Value::as_object);
+    for key in ["strength", "referenceStrength"] {
+        let Some(value) = payload
+            .get(key)
+            .or_else(|| advanced.and_then(|advanced| advanced.get(key)))
+            .filter(|value| !value.is_null())
+        else {
+            continue;
+        };
+        let Some(strength) = value.as_f64() else {
+            return Some(format!("{model}: `{key}` must be a number, or absent."));
+        };
+        if (strength - 1.0).abs() > f64::EPSILON {
+            return Some(format!(
+                "{model} conditions on a reference at full weight — upstream's condition images \
+                 have no strength, so `{key}: {strength}` has nothing to apply to. Drop the field \
+                 (or send 1.0)."
+            ));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -360,6 +492,54 @@ mod tests {
         assert_eq!(low.count, 1);
     }
 
+    /// sc-25681: a model's declared `limits.minDimension` below the 256 sanity floor is honoured
+    /// (the API admits it, so the worker must not re-size it); a declared floor above 256, or none,
+    /// keeps the historical clamp.
+    ///
+    /// *Mutation that reds this:* clamp to the constant `MIN_DIMENSION` again.
+    #[test]
+    fn a_declared_floor_below_the_sanity_floor_reaches_the_request() {
+        let request = |entry: Value, side: u32| {
+            ImageRequest::from_payload(&payload(json!({
+                "projectId": "p", "width": side, "height": side, "modelManifestEntry": entry
+            })))
+        };
+        let iris = json!({ "limits": { "minDimension": 16, "maxDimension": 2048 } });
+        assert_eq!(request(iris.clone(), 64).width, 64);
+        assert_eq!(
+            request(iris, 8).height,
+            16,
+            "still clamped to the declared floor"
+        );
+        let high = json!({ "limits": { "minDimension": 512 } });
+        assert_eq!(
+            request(high, 300).width,
+            300,
+            "the sanity floor never rises"
+        );
+        assert_eq!(request(json!({}), 64).width, 256);
+    }
+
+    /// sc-25681: a native prompt batch maps image `k` to `prompts[k % len]` (prompt-minor) and
+    /// produces `prompts × count` images; an ordinary request is unchanged.
+    ///
+    /// *Mutation that reds this:* index `prompts[k / count]` (prompt-major).
+    #[test]
+    fn a_prompt_batch_is_prompt_minor() {
+        let batch = ImageRequest::from_payload(&payload(json!({
+            "projectId": "p", "prompt": "a", "prompts": ["a", "b", "c"], "count": 2
+        })));
+        assert_eq!(batch.image_count(), 6);
+        let order: Vec<&str> = (0..6).map(|k| batch.image_prompt(k)).collect();
+        assert_eq!(order, vec!["a", "b", "c", "a", "b", "c"]);
+        let plain = ImageRequest::from_payload(&payload(json!({
+            "projectId": "p", "prompt": "solo", "count": 3
+        })));
+        assert!(plain.prompts.is_empty());
+        assert_eq!(plain.image_count(), 3);
+        assert_eq!(plain.image_prompt(2), "solo");
+    }
+
     #[test]
     fn reads_numeric_strings_and_seeds() {
         let request = ImageRequest::from_payload(&payload(json!({
@@ -390,5 +570,42 @@ mod tests {
         let bogus =
             ImageRequest::from_payload(&payload(json!({ "projectId": "p", "fitMode": "weird" })));
         assert_eq!(bogus.fit_mode, "crop");
+    }
+
+    /// sc-24114: `image_to_image` is the declared single-reference face of the ordered-list call,
+    /// so it is judged exactly like the edit modes — no references is a 400 — and a strength is
+    /// refused on EVERY mode that carries references, because the router claims a non-empty list
+    /// mode-independently (a `text_to_image` + `referenceAssetId` request is the same engine call).
+    #[test]
+    fn ordered_reference_shape_gate_covers_image_to_image_and_every_referenced_mode() {
+        let entry = payload(json!({ "limits": { "maxReferenceAssets": 10 } }));
+        let check =
+            |body: Value| ordered_image_reference_error("qwen_image_2_1", &payload(body), &entry);
+
+        let empty = check(json!({ "mode": "image_to_image" }));
+        assert!(
+            empty
+                .as_deref()
+                .is_some_and(|m| m.contains("supplies none")),
+            "{empty:?}"
+        );
+        assert_eq!(
+            check(json!({ "mode": "image_to_image", "referenceAssetId": "r" })),
+            None
+        );
+        for mode in ["image_to_image", "text_to_image", "image_generation"] {
+            let refused = check(json!({
+                "mode": mode, "referenceAssetId": "r", "advanced": { "strength": 0.4 }
+            }));
+            assert!(
+                refused
+                    .as_deref()
+                    .is_some_and(|m| m.contains("no strength")),
+                "{mode}: {refused:?}"
+            );
+        }
+        // A plain text-to-image request is untouched.
+        assert_eq!(check(json!({ "mode": "text_to_image" })), None);
+        assert_eq!(check(json!({ "advanced": { "strength": 0.4 } })), None);
     }
 }

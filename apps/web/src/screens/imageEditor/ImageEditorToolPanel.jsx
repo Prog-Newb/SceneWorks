@@ -1,5 +1,14 @@
 import React from "react";
 import { EditPromptTemplates } from "../../components/EditPromptTemplates.jsx";
+import { assetDisplayUrl } from "../../components/assetMedia.jsx";
+// sc-24113 — the ordered-reference helpers. Pure and shared with the Studio so the rail, the
+// payload builder and the tests all agree on what "reference 2" means.
+import { moveReference, referenceOrdinalLabel } from "../../imageReferenceLimits.js";
+import {
+  TRANSPARENCY_PROMPT_HINT,
+  showTransparencyToggle,
+  transparencyPromptSuggestion,
+} from "../../qwenAlpha.js";
 
 let renderObserverForTests = null;
 
@@ -41,7 +50,7 @@ function samePanelProps(previous, next) {
 }
 
 export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ scope }) {
-  const { EDIT_OUTPUT_ASPECTS, EditorLoraPanel, FitModeControl, MAX_EDIT_REFERENCES, StudioUpdateBadge, StudioUpdateNotice, aiOp, assetUrl, canMask, clearMask, createLoraDownloadJob, createModelDownloadJob, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, effectiveFitMode, guidanceDefaultFromModel, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, refineMask, requestEditLoraDownload, runEdit, selectedEditLoras, selectedEditModel, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, showIncompatibleEditLoras, smartSelectSupported, updateOptionLabel } = scope;
+  const { EDIT_OUTPUT_ASPECTS, EditorLoraPanel, FitModeControl, maxEditReferences, StudioUpdateBadge, StudioUpdateNotice, aiOp, canMask, clearMask, createLoraDownloadJob, createModelDownloadJob, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, effectiveFitMode, guidanceDefaultFromModel, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, refineMask, editTransparent, setEditTransparent, requestEditLoraDownload, requestSmartSelectDownload, runEdit, selectedEditLoras, selectedEditModel, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, showIncompatibleEditLoras, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, updateOptionLabel } = scope;
   const renderPanel = () => {
     if (editModels.length === 0) {
       return (
@@ -77,6 +86,37 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
           {/* Built-in edit recipes — the same five the studios offer, so the two Edit
               surfaces stay in step. Each REPLACES the instruction (see the module note). */}
           <EditPromptTemplates label="" onApply={setEditPrompt} variant="editor" />
+          {/* sc-24114 — transparency on the editor's edit lane, the same adapter the Studio uses.
+              Shown only for an alpha-capable model; defaults ON when the working image carries
+              alpha (the editor passes that in as the initial value), so an AI edit of a cut-out
+              stays a cut-out. The model has no transparency MODE — the prompt asks for it, which
+              is why the hint below offers the model card's wording as an editable button. */}
+          {showTransparencyToggle(selectedEditModel) ? (
+            <label
+              className="checkline transparency-toggle"
+              title="Keep the model's alpha channel instead of compositing the edit onto white, so a cut-out stays a cut-out. Ask for a transparent background in the instruction; this keeps it."
+            >
+              <input
+                checked={Boolean(editTransparent)}
+                onChange={(event) => setEditTransparent(event.target.checked)}
+                type="checkbox"
+              />
+              Transparent background (RGBA)
+            </label>
+          ) : null}
+          {showTransparencyToggle(selectedEditModel) &&
+          transparencyPromptSuggestion(editPrompt, editTransparent) ? (
+            <p className="transparency-prompt-hint ie-note">
+              This model has no transparency mode — ask for it in the instruction.{" "}
+              <button
+                className="hero-link"
+                onClick={() => setEditPrompt(transparencyPromptSuggestion(editPrompt, editTransparent))}
+                type="button"
+              >
+                Add “{TRANSPARENCY_PROMPT_HINT}”
+              </button>
+            </p>
+          ) : null}
         </div>
 
         {/* Managed image-edit LoRA (epic 10871, sc-11069): auto-applied for the user — a status note
@@ -209,6 +249,19 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
                     </button>
                   </div>
                 ) : null}
+                {!smartSelectSupported && smartSelectCapabilitySupported && smartSelectModel ? (
+                  <>
+                    <p className="ie-note">SAM3 Smart Select is not installed. The brush remains available, or install SAM3 now.</p>
+                    <button
+                      className="ie-btn block"
+                      disabled={smartSelectDownloadRequested || !requestSmartSelectDownload}
+                      onClick={requestSmartSelectDownload}
+                      type="button"
+                    >
+                      {smartSelectDownloadRequested ? "Installing SAM3…" : "Install SAM3"}
+                    </button>
+                  </>
+                ) : null}
                 {!smartSelectSupported || maskSubTool === "brush" ? (
                   <>
                     <div className="ie-field">
@@ -302,12 +355,52 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
         {multiRefCapable ? (
           <div className="ie-section">
             <div className="ie-sec-title">Reference images</div>
+            {/* sc-24113 — the reference list is ORDERED, and the order is semantic. The engine's
+                template numbers the images (<image1> …) and its block-causal attention makes each
+                one visible only to what follows, so swapping two references is a different render.
+                Two consequences are visible here:
+
+                  * every reference carries its 1-based ordinal, because the prompt conventions for
+                    this family name images directly ("use the second image as a mask") and a user
+                    who cannot see which one is second cannot write that prompt;
+                  * the arrows move a reference, because the only way to reorder before this was to
+                    remove everything and re-add it in the right order. */}
             <div className="ie-refs">
-              {refAssetIds.map((id) => {
+              {/* sc-24114: the WORKING image is the first ordered entry the edit sends
+                  (`editReferenceIds` leads with it), so it IS "Image 1" in the prompt's terms and
+                  the attached references start at "Image 2". Shown as a fixed tile so the user sees
+                  the whole ordered list the engine numbers. */}
+              <div className="ie-ref ie-ref-working" title="The image you are editing is always first">
+                <span className="ie-ref-working-label">Working image</span>
+                <span className="ie-ref-ordinal">{referenceOrdinalLabel(0)}</span>
+              </div>
+              {refAssetIds.map((id, index) => {
                 const asset = imageAssets.find((item) => item.id === id);
+                const ordinal = referenceOrdinalLabel(index + 1);
                 return (
                   <div className="ie-ref" key={id}>
-                    {asset ? <img alt="" src={assetUrl(asset)} /> : <span>?</span>}
+                    {asset ? <img alt="" src={assetDisplayUrl(asset)} /> : <span>?</span>}
+                    <span className="ie-ref-ordinal" title="References are sent in this order">
+                      {ordinal}
+                    </span>
+                    <button
+                      aria-label={`Move ${ordinal} earlier`}
+                      className="ie-ref-move"
+                      disabled={index === 0}
+                      onClick={() => setRefAssetIds((prev) => moveReference(prev, index, index - 1))}
+                      type="button"
+                    >
+                      ‹
+                    </button>
+                    <button
+                      aria-label={`Move ${ordinal} later`}
+                      className="ie-ref-move"
+                      disabled={index === refAssetIds.length - 1}
+                      onClick={() => setRefAssetIds((prev) => moveReference(prev, index, index + 1))}
+                      type="button"
+                    >
+                      ›
+                    </button>
                     <button
                       aria-label="Remove reference"
                       className="ie-ref-remove"
@@ -321,7 +414,7 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
               })}
               <button
                 className="ie-ref-add"
-                disabled={refAssetIds.length >= MAX_EDIT_REFERENCES - 1}
+                disabled={refAssetIds.length >= maxEditReferences - 1}
                 onClick={() => setRefPickerOpen(true)}
                 title="Condition the edit on reference image(s)"
                 type="button"
@@ -571,7 +664,7 @@ export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel({
 
 export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ panelKey, scope }) {
   renderObserverForTests?.();
-  const { COLOR_ADJUSTMENTS, CROP_RATIOS, CurveEditor, StudioUpdateBadge, StudioUpdateNotice, UPSCALE_ENGINE_DESC, activeGradeIsIdentity, activeLayerOf, actualSize, aiOp, applyColorGrade, applyCrop, availableUpscaleEngines, cancelCrop, channelStroke, chooseRatio, colorAdjust, colorChannel, colorMode, createModelDownloadJob, cropRect, curves, detailCnScale, detailModel, detailModels, detailStrength, endTransformGesture, fitToView, flipActiveLayer, histogramRef, identityTransform, layerCount, levels, onTransformSlider, ratioKey, requestTileControlNetDownload, resetActiveColorMode, resetActiveLayerTransform, resetAdjust, rotated, runDetail, runUpscale, selectedDetailModel, setActiveTransform, setAdjustValue, setColorChannel, setColorMode, setCropDim, setCurves, setDetailCnScale, setDetailModel, setDetailStrength, setLevelsValue, setStraighten, setTool, setUpscaleEngine, setUpscaleFactor, setUpscaleSoftness, straighten, tileControlNet, tileControlNetDownloadRequested, tileControlNetReady, toggleRotate, updateOptionLabel, upscaleEngine, upscaleEngineHasSoftness, upscaleFactor, upscaleFactorsForEngine, upscaleSoftness, working } = scope;
+  const { COLOR_ADJUSTMENTS, CROP_RATIOS, CurveEditor, IrisRestoreControls, StudioUpdateBadge, StudioUpdateNotice, UPSCALE_ENGINE_DESC, irisPlanStatus, irisRestore, setIrisPlanStatus, setIrisRestore, token, upscaleEngineIsRestoration, activeGradeIsIdentity, activeLayerOf, actualSize, aiOp, applyColorGrade, applyCrop, applyMaskCutout, availableUpscaleEngines, cancelCrop, channelStroke, chooseRatio, clearMask, colorAdjust, colorChannel, colorKeyGlobal, colorKeySeed, colorKeySoftness, colorKeyTolerance, colorMode, createModelDownloadJob, cropRect, curves, cutoutKeepSelected, detailCnScale, detailModel, detailModels, detailStrength, endTransformGesture, fitToView, flipActiveLayer, histogramRef, identityTransform, layerCount, levels, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSource, maskSubTool, onTransformSlider, ratioKey, refineMask, requestSmartSelectDownload, requestTileControlNetDownload, resetActiveColorMode, resetActiveLayerTransform, resetAdjust, rotated, runDetail, runUpscale, selectedDetailModel, setActiveTransform, setAdjustValue, setColorChannel, setColorKeyGlobal, setColorKeySeed, setColorKeySoftness, setColorKeyTolerance, setColorMode, setCropDim, setCurves, setCutoutKeepSelected, setDetailCnScale, setDetailModel, setDetailStrength, setLevelsValue, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setStraighten, setTool, setUpscaleEngine, setUpscaleFactor, setUpscaleSoftness, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, straighten, tileControlNet, tileControlNetDownloadRequested, tileControlNetReady, toggleRotate, updateOptionLabel, upscaleEngine, upscaleEngineHasSoftness, upscaleFactor, upscaleFactorsForEngine, upscaleSoftness, working } = scope;
   const renderPanel = (key) => {
     switch (key) {
       case "move":
@@ -812,6 +905,22 @@ export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ p
                 ))}
               </div>
             </div>
+            {upscaleEngineIsRestoration(upscaleEngine) ? (
+              <div className="ie-section">
+                <div className="ie-sec-title">Restoration</div>
+                {/* Iris (sc-25683): the processing + output size come from the engine planner, so a
+                    budget-downscaled source is labelled as such before anything is submitted. */}
+                <IrisRestoreControls
+                  disabled={!!aiOp}
+                  idPrefix="ie-iris"
+                  onChange={setIrisRestore}
+                  onStatus={setIrisPlanStatus}
+                  planBody={working ? { width: working.width, height: working.height } : null}
+                  token={token}
+                  value={irisRestore}
+                />
+              </div>
+            ) : (
             <div className="ie-section">
               <div className="ie-sec-title">Scale factor</div>
               <div className="ie-seg wrap two">
@@ -852,9 +961,16 @@ export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ p
                 </span>
               </div>
             </div>
+            )}
             <div className="ie-section">
-              <button className="ie-btn block primary" disabled={!!aiOp} onClick={runUpscale} type="button">
-                Upscale image
+              <button
+                className="ie-btn block primary"
+                disabled={!!aiOp || (upscaleEngineIsRestoration(upscaleEngine) && !irisPlanStatus.ready)}
+                onClick={runUpscale}
+                title={upscaleEngineIsRestoration(upscaleEngine) && irisPlanStatus.error ? irisPlanStatus.error : undefined}
+                type="button"
+              >
+                {upscaleEngineIsRestoration(upscaleEngine) ? "Restore image" : "Upscale image"}
               </button>
               <button className="ie-btn block" onClick={() => setTool("move")} type="button">
                 Cancel
@@ -1091,6 +1207,186 @@ export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ p
                 type="button"
               >
                 Apply grade
+              </button>
+            </div>
+          </>
+        );
+      case "cutout":
+        return (
+          <>
+            <div className="ie-section">
+              <div className="ie-sec-title">Color key</div>
+              <p className="ie-note">
+                Click a background pixel on the active layer. The checkerboard shows the alpha preview without changing the image until you apply it.
+              </p>
+              <div className="ie-readout">
+                <span className="ie-readout-k">Sample</span>
+                <span className="ie-readout-v">
+                  {colorKeySeed ? `${colorKeySeed.x}, ${colorKeySeed.y}` : "Click canvas"}
+                </span>
+              </div>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Selection</div>
+              <div className="ie-seg two" style={{ width: "100%" }}>
+                <button className="ie-seg-btn" data-active={!colorKeyGlobal} onClick={() => setColorKeyGlobal(false)} type="button">
+                  Connected
+                </button>
+                <button className="ie-seg-btn" data-active={colorKeyGlobal} onClick={() => setColorKeyGlobal(true)} type="button">
+                  Global
+                </button>
+              </div>
+              <p className="ie-note">
+                Connected preserves separate same-color subject areas. Global removes every matching pixel on this layer.
+              </p>
+            </div>
+            <div className="ie-section">
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Tolerance</span>
+                  <span className="ie-field-val">{colorKeyTolerance}</span>
+                </div>
+                <input
+                  aria-label="Color-key tolerance"
+                  className="ie-range"
+                  max={100}
+                  min={0}
+                  onChange={(event) => setColorKeyTolerance(Number(event.target.value))}
+                  step={1}
+                  type="range"
+                  value={colorKeyTolerance}
+                />
+              </div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Softness</span>
+                  <span className="ie-field-val">{colorKeySoftness}</span>
+                </div>
+                <input
+                  aria-label="Color-key softness"
+                  className="ie-range"
+                  max={100}
+                  min={0}
+                  onChange={(event) => setColorKeySoftness(Number(event.target.value))}
+                  step={1}
+                  type="range"
+                  value={colorKeySoftness}
+                />
+              </div>
+              <p className="ie-note">Matching uses perceptual color distance; softness feathers the alpha edge.</p>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">SAM3 object selection</div>
+              {smartSelectSupported ? (
+                <>
+                  <p className="ie-note">Draw a box around an object on the active layer. SAM3 selection works without choosing an AI Edit model.</p>
+                  <button
+                    className="ie-btn block"
+                    data-active={maskMode && maskSubTool === "select"}
+                    disabled={aiOp?.label === "smart select"}
+                    onClick={() => {
+                      setColorKeySeed(null);
+                      clearMask();
+                      setCutoutKeepSelected(true);
+                      setMaskMode(true);
+                      setMaskSubTool("select");
+                      setMaskErase(false);
+                    }}
+                    type="button"
+                  >
+                    {aiOp?.label === "smart select" ? "Segmenting…" : "Smart select"}
+                  </button>
+                </>
+              ) : smartSelectCapabilitySupported && smartSelectModel ? (
+                <>
+                  <p className="ie-note">SAM3 is supported on this worker but is not installed. Install it in Model Manager to enable Smart Select; color key remains available.</p>
+                  <button
+                    className="ie-btn block"
+                    disabled={smartSelectDownloadRequested || !requestSmartSelectDownload}
+                    onClick={requestSmartSelectDownload}
+                    type="button"
+                  >
+                    {smartSelectDownloadRequested ? "Installing SAM3…" : "Install SAM3"}
+                  </button>
+                </>
+              ) : (
+                <p className="ie-note">SAM3 object selection is unavailable on this worker. Color key remains available above; choose a worker with image segmentation support to use Smart Select.</p>
+              )}
+            </div>
+            {maskMode ? (
+              <div className="ie-section">
+                <div className="ie-sec-title">Refine selection</div>
+                {maskSubTool === "select" ? (
+                  <p className="ie-note">Drag a box around an object on the canvas — SAM3 auto-masks it.</p>
+                ) : (
+                  <>
+                    <div className="ie-field">
+                      <div className="ie-field-top">
+                        <span className="ie-field-label">Brush size</span>
+                        <span className="ie-field-val">{maskBrush} px</span>
+                      </div>
+                      <input
+                        aria-label="Selection refine brush size"
+                        className="ie-range"
+                        max={300}
+                        min={5}
+                        onChange={(event) => setMaskBrush(Number(event.target.value))}
+                        step={1}
+                        type="range"
+                        value={maskBrush}
+                      />
+                    </div>
+                    <button className="ie-btn block" data-active={maskErase} onClick={() => setMaskErase((on) => !on)} type="button">
+                      {maskErase ? "Erase from selection" : "Add to selection"}
+                    </button>
+                  </>
+                )}
+                <button className="ie-btn block" onClick={() => setMaskSubTool("brush")} type="button">
+                  Refine brush
+                </button>
+                <div className="ie-field" style={{ marginTop: "10px", marginBottom: "8px" }}>
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Refine radius</span>
+                    <span className="ie-field-val">{maskRefineRadius}px</span>
+                  </div>
+                  <input
+                    aria-label="Selection refine radius"
+                    className="ie-range"
+                    max={40}
+                    min={1}
+                    onChange={(event) => setMaskRefineRadius(Number(event.target.value))}
+                    step={1}
+                    type="range"
+                    value={maskRefineRadius}
+                  />
+                </div>
+                <div className="ie-chip-row">
+                  <button className="ie-chip" disabled={!maskHasContent(maskLines) && !maskBaseImage} onClick={() => refineMask("feather")} type="button">Feather</button>
+                  <button className="ie-chip" disabled={!maskHasContent(maskLines) && !maskBaseImage} onClick={() => refineMask("grow")} type="button">Grow</button>
+                  <button className="ie-chip" disabled={!maskHasContent(maskLines) && !maskBaseImage} onClick={() => refineMask("shrink")} type="button">Shrink</button>
+                  <button className="ie-chip" onClick={() => refineMask("invert")} type="button">Invert</button>
+                </div>
+                {maskHasContent(maskLines) || maskBaseImage ? (
+                  <>
+                    <div className="ie-seg two" style={{ marginTop: "10px", width: "100%" }}>
+                      <button className="ie-seg-btn" data-active={cutoutKeepSelected} onClick={() => setCutoutKeepSelected(true)} type="button">Keep selected</button>
+                      <button className="ie-seg-btn" data-active={!cutoutKeepSelected} onClick={() => setCutoutKeepSelected(false)} type="button">Remove selected</button>
+                    </div>
+                    <button className="ie-btn block primary" onClick={applyMaskCutout} style={{ marginTop: "10px" }} type="button">
+                      Apply cutout
+                    </button>
+                  </>
+                ) : null}
+                {maskSource === "colorKey" ? (
+                  <button className="ie-btn block" onClick={() => { setColorKeySeed(null); clearMask(); setMaskMode(false); }} type="button">
+                    Sample another color
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="ie-section">
+              <button className="ie-btn block" onClick={() => { setColorKeySeed(null); clearMask(); setMaskMode(false); setTool("move"); }} type="button">
+                Cancel
               </button>
             </div>
           </>

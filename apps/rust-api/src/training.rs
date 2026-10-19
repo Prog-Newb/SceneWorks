@@ -1,4 +1,5 @@
 use super::*;
+use sceneworks_core::training::CaptionMode;
 
 pub(crate) async fn list_training_targets() -> Json<TrainingTargetRegistry> {
     Json(effective_training_targets())
@@ -141,6 +142,31 @@ pub(crate) async fn upload_training_dataset_item(
             let _ = std::fs::remove_file(&temp_path);
         })?;
         return Ok((StatusCode::CREATED, Json(item)));
+    }
+    Err(ApiError::bad_request("Upload file field is required"))
+}
+
+pub(crate) async fn upload_ltx_prepared_bundle(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id, item_id)): Path<(String, String, String)>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<TrainingDataset>), ApiError> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let temp_path = write_upload_field_to_temp_file(&state, field).await?;
+        let source_path = temp_path.clone();
+        let dataset = project_call(state, move |store| {
+            store.install_ltx_prepared_bundle(&project_id, &dataset_id, &item_id, &source_path)
+        })
+        .await;
+        let _ = std::fs::remove_file(&temp_path);
+        return Ok((StatusCode::CREATED, Json(dataset?)));
     }
     Err(ApiError::bad_request("Upload file field is required"))
 }
@@ -505,6 +531,11 @@ pub(crate) async fn create_training_dataset_caption_job(
         .item_ids
         .as_ref()
         .map(|ids| ids.iter().map(String::as_str).collect());
+    let request_trigger_words = payload
+        .trigger_words
+        .iter()
+        .map(|word| word.trim().to_owned())
+        .collect::<Vec<_>>();
     let items = dataset
         .items
         .iter()
@@ -513,11 +544,22 @@ pub(crate) async fn create_training_dataset_caption_job(
             None => payload.recaption || item.caption.text.trim().is_empty(),
         })
         .map(|item| {
+            // sc-24829: an item with no trigger words of its own takes the request's.
+            let own_words = item
+                .caption
+                .trigger_words
+                .iter()
+                .any(|word| !word.trim().is_empty());
+            let trigger_words = if own_words {
+                item.caption.trigger_words.clone()
+            } else {
+                request_trigger_words.clone()
+            };
             json!({
                 "itemId": item.id.clone(),
                 "imagePath": dataset_root.join(&item.path).display().to_string(),
                 "existingCaption": item.caption.text.clone(),
-                "triggerWords": item.caption.trigger_words.clone(),
+                "triggerWords": trigger_words,
             })
         })
         .collect::<Vec<_>>();
@@ -526,12 +568,36 @@ pub(crate) async fn create_training_dataset_caption_job(
             "No dataset items need captions. Enable recaption to overwrite existing captions.",
         ));
     }
+    // sc-24829: a trigger-only caption IS the trigger words, so an image without any would be
+    // written an empty caption. Refuse up front, naming how many images are missing them.
+    let trigger_only = payload.mode == CaptionMode::TriggerOnly;
+    if trigger_only {
+        let missing = items
+            .iter()
+            .filter(|item| {
+                !item["triggerWords"].as_array().is_some_and(|words| {
+                    words
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|word| !word.trim().is_empty())
+                })
+            })
+            .count();
+        if missing > 0 {
+            return Err(training_field_error(
+                "triggerWords",
+                format!(
+                    "Caption mode triggerOnly needs trigger words on every image; {missing} image(s) have none."
+                ),
+            ));
+        }
+    }
     let options = serde_json::to_value(payload.options)
         .map_err(|error| ApiError::internal(format!("caption options serialize: {error}")))?;
     let captioner = payload.captioner;
     let model_name_or_path = payload.model_name_or_path;
     let requested_gpu = payload.requested_gpu;
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "training_caption",
         "captioner": captioner,
@@ -541,12 +607,23 @@ pub(crate) async fn create_training_dataset_caption_job(
         "datasetVersion": dataset.version,
         "datasetRoot": dataset_root.display().to_string(),
         "recaption": payload.recaption,
+        "mode": payload.mode,
         "options": options,
         "items": items,
     }) {
         Value::Object(map) => map,
         _ => return Err(ApiError::internal("caption job payload must be an object")),
     };
+    // A trigger-only job loads no captioner (sc-24829), so it carries no model source — the same
+    // model-free exemption the worker's runtime-source guard applies to it.
+    if !trigger_only {
+        crate::model_sources::ensure_runtime_model_sources(
+            &state,
+            &JobType::TrainingCaption,
+            &mut job_payload,
+        )
+        .await?;
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::TrainingCaption,
@@ -563,7 +640,7 @@ pub(crate) async fn create_training_dataset_caption_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 const MAX_PARQUET_IMPORT_CONCURRENCY: usize = 64;
@@ -613,6 +690,26 @@ fn validate_parquet_import_request(
         {
             return Err(ApiError::bad_request(format!(
                 "Parquet {label} accepts at most {MAX_PARQUET_FILTER_TERMS} non-empty terms of up to {MAX_PARQUET_FILTER_TERM_CHARS} characters."
+            )));
+        }
+    }
+    // Named caption columns become item caption FIELD names, so they follow the store's field-name
+    // rule (non-empty, no surrounding whitespace, at most 64 characters) and must be distinct.
+    if payload.caption_field_columns.len() > 16 {
+        return Err(ApiError::bad_request(
+            "Parquet captionFieldColumns accepts at most 16 columns.",
+        ));
+    }
+    let mut seen_columns = std::collections::BTreeSet::new();
+    for column in &payload.caption_field_columns {
+        if column.trim().is_empty()
+            || column.trim() != column
+            || column.chars().count() > 64
+            || !seen_columns.insert(column.as_str())
+        {
+            return Err(ApiError::bad_request(format!(
+                "Parquet captionFieldColumns entries must be distinct column names of 1 to 64 \
+                 characters with no surrounding whitespace (got {column:?})."
             )));
         }
     }
@@ -668,7 +765,7 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
         .nth(3)
         .ok_or_else(|| ApiError::internal("training dataset root has an invalid layout"))?
         .to_path_buf();
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_parquet_import",
         "projectId": project_id.clone(),
@@ -685,6 +782,7 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
         "concurrency": payload.concurrency,
         "captionIncludes": payload.caption_includes.iter().map(|term| term.trim()).collect::<Vec<_>>(),
         "captionExcludes": payload.caption_excludes.iter().map(|term| term.trim()).collect::<Vec<_>>(),
+        "captionFieldColumns": payload.caption_field_columns,
     }) {
         Value::Object(map) => map,
         _ => {
@@ -693,6 +791,12 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
             ))
         }
     };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetParquetImport,
+        &mut job_payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::DatasetParquetImport,
@@ -709,7 +813,7 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 #[derive(Debug, Deserialize)]
@@ -858,7 +962,7 @@ pub(crate) async fn create_training_dataset_analysis_job(
     let embedder = payload.embedder;
     let model_name_or_path = payload.model_name_or_path;
     let requested_gpu = payload.requested_gpu;
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_analysis",
         "embedder": embedder,
@@ -876,6 +980,12 @@ pub(crate) async fn create_training_dataset_analysis_job(
             ))
         }
     };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetAnalysis,
+        &mut job_payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::DatasetAnalysis,
@@ -892,7 +1002,7 @@ pub(crate) async fn create_training_dataset_analysis_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) fn validate_dataset_analysis_job_request(
@@ -954,7 +1064,7 @@ pub(crate) async fn create_training_dataset_face_analysis_job(
         ));
     }
     let requested_gpu = payload.requested_gpu;
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_face_analysis",
         "projectId": project_id.clone(),
@@ -970,6 +1080,12 @@ pub(crate) async fn create_training_dataset_face_analysis_job(
             ))
         }
     };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetFaceAnalysis,
+        &mut job_payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::DatasetFaceAnalysis,
@@ -986,7 +1102,7 @@ pub(crate) async fn create_training_dataset_face_analysis_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// Persist the analysis worker's computed CLIP embeddings to the dataset's content-hash-keyed
@@ -1090,6 +1206,196 @@ pub(crate) async fn write_training_dataset_face_embeddings(
     Ok(Json(json!({ "stored": stored })))
 }
 
+/// The segmentation space recorded on subject masks POSTed by the worker (sc-2126).
+pub(crate) const SUBJECT_MASK_SPACE: &str = "sam3-person";
+
+/// Enqueue SAM3 subject-mask generation over a training dataset (sc-2126). Builds the per-item work
+/// list (item id, absolute image path, content hash — legacy items get their hash backfilled) and
+/// creates a GPU-routed `dataset_subject_mask` job, which routes to any worker advertising the SAM3
+/// `image_segment` capability. The worker POSTs the masks back to `/subject-masks`.
+pub(crate) async fn create_training_dataset_subject_mask_job(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetSubjectMaskJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let item_ids = payload.item_ids.clone();
+    let (dataset, targets, dataset_root, project_name) = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let dataset_id = dataset_id.clone();
+        move |store| {
+            let (targets, root, project_name) = store.training_dataset_subject_mask_targets(
+                &project_id,
+                &dataset_id,
+                item_ids.as_deref(),
+            )?;
+            let dataset = store.get_training_dataset(&project_id, &dataset_id)?;
+            Ok((dataset, targets, root, project_name))
+        }
+    })
+    .await?;
+    if targets.is_empty() {
+        return Err(ApiError::bad_request(
+            "Training dataset has no images to mask.",
+        ));
+    }
+    let items = targets
+        .iter()
+        .map(|target| {
+            json!({
+                "itemId": target.item_id,
+                "imagePath": target.image_path.display().to_string(),
+                "contentHash": target.content_hash,
+            })
+        })
+        .collect::<Vec<_>>();
+    let requested_gpu = payload.requested_gpu;
+    let mut job_payload = match json!({
+        "provider": "training",
+        "kind": "dataset_subject_mask",
+        "projectId": project_id.clone(),
+        "datasetId": dataset.id,
+        "datasetName": dataset.name,
+        "datasetVersion": dataset.version,
+        "datasetRoot": dataset_root.display().to_string(),
+        "items": items,
+    }) {
+        Value::Object(map) => map,
+        _ => {
+            return Err(ApiError::internal(
+                "dataset subject mask job payload must be an object",
+            ))
+        }
+    };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetSubjectMask,
+        &mut job_payload,
+    )
+    .await?;
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job(CreateJob {
+            job_type: JobType::DatasetSubjectMask,
+            project_id: Some(project_id),
+            project_name: Some(project_name),
+            payload: job_payload,
+            requested_gpu,
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// Persist the worker's generated subject masks (sc-2126). Each base64 PNG is validated and
+/// normalized against its image by the store; the response is the dataset's coverage report plus the
+/// count stored. A metadata write: the dataset version does not change.
+pub(crate) async fn write_training_dataset_subject_masks(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetSubjectMasksBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use base64::Engine as _;
+    if payload.space != SUBJECT_MASK_SPACE {
+        return Err(ApiError::bad_request(format!(
+            "Unsupported subject mask space {:?}; expected {SUBJECT_MASK_SPACE}.",
+            payload.space
+        )));
+    }
+    let writes = payload
+        .items
+        .into_iter()
+        .map(|item| {
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(item.mask_png.as_bytes())
+                .map_err(|error| {
+                    ApiError::bad_request(format!(
+                        "Subject mask for {} is not valid base64: {error}",
+                        item.content_hash
+                    ))
+                })?;
+            Ok(sceneworks_core::training_subject_masks::SubjectMaskWrite {
+                content_hash: item.content_hash,
+                png,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let submitted = writes.len();
+    let report = project_call(state, move |store| {
+        store.write_training_dataset_subject_masks(
+            &project_id,
+            &dataset_id,
+            writes,
+            sceneworks_core::training_subject_masks::SubjectMaskSource::Auto,
+        )
+    })
+    .await?;
+    // A mask whose image left the dataset while the job ran is skipped (not stored), never a 404
+    // that would discard the rest of the batch.
+    let skipped = report.skipped_content_hashes.clone();
+    Ok(Json(json!({
+        "stored": submitted - skipped.len(),
+        "skipped": skipped,
+        "report": report,
+    })))
+}
+
+/// The dataset's subject-mask coverage and per-image mask status (sc-2126).
+pub(crate) async fn get_training_dataset_subject_masks(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+) -> Result<Json<sceneworks_core::training_subject_masks::SubjectMaskReport>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.training_dataset_subject_mask_report(&project_id, &dataset_id)
+        })
+        .await?,
+    ))
+}
+
+/// Replace one image's subject mask with an uploaded PNG/JPEG/WebP (sc-2126). The upload is
+/// validated (type, size, aspect) and resized deterministically to the image; a rejection is a
+/// field-level 400 on `file`. Returns the updated coverage report.
+pub(crate) async fn upload_training_dataset_subject_mask(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id, item_id)): Path<(String, String, String)>,
+    mut multipart: Multipart,
+) -> Result<Json<sceneworks_core::training_subject_masks::SubjectMaskReport>, ApiError> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?
+    {
+        if field.name() != Some(sceneworks_core::training_subject_masks::SUBJECT_MASK_UPLOAD_FIELD)
+        {
+            continue;
+        }
+        let temp_path = write_upload_field_to_temp_file(&state, field).await?;
+        let source_path = temp_path.clone();
+        let report = project_call(state, move |store| {
+            store.upload_training_dataset_subject_mask(
+                &project_id,
+                &dataset_id,
+                &item_id,
+                &source_path,
+            )
+        })
+        .await;
+        let _ = std::fs::remove_file(&temp_path);
+        return Ok(Json(report?));
+    }
+    Err(ApiError::typed(
+        StatusCode::BAD_REQUEST,
+        "Subject mask upload requires a file.",
+        "subject_mask_missing",
+        json!({ "field": sceneworks_core::training_subject_masks::SUBJECT_MASK_UPLOAD_FIELD }),
+    ))
+}
+
 /// Enqueue a Real-ESRGAN upscale over the named (low-resolution-flagged) dataset items (sc-6539
 /// one-tap fix). The worker upscales each, writes a child asset, and re-points the item via
 /// `/repoint`. Mirrors `create_training_dataset_analysis_job`.
@@ -1131,7 +1437,7 @@ pub(crate) async fn create_training_dataset_upscale_job(
     }
     let factor = payload.factor;
     let requested_gpu = payload.requested_gpu;
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_upscale",
         "factor": factor,
@@ -1149,6 +1455,12 @@ pub(crate) async fn create_training_dataset_upscale_job(
             ))
         }
     };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetUpscale,
+        &mut job_payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::DatasetUpscale,
@@ -1165,7 +1477,7 @@ pub(crate) async fn create_training_dataset_upscale_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// Re-point dataset items at the upscaled child assets the worker just wrote (sc-6539) — the
@@ -1222,7 +1534,7 @@ fn apply_dataset_image_fix(
         .filter(|item| {
             target
                 .as_ref()
-                .map_or(true, |set| set.contains(item.id.as_str()))
+                .is_none_or(|set| set.contains(item.id.as_str()))
         })
         .map(|item| (item.id.clone(), item.path.clone()))
         .collect();
@@ -1328,6 +1640,22 @@ pub(crate) async fn strip_exif_training_dataset_items(
     ))
 }
 
+/// Caption-job trigger-word limits (sc-24829, E6) — mirror `captionTriggerWordLimits` in
+/// `apps/web/src/training/joyCaptionPrompts.js`.
+pub(crate) const TRAINING_CAPTION_TRIGGER_WORDS_MAX: usize = 16;
+pub(crate) const TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS: usize = 64;
+
+/// A 400 attributed to one training input field (epic 2123 E6): `code: "training_field_error"` and
+/// the field in `context.field`, so the client can mark that input instead of parsing `detail`.
+fn training_field_error(field: &str, detail: impl Into<String>) -> ApiError {
+    ApiError::typed(
+        StatusCode::BAD_REQUEST,
+        detail.into(),
+        "training_field_error",
+        json!({ "field": field }),
+    )
+}
+
 pub(crate) fn validate_training_caption_job_request(
     payload: &TrainingCaptionJobRequest,
 ) -> Result<(), ApiError> {
@@ -1335,6 +1663,49 @@ pub(crate) fn validate_training_caption_job_request(
         return Err(ApiError::bad_request(
             "Unsupported training captioner. Use joy_caption.",
         ));
+    }
+    match &payload.mode {
+        CaptionMode::Default | CaptionMode::TriggerOnly => {}
+        // The subject-only prompt is owned by the worker; a caller prompt would silently replace
+        // it, so the two are refused together rather than one being ignored.
+        CaptionMode::SubjectOnly if !payload.options.caption_prompt.trim().is_empty() => {
+            return Err(training_field_error(
+                "mode",
+                "Caption mode subjectOnly uses its own prompt; leave captionPrompt empty.",
+            ));
+        }
+        CaptionMode::SubjectOnly => {}
+        _ => {
+            return Err(training_field_error(
+                "mode",
+                "Caption mode must be one of default, subjectOnly, or triggerOnly.",
+            ));
+        }
+    }
+    if payload.trigger_words.len() > TRAINING_CAPTION_TRIGGER_WORDS_MAX {
+        return Err(training_field_error(
+            "triggerWords",
+            format!(
+                "triggerWords: use at most {TRAINING_CAPTION_TRIGGER_WORDS_MAX} trigger words."
+            ),
+        ));
+    }
+    for word in &payload.trigger_words {
+        let word = word.trim();
+        if word.is_empty() {
+            return Err(training_field_error(
+                "triggerWords",
+                "triggerWords: trigger words must not be empty.",
+            ));
+        }
+        if word.chars().count() > TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS {
+            return Err(training_field_error(
+                "triggerWords",
+                format!(
+                    "triggerWords: each trigger word must be at most {TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS} characters."
+                ),
+            ));
+        }
     }
     if payload.model_name_or_path.trim().is_empty() {
         return Err(ApiError::bad_request(
@@ -1414,6 +1785,15 @@ pub(crate) async fn create_training_job(
         .ok_or_else(|| {
             ApiError::bad_request(format!("Unknown training target: {}", payload.target_id))
         })?;
+    if let Some(error) = untrainable_target_base_error(target) {
+        return Err(error);
+    }
+    // Enforce the Rust-owned target capability before touching a dataset, allocating
+    // output ids, or normalizing an image in place. The target catalog is returned
+    // directly to clients, so every advertised numeric bound is a submit-time
+    // contract rather than an advisory UI hint.
+    sceneworks_core::training::validate_training_config_for_target(target, &payload.config)
+        .map_err(training_plan_error_to_api_error)?;
     // ControlNet training (epic 10159) reuses this submit path — same target registry, dataset
     // resolution, plan build, and output/guardrail plumbing — but produces a control branch, not a
     // LoRA. A `ControlBranch` target enqueues the orchestrated `control_training` job (render the
@@ -1608,7 +1988,10 @@ pub(crate) async fn create_training_job(
     // every submit, including the offline dry-run path — makes no network calls.
     let normalized_family = normalize_lora_family(&target.family);
     let known_families = known_lora_families_from_manifests(&state).await?;
-    if !known_families.is_empty()
+    // A full base fine-tune produces a MODEL, not a LoRA, so "an installed model must accept this
+    // LoRA family" is not its guardrail (sc-25685: an Iris full export registers as a model).
+    if !is_base_checkpoint
+        && !known_families.is_empty()
         && !known_families
             .iter()
             .any(|family| family == &normalized_family)
@@ -1624,8 +2007,40 @@ pub(crate) async fn create_training_job(
     // A real run loads the base model and writes weights, so it must have the
     // model installed and room on disk. A dry run only resolves the plan, so it
     // is exempt — that is how you preview a plan before installing the model.
+    // Iris depth / restoration (sc-25687 / sc-25688): a task run needs its own task export (and, for
+    // restoration, the pinned training-only resources), not the shared repo's generation files — so
+    // availability is judged per resource, not off the repo-level install marker.
+    // Iris GENERATION is judged per task resource too (S7): the root backbone at the pinned
+    // revision AND the Qwen3-VL text encoder — never the repo-wide marker, which any depth/ or
+    // upscaler/ file satisfies. Every Iris refusal is typed (`iris_training_refused` + `kind`, S8).
+    let iris_task = sceneworks_worker::iris_task_objective(&target.kernel, &target.base_model);
+    let iris_objective = sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel)
+        .then(|| {
+            sceneworks_core::training::iris::IrisObjective::from_base_model(&target.base_model)
+        })
+        .flatten();
     if !payload.dry_run {
-        if let Some(message) = training_base_unavailable_message(
+        // A base whose licence binds derivatives (Qwen Image 2.1's Qwen RESEARCH licence, epic 24107
+        // E12) needs the user's explicit acceptance before a run starts. The Training Studio shows
+        // the notice and sends the assertion; this is the backstop for every other client.
+        if let Some(error) = training_license_acknowledgment_error(target, &payload.extra) {
+            return Err(error);
+        }
+        // A kernel with no candle trainer can never be claimed off-Mac, so a real run here would
+        // sit queued forever. Refuse it with the reason instead.
+        if let Some(message) = training_host_unavailable_message(target, cfg!(target_os = "macos"))
+        {
+            return Err(ApiError::bad_request(message));
+        }
+        if let Some(objective) = iris_objective {
+            if let Some(refusal) = sceneworks_worker::iris_training_install_refusal(
+                &data_dir,
+                objective,
+                &payload.config,
+            ) {
+                return Err(crate::iris_curricula::iris_install_refused(refusal));
+            }
+        } else if let Some(message) = training_base_unavailable_message(
             training_base_model_status(&data_dir, target),
             &target.base_model,
         ) {
@@ -1634,6 +2049,25 @@ pub(crate) async fn create_training_job(
         if let Some(message) = training_disk_space_error(&output_dir) {
             return Err(ApiError::bad_request(message));
         }
+        // sc-25213: the de-distill training adapter the plan selects resolves from the installed
+        // library only (the worker refuses a missing one too) — refuse it here as a field error on
+        // the version the user picked, instead of queueing a job that fails at the worker.
+        if let Some(adapter) = sceneworks_core::training::training_adapter::training_adapter_model(
+            &payload.config.advanced,
+        )
+        .map_err(training_plan_error_to_api_error)?
+        {
+            if sceneworks_worker::installed_aux_training_model_dir(&data_dir, adapter).is_none() {
+                return Err(training_field_error(
+                    sceneworks_core::training::training_adapter::TRAINING_ADAPTER_VERSION_KEY,
+                    format!(
+                        "The de-distill training adapter '{}' ({}) is not installed. Install it \
+                         from the Models screen.",
+                        adapter.label, adapter.id
+                    ),
+                ));
+            }
+        }
         // A FULL base fine-tune (sc-14056) trains every DiT weight, so it holds the full-precision
         // master weights + optimizer state + (without gradient checkpointing, sc-14989) the whole
         // retained backward graph — an envelope far larger than a frozen-base LoRA run, and one that at
@@ -1641,11 +2075,22 @@ pub(crate) async fn create_training_job(
         // platform-aware, with an actionable message. Only the full path needs this; a LoRA/LoKr run
         // rides the base-installed check above. Inert for non-full runs and for non-MLX platforms
         // (the worker probe returns no budget), and a no-op when the base isn't installed.
-        if training_is_full_finetune(&payload.config) {
+        // Iris-3B (sc-25685/sc-25686): a routed training lane is never admitted unbounded. On the
+        // co-located macOS API the declared unified-memory floor refuses an undersized Mac here,
+        // before a job exists; the worker repeats the gate on every lane (VRAM on Candle).
+        if sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel) {
+            if let Some(message) =
+                sceneworks_worker::iris_plan_memory_error(&target.base_model, &payload.config)
+            {
+                return Err(ApiError::bad_request(message));
+            }
+        } else if training_is_full_finetune(&payload.config) {
             let base_model_dir = resolve_base_model_path(target, &data_dir);
             if let Some(message) = sceneworks_worker::full_finetune_memory_error(
                 FsPath::new(&base_model_dir),
-                payload.config.resolution,
+                // Epic 2123 E7 (sc-2127): with resolution buckets the run trains at every listed
+                // resolution, so the envelope is the LARGEST one, not `resolution`.
+                sceneworks_core::training::training_max_resolution(&payload.config),
                 // The accumulator buffer is a real term in the envelope, not a detail — see
                 // `FULL_FINETUNE_ACCUM_MULTIPLIER`. Passing the configured window is what keeps a
                 // 64–80 GB Mac out of an uncatchable SIGKILL.
@@ -1660,8 +2105,20 @@ pub(crate) async fn create_training_job(
         }
     }
 
+    // sc-2124: masked-loss runs (on by default for Z-Image character presets) need a subject mask
+    // per image. Missing ones are generated by the worker with SAM3 before training, so a freshly
+    // imported dataset trains as-is; only what generation cannot fix is refused here.
+    let subject_mask_prepass = training_subject_mask_prepass(
+        &state,
+        &project_id,
+        &dataset,
+        &payload.config.advanced,
+        payload.dry_run,
+    )
+    .await?;
+
     // Rust resolves and validates the normalized plan before any job is queued.
-    let plan = build_training_plan(BuildTrainingPlan {
+    let mut plan = build_training_plan(BuildTrainingPlan {
         job_id: &job_id,
         target,
         dataset: &dataset,
@@ -1674,7 +2131,25 @@ pub(crate) async fn create_training_job(
         file_name,
         created_at: now_rfc3339(),
     })
-    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    .map_err(training_plan_error_to_api_error)?;
+    // Iris resume / new phase / load-from: the client named a previous run; SceneWorks derives the
+    // checkpoint/export path from that run's trusted ids and hands it to the trainer.
+    crate::iris_training::resolve_iris_run_sources(&state, &project_id, &mut plan).await?;
+    // Iris curricula / REPA / distributed (sc-25689): lineage, teacher, topology and the engine's
+    // own plan resolution, and the receipts the run and its registered output carry.
+    let iris_receipts = crate::iris_curricula::check_iris_submit(
+        &state,
+        &project_id,
+        target,
+        &plan,
+        payload.dry_run,
+    )
+    .await?;
+    // Restoration's synthetic-degradation overrides go through the engine's own parser (unknown
+    // Real-ESRGAN keys, bad ranges, a kernel larger than the crop) before a job exists.
+    if iris_task == Some(sceneworks_core::training::iris::IrisObjective::Restoration) {
+        crate::iris_training::check_restore_degradation_overrides(&plan)?;
+    }
 
     // Pre-build the LoRA registry entry the completed job will register, mirroring
     // the `lora_import` pattern: Rust owns LoRA registration. The descriptive
@@ -1720,6 +2195,18 @@ pub(crate) async fn create_training_job(
     {
         provenance.retain(|_, value| !value.is_null());
     }
+    // A trained adapter is a derivative of its base, so it records the base's licence (epic 24107
+    // E12 — a Qwen Image 2.1 adapter inherits the Qwen RESEARCH licence). `baseModel` is already
+    // recorded above; `register_trained_lora` keeps these descriptive fields verbatim.
+    if let Some(entry) = manifest_entry.as_object_mut() {
+        entry.extend(trained_adapter_license_fields(target));
+        // An instruction-edit target (sc-24161) produces an EDIT adapter: record it the way the
+        // engine stamps the adapter's own metadata (`trainingMode=edit`), so the library can tell
+        // an edit adapter from a text-to-image one under the same `qwen-image-2-1` family.
+        if sceneworks_core::training::training_target_trains_edit_pairs(target) {
+            entry.insert("trainingMode".to_owned(), Value::String("edit".to_owned()));
+        }
+    }
 
     // A control overlay registers as a ControlNet, not a LoRA (sc-10165, B4): swap the LoRA-shaped
     // descriptive fields (networkType/triggerWords/family) for its inference-side control identity — the
@@ -1744,6 +2231,10 @@ pub(crate) async fn create_training_job(
                 "paths".to_owned(),
                 json!({ "model": output_dir.display().to_string() }),
             );
+            entry.insert(
+                "importSourceShape".to_owned(),
+                Value::String("transformer_directory".to_owned()),
+            );
             // The catalog has one global user manifest; record the effective scope honestly rather
             // than echoing a "project" the model store cannot honour.
             entry.insert("scope".to_owned(), Value::String("global".to_owned()));
@@ -1754,6 +2245,24 @@ pub(crate) async fn create_training_job(
                     sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE,
                 ]),
             );
+        }
+    }
+
+    if sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel) {
+        if let Some(entry) = manifest_entry.as_object_mut() {
+            crate::iris_training::shape_iris_manifest_entry(
+                entry,
+                &output_dir,
+                &plan.output.file_name,
+                is_base_checkpoint,
+                &target.base_model,
+            );
+            if let Some(receipts) = &iris_receipts {
+                entry.insert(
+                    crate::iris_curricula::IRIS_RECEIPTS_KEY.to_owned(),
+                    receipts.clone(),
+                );
+            }
         }
     }
 
@@ -1809,16 +2318,51 @@ pub(crate) async fn create_training_job(
     job_payload.insert("outputName".to_owned(), Value::String(output_name));
     job_payload.insert("plan".to_owned(), plan_value);
     job_payload.insert("manifestEntry".to_owned(), manifest_entry);
+    if let Some(receipts) = iris_receipts {
+        job_payload.insert(
+            crate::iris_curricula::IRIS_RECEIPTS_KEY.to_owned(),
+            receipts,
+        );
+    }
+    if let Some(prepass) = subject_mask_prepass {
+        job_payload.insert("subjectMaskPrepass".to_owned(), prepass);
+    }
+    // The acceptance this route already enforced travels with the job, so a retry/duplicate (which
+    // re-validates the stored payload through the raw-job gate) of an accepted run still passes.
+    // Stamped only from an actual assertion (never for an unacknowledged dry run), so flipping a
+    // stored dry run to a real one through retry/duplicate still hits the gate.
+    if sceneworks_core::training::training_target_requires_license_acknowledgment(target)
+        && training_license_acknowledgment_error(target, &payload.extra).is_none()
+    {
+        job_payload.insert(
+            crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+            Value::Bool(true),
+        );
+    }
+    // Route-owned DATA for the model-source seam: a real training run loads this base model, so
+    // it must carry the same typed identity as generation. The seam resolves and preflights it.
+    job_payload.insert(
+        "baseModel".to_owned(),
+        Value::String(target.base_model.clone()),
+    );
+
+    let training_job_type = if is_control {
+        JobType::ControlTraining
+    } else {
+        JobType::LoraTrain
+    };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &training_job_type,
+        &mut job_payload,
+    )
+    .await?;
 
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job_with_id(
             job_id,
             CreateJob {
-                job_type: if is_control {
-                    JobType::ControlTraining
-                } else {
-                    JobType::LoraTrain
-                },
+                job_type: training_job_type,
                 project_id: Some(project_id),
                 project_name: Some(project_name),
                 payload: job_payload,
@@ -1833,7 +2377,167 @@ pub(crate) async fn create_training_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// Most image names a subject-mask refusal lists before summarising the rest as "and N more".
+const SUBJECT_MASK_REFUSAL_NAME_CAP: usize = 10;
+
+/// The subject-mask prepass of a training submit (sc-2124). `None` when the run reads no subject
+/// mask (see [`sceneworks_core::training::subject_mask_consumer`]) or every image already has one;
+/// otherwise the `subjectMaskPrepass` payload — `{ projectId, datasetId, datasetRoot, items:
+/// [{itemId, imagePath, contentHash}] }`, the shape of a `dataset_subject_mask` job — naming the images whose
+/// masks the worker generates with SAM3 before it trains (a dry run only validates that it would).
+///
+/// Refused here, as a field error on the technique's field, is only what generation cannot fix:
+/// - an image SAM3 already examined and found no subject in (an empty mask — regenerating would
+///   find none again), naming the images and the fix;
+/// - for a real run, a SAM3 Person Segmenter that is not installed (nothing is downloaded
+///   mid-job), naming the model to install.
+async fn training_subject_mask_prepass(
+    state: &AppState,
+    project_id: &str,
+    dataset: &sceneworks_core::training::TrainingDataset,
+    advanced: &sceneworks_core::contracts::JsonObject,
+    dry_run: bool,
+) -> Result<Option<Value>, ApiError> {
+    let Some(field) = sceneworks_core::training::subject_mask_consumer(advanced)
+        .map_err(training_plan_error_to_api_error)?
+    else {
+        return Ok(None);
+    };
+    let report = project_call(state.clone(), {
+        let project_id = project_id.to_owned();
+        let dataset_id = dataset.id.clone();
+        move |store| store.training_dataset_subject_mask_report(&project_id, &dataset_id)
+    })
+    .await?;
+    let name_of = |item_id: &str| {
+        dataset
+            .items
+            .iter()
+            .find(|item| item.id == item_id)
+            .map(|item| item.display_name.clone())
+            .unwrap_or_else(|| item_id.to_owned())
+    };
+    let list = |names: Vec<String>| {
+        let shown = names.len().min(SUBJECT_MASK_REFUSAL_NAME_CAP);
+        let mut text = names[..shown].join(", ");
+        if names.len() > shown {
+            text.push_str(&format!(" and {} more", names.len() - shown));
+        }
+        text
+    };
+    let technique = if field == sceneworks_core::training::SUBJECT_MASK_LOSS_KEY {
+        "Subject-masked loss"
+    } else {
+        "The subject-restricted normal loss"
+    };
+    let empty = report
+        .items
+        .iter()
+        .filter(|item| item.has_mask && item.empty)
+        .map(|item| name_of(&item.item_id))
+        .collect::<Vec<_>>();
+    if !empty.is_empty() {
+        return Err(training_field_error(
+            field,
+            format!(
+                "{technique} needs a subject on every dataset image, but subject mask generation \
+                 found no person in {} of {}: {}. Upload a subject mask for those images in Data \
+                 Sets, remove them from the dataset, or turn off {technique}.",
+                empty.len(),
+                report.items.len(),
+                list(empty)
+            ),
+        ));
+    }
+    let missing = report
+        .items
+        .iter()
+        .filter(|item| !item.has_mask)
+        .map(|item| item.item_id.clone())
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(None);
+    }
+    if !dry_run && !subject_segmenter_installed(state).await? {
+        return Err(training_field_error(
+            field,
+            format!(
+                "{technique} needs a subject mask on every dataset image; {} of {} have none, and \
+                 the SAM3 Person Segmenter that generates them is not installed. Install \
+                 \"SAM3 Person Segmenter\" from the Models screen, or generate or upload the masks \
+                 in Data Sets.",
+                missing.len(),
+                report.items.len()
+            ),
+        ));
+    }
+    let (targets, dataset_root, _) = project_call(state.clone(), {
+        let project_id = project_id.to_owned();
+        let dataset_id = dataset.id.clone();
+        move |store| {
+            store.training_dataset_subject_mask_targets(&project_id, &dataset_id, Some(&missing))
+        }
+    })
+    .await?;
+    let items = targets
+        .iter()
+        .map(|target| {
+            json!({
+                "itemId": target.item_id,
+                "imagePath": target.image_path.display().to_string(),
+                "contentHash": target.content_hash,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Some(json!({
+        "projectId": project_id,
+        "datasetId": dataset.id,
+        "datasetRoot": dataset_root.display().to_string(),
+        "items": items,
+    })))
+}
+
+/// Whether the catalog's SAM3 Person Segmenter (`sam3_person_segment`, the model the
+/// subject-mask generation loads) is installed — the Models screen's own install state.
+async fn subject_segmenter_installed(state: &AppState) -> Result<bool, ApiError> {
+    Ok(crate::models::model_catalog_snapshot(state)
+        .await?
+        .iter()
+        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(SUBJECT_SEGMENTER_MODEL_ID))
+        .and_then(|entry| entry.get("installState").and_then(Value::as_str))
+        == Some("installed"))
+}
+
+/// Catalog id of the SAM3 person segmenter subject-mask generation loads (the model-source seam's
+/// fixed `dataset_subject_mask` utility model).
+pub(crate) const SUBJECT_SEGMENTER_MODEL_ID: &str = "sam3_person_segment";
+
+fn training_plan_error_to_api_error(
+    error: sceneworks_core::training::TrainingPlanError,
+) -> ApiError {
+    match error {
+        sceneworks_core::training::TrainingPlanError::TargetLimit(limit) => {
+            let detail = limit.to_string();
+            let context = serde_json::to_value(&limit).unwrap_or_else(|_| {
+                json!({
+                    "kind": "training_target_limit"
+                })
+            });
+            ApiError::typed(
+                StatusCode::BAD_REQUEST,
+                detail,
+                "training_target_limit",
+                context,
+            )
+        }
+        sceneworks_core::training::TrainingPlanError::InvalidField { field, message } => {
+            training_field_error(&field, message)
+        }
+        other => ApiError::bad_request(other.to_string()),
+    }
 }
 
 /// Final adapter files a trainer is required to produce. Wan A14B is a dual-expert model and its
@@ -1867,7 +2571,7 @@ fn training_file_with_suffix(file_name: &str, suffix: &str) -> String {
 /// Best-effort and purely informational: the worker and LoRA registration both drive off the job
 /// payload, never this file, so any dir/serialize/write failure is logged and swallowed rather
 /// than failing the training submit.
-async fn write_training_config_snapshot(output_dir: &std::path::Path, plan: &Value) {
+pub(crate) async fn write_training_config_snapshot(output_dir: &std::path::Path, plan: &Value) {
     if let Err(error) = tokio::fs::create_dir_all(output_dir).await {
         tracing::warn!(
             event = "training_config_snapshot_dir_failed",
@@ -1933,7 +2637,18 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
             // snapshots/. Descend into the main snapshot so callers get a usable component
             // root, exactly as inference does. Fall back to the cache root when no snapshot is
             // materialized yet (the path need not exist at dry-run time).
-            if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
+            let snapshots = huggingface_snapshot_dirs(&cache_path);
+            // Hand the LTX-2.3 trainer the snapshot that actually carries the packed `q4/` tier: on a
+            // cache split across two bundle revisions that is not always the ranked-first one, and the
+            // worker loads `plan.target.baseModelPath` verbatim, so the gate and the path it records
+            // must agree on one snapshot (#2953). With no complete tier anywhere — a dry run against an
+            // uninstalled base — this falls through to the shared resolution below unchanged.
+            if is_ltx23_packed_training_target(target) {
+                if let Some(snapshot) = ltx_q4_training_snapshot(&snapshots) {
+                    return snapshot.join("q4").display().to_string();
+                }
+            }
+            if let Some(snapshot) = snapshots.into_iter().next() {
                 return tiered_turnkey_train_dir(snapshot, target)
                     .display()
                     .to_string();
@@ -2002,11 +2717,10 @@ fn bf16_component_tree_present(bf16: &FsPath) -> bool {
 
 /// LTX is the packed-training exception to the dense-tier rule: both native trainers run QLoRA
 /// directly against the SceneWorks turnkey's `q4/` tier and its sibling Gemma encoder. Pin the exact
-/// LTX files plus every Gemma shard named by its index so a partial generation-only or torn
-/// co-requisite download cannot pass the run gate.
-fn ltx_q4_training_tier_present(snapshot: &FsPath) -> bool {
+/// LTX files so a partial, generation-only download cannot pass the run gate.
+fn ltx_q4_tier_files_present(snapshot: &FsPath) -> bool {
     let q4 = snapshot.join("q4");
-    let q4_present = [
+    [
         "quantize_config.json",
         "transformer.safetensors",
         "connector.safetensors",
@@ -2014,25 +2728,124 @@ fn ltx_q4_training_tier_present(snapshot: &FsPath) -> bool {
         "vae_encoder.safetensors",
     ]
     .iter()
-    .all(|file| q4.join(file).is_file());
-    if !q4_present {
-        return false;
-    }
-
-    sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete(&snapshot.join("gemma"))
+    .all(|file| q4.join(file).is_file())
 }
 
-fn training_tier_name(target: &TrainingTarget) -> &'static str {
-    if target.kernel == "ltx_mlx_lora" {
-        "q4"
+/// Whether this target runs QLoRA against the FLAT packed `q4/` LTX-2.3 turnkey tier — as opposed to
+/// LTX-2.5's nested `dev/q4/` identity, or the dense `bf16/` tier every other tiered turnkey trains on.
+fn is_ltx23_packed_training_target(target: &TrainingTarget) -> bool {
+    target.kernel == "ltx_mlx_lora" && target.base_model != "ltx_2_5"
+}
+
+/// The LTX-2.3 turnkey snapshot whose packed `q4/` tier is complete, searched across EVERY
+/// materialized snapshot of the repo cache rather than only the ranked-first one.
+///
+/// Hugging Face keeps each filtered download under the revision it was fetched at, so a real install
+/// straddles two snapshots whenever the bundle pin moves: an install predating the sc-18853 bump
+/// keeps `q4/` under the parent revision while any later fetch materializes the bumped one.
+/// Generation tolerates exactly that split — the worker scans both bundle revisions for a complete
+/// tier (`ltx_bundle_subdir_across_revisions`, sc-18853) — so a gate that reads one snapshot refuses
+/// a real run whose weights the trainer would have loaded happily. That is the
+/// "installed for generation, but training needs the packed q4 tier" dead end in #2953. Ranked order
+/// is preserved, so the `refs/main` / fullest snapshot still wins when several carry the tier.
+fn ltx_q4_training_snapshot(snapshots: &[PathBuf]) -> Option<&PathBuf> {
+    snapshots
+        .iter()
+        .find(|snapshot| ltx_q4_tier_files_present(snapshot))
+}
+
+/// How the LTX-2.3 Gemma-3 co-requisite is named to the user when it is what blocks a real run.
+/// Names the `gemma/` directory as well as the encoder, because the manifest installs it as its own
+/// filtered download (`files: ["gemma/*"]`, ~26 GB) separate from the `q4/` tier — so "the model is
+/// installed" and "this encoder is installed" are genuinely independent facts on disk.
+pub(crate) const LTX_GEMMA_CO_REQUISITE: &str =
+    "Gemma-3 text encoder co-requisite (the bundle's `gemma/`)";
+
+/// Whether a complete Gemma-3 co-requisite is reachable for an LTX-2.3 run: the snapshot the tier
+/// resolved from first, then its siblings.
+///
+/// The trainer resolves its `LoadSpec::text_encoder` through the worker's `bundled_ltx_gemma_dir`,
+/// which already scans sibling revisions for precisely this reason (sc-14377 — "Hugging Face can
+/// retain different filtered downloads in different snapshot revisions"). Requiring `gemma/` inside
+/// the tier's own snapshot made this gate stricter than the loader it exists to predict, so a
+/// split-cache install was refused at submit even though the trainer resolves it.
+fn ltx_gemma_co_requisite_present(snapshots: &[PathBuf], tier_snapshot: &FsPath) -> bool {
+    use sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete;
+    gemma_text_encoder_dir_is_complete(&tier_snapshot.join("gemma"))
+        || snapshots.iter().any(|snapshot| {
+            snapshot.as_path() != tier_snapshot
+                && gemma_text_encoder_dir_is_complete(&snapshot.join("gemma"))
+        })
+}
+
+/// Pre-flight status for the LTX-2.3 packed lane over a materialized turnkey cache: `Ready` only when
+/// a complete `q4/` tier AND a complete Gemma co-requisite are both reachable somewhere in it.
+///
+/// Otherwise the two blockers are reported SEPARATELY, because they are separate downloads with
+/// separate remedies: no complete packed tier anywhere is `TrainingTierMissing`, while a complete
+/// tier whose Gemma encoder is absent or torn is `TrainingCoRequisiteMissing` (#2953). Never
+/// `Missing` — the repo itself is on disk by the time this runs.
+fn ltx23_packed_training_status(snapshots: &[PathBuf]) -> TrainingBaseStatus {
+    match ltx_q4_training_snapshot(snapshots) {
+        Some(snapshot) if ltx_gemma_co_requisite_present(snapshots, snapshot) => {
+            TrainingBaseStatus::Ready
+        }
+        // The packed tier is complete and the Gemma encoder is not: report THAT, rather than a
+        // tier the user already has. These two causes carry different remedies, and collapsing
+        // them is what left #2953 unexitable — "install the packed q4 tier" to someone whose q4
+        // tier is already whole is advice that cannot work however many times it is followed.
+        Some(_) => TrainingBaseStatus::TrainingCoRequisiteMissing(LTX_GEMMA_CO_REQUISITE),
+        None => TrainingBaseStatus::TrainingTierMissing,
+    }
+}
+
+/// LTX-2.5 is also packed-Q4 training, but its undistilled training identity is nested under
+/// `dev/q4/` and self-contains its Gemma-4 text encoder. Pin the same complete component set
+/// the generation worker requires so a partial nested install cannot pass the training gate.
+fn ltx25_q4_training_tier_present(snapshot: &FsPath) -> bool {
+    let q4 = snapshot.join("dev").join("q4");
+    [
+        "split_model.json",
+        "transformer.safetensors",
+        "connector.safetensors",
+        "text_encoder.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "diffusion_vae_encoder.safetensors",
+        "vae_diffusion_decoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+        "spatial_upsampler.safetensors",
+        "temporal_upsampler.safetensors",
+        "duration_head.safetensors",
+    ]
+    .iter()
+    .all(|file| q4.join(file).is_file())
+}
+
+/// The tier subdirectory training reads, as path segments so the caller joins them with the
+/// platform separator (a `"dev/q4"` literal would embed a forward slash on Windows).
+fn training_tier_segments(target: &TrainingTarget) -> &'static [&'static str] {
+    if target.base_model == "ltx_2_5" {
+        &["dev", "q4"]
+    } else if target.kernel == "ltx_mlx_lora" {
+        &["q4"]
     } else {
-        "bf16"
+        &["bf16"]
     }
 }
 
 fn training_tier_present(snapshot: &FsPath, target: &TrainingTarget) -> bool {
-    if target.kernel == "ltx_mlx_lora" {
-        ltx_q4_training_tier_present(snapshot)
+    if target.base_model == "ltx_2_5" {
+        ltx25_q4_training_tier_present(snapshot)
+    } else if target.kernel == "ltx_mlx_lora" {
+        // Single-snapshot form. `training_base_model_status` routes the LTX-2.3 lane through
+        // `ltx23_packed_training_status` instead, which searches the whole repo cache (#2953); this
+        // arm remains the conservative fallback for a hypothetical packed target with no tier split.
+        ltx_q4_tier_files_present(snapshot)
+            && sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete(
+                &snapshot.join("gemma"),
+            )
     } else {
         bf16_component_tree_present(&snapshot.join("bf16"))
     }
@@ -2047,8 +2860,12 @@ fn tiered_turnkey_train_dir(
     snapshot: std::path::PathBuf,
     target: &TrainingTarget,
 ) -> std::path::PathBuf {
-    if snapshot_is_tiered_turnkey(&snapshot) {
-        return snapshot.join(training_tier_name(target));
+    // LTX-2.5 nests two transformer identities before the quant tier, so it does not match the
+    // root-level `bf16/q8/q4` turnkey shape tested below.
+    if target.base_model == "ltx_2_5" || snapshot_is_tiered_turnkey(&snapshot) {
+        return training_tier_segments(target)
+            .iter()
+            .fold(snapshot, |dir, segment| dir.join(segment));
     }
     snapshot
 }
@@ -2406,7 +3223,9 @@ pub(crate) fn validate_lora_id_component(lora_id: &str) -> Result<(), ApiError> 
 /// Outcome of the pre-flight training-base check. Splitting "nothing on disk" from "the model is
 /// installed for generation but its dense training tier isn't" lets the run-gate give the second case
 /// an actionable "install the training tier" message instead of a bare "not installed" — the exact
-/// confusion the #1694 fix surfaced (sc-13860, AC #4). Both non-`Ready` states block a real run.
+/// confusion the #1694 fix surfaced (sc-13860, AC #4). `TrainingCoRequisiteMissing` carries that same
+/// principle one step further for a tier whose sibling downloads can be absent independently (#2953).
+/// Every non-`Ready` state blocks a real run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrainingBaseStatus {
     /// The dense training weights are present on disk — a real run can proceed.
@@ -2414,6 +3233,11 @@ pub(crate) enum TrainingBaseStatus {
     /// The base repo IS on disk but its family-specific training tier is absent (`bf16/` generally,
     /// packed `q4/` for LTX).
     TrainingTierMissing,
+    /// The family-specific training tier IS complete, but a separately-downloaded co-requisite the
+    /// trainer loads alongside it — named by the payload — is absent or torn. Distinct from
+    /// [`TrainingBaseStatus::TrainingTierMissing`] because the remedy is different: re-installing the
+    /// tier cannot fix it, so blaming the tier sends the user round a loop they cannot exit (#2953).
+    TrainingCoRequisiteMissing(&'static str),
     /// Nothing for this base is on disk — the model was never installed.
     Missing,
 }
@@ -2438,13 +3262,22 @@ pub(crate) fn training_base_model_status(
         .filter(|repo| !repo.is_empty())
     {
         if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
+            let snapshots = huggingface_snapshot_dirs(&cache_path);
+            // LTX-2.3 QLoRA reads the packed `q4/` tier plus the sibling Gemma encoder, and both can
+            // sit in a DIFFERENT snapshot than the ranked-first one on an install whose bundle pin has
+            // moved — a split the generation lane and the trainer's own text-encoder resolver both
+            // accommodate. Search the whole repo cache so this gate stops refusing installs the
+            // trainer would load (#2953).
+            if is_ltx23_packed_training_target(target) && !snapshots.is_empty() {
+                return ltx23_packed_training_status(&snapshots);
+            }
             // Tiered-turnkey re-host (epic 9992 Krea 2 Raw): training reads the DENSE `bf16/` tier, but
             // generation may have installed only the q4/q8 default. The repo-level completion marker does
             // NOT certify a tier (sc-9909), so require the bf16 component tree specifically — otherwise
             // the run-gate would green-light training on a repo that has no dense weights to train. A
             // turnkey on disk without that tier is `TrainingTierMissing`, not `Missing`.
-            if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
-                if snapshot_is_tiered_turnkey(&snapshot) {
+            if let Some(snapshot) = snapshots.into_iter().next() {
+                if target.base_model == "ltx_2_5" || snapshot_is_tiered_turnkey(&snapshot) {
                     return if training_tier_present(&snapshot, target) {
                         TrainingBaseStatus::Ready
                     } else {
@@ -2467,7 +3300,30 @@ pub(crate) fn training_base_model_status(
     if model_is_installed(&managed) {
         return TrainingBaseStatus::Ready;
     }
+    // Split-repo bases (Qwen Image 2.1): the dense training base and the quantized generation tiers
+    // live in DIFFERENT repos, so "the training repo is absent" is not the same as "nothing is
+    // installed". A host that installed only the q8/q4 re-host for generation gets the actionable
+    // "install the bf16 tier" answer (QLoRA is a non-goal), not a bare "not installed".
+    if quantized_generation_repos(&target.base_model)
+        .iter()
+        .filter_map(|repo| huggingface_repo_cache_path(data_dir, repo))
+        .any(|cache_path| !huggingface_snapshot_dirs(&cache_path).is_empty())
+    {
+        return TrainingBaseStatus::TrainingTierMissing;
+    }
     TrainingBaseStatus::Missing
+}
+
+/// The quantized-tier generation repos of a base whose dense training tier is a SEPARATE repo (the
+/// target's `base_model_repo`). Qwen Image 2.1 ships bf16 as the upstream `Qwen/Qwen-Image-2.1`
+/// snapshot and q8/q4 as the `SceneWorks/qwen-image-2-1-mlx` re-host (epic 24107 S5), and its
+/// trainer runs only on the dense base (sc-24159; QLoRA is an epic non-goal). Pinned to the
+/// manifest by `quantized_generation_repos_match_the_manifest_tiers`.
+pub(crate) fn quantized_generation_repos(base_model: &str) -> &'static [&'static str] {
+    match base_model {
+        "qwen_image_2_1" => &["SceneWorks/qwen-image-2-1-mlx"],
+        _ => &[],
+    }
 }
 
 /// Thin boolean wrapper over [`training_base_model_status`]: `true` only when the dense training
@@ -2481,11 +3337,169 @@ pub(crate) fn training_base_model_installed(data_dir: &FsPath, target: &Training
     )
 }
 
+/// sc-25907: the typed route's refusal for a registry target whose base is deliberately not
+/// trainable — the distilled Qwen-Image 2.1 Turbo — by name, with what to do instead; `None` for
+/// every trainable base. No built-in target names such a base and there is no user-target registry
+/// today, so this guards a mis-edited built-in or a future registry from queuing a Turbo run (the
+/// raw `/jobs` route has its own check, `jobs::raw_training_payload_base_error`).
+pub(crate) fn untrainable_target_base_error(target: &TrainingTarget) -> Option<ApiError> {
+    sceneworks_core::training::untrainable_base_model_reason(&target.base_model)
+        .map(ApiError::bad_request)
+}
+
+/// The refusal for a real run against a target whose base licence requires acceptance
+/// (`ui.requiresLicenseAcknowledgment`) when the request does not assert `licenseAcknowledged:
+/// true`, or `None` when the run may proceed. Same status + machine code as the pre-download gate
+/// (`models::LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE`), so a client handles both refusals one way.
+pub(crate) fn training_license_acknowledgment_error(
+    target: &TrainingTarget,
+    request_extra: &sceneworks_core::contracts::ExtraFields,
+) -> Option<ApiError> {
+    if !sceneworks_core::training::training_target_requires_license_acknowledgment(target) {
+        return None;
+    }
+    let acknowledged = request_extra
+        .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if acknowledged {
+        return None;
+    }
+    let license = target
+        .ui
+        .get("license")
+        .and_then(Value::as_str)
+        .unwrap_or("its base model's licence");
+    Some(ApiError {
+        status: StatusCode::FORBIDDEN,
+        detail: format!(
+            "Training '{}' requires accepting {license} first: adapters trained from '{}' are \
+             derivatives that inherit its restrictions. Accept the licence notice in the Training \
+             Studio, or send `licenseAcknowledged: true` to assert that the user has accepted it.",
+            target.name, target.base_model
+        ),
+        code: Some(crate::models::LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+        context: None,
+    })
+}
+
+/// The raw-job twin of the typed route's licence gate (`POST /api/v1/jobs`, retry, duplicate): a
+/// `lora_train` / `control_training` payload whose plan names a licence-bound target — by target id
+/// OR by kernel, so a hand-built plan cannot dodge it with a made-up id — and is not an explicit dry
+/// run must carry `licenseAcknowledged: true`. The typed route stamps it on the jobs it accepted.
+pub(crate) fn raw_training_payload_license_error(payload: &JsonObject) -> Option<ApiError> {
+    if payload.get("dryRun").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let plan_target = payload.get("plan").and_then(|plan| plan.get("target"));
+    let field = |key: &str| {
+        plan_target
+            .and_then(|target| target.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+    };
+    let (target_id, kernel) = (field("targetId"), field("kernel"));
+    builtin_training_targets()
+        .targets
+        .iter()
+        .filter(|target| {
+            target_id == Some(target.id.as_str()) || kernel == Some(target.kernel.as_str())
+        })
+        .find_map(|target| {
+            let extra = payload
+                .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+                .map(|value| {
+                    sceneworks_core::contracts::ExtraFields::from([(
+                        crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+                        value.clone(),
+                    )])
+                })
+                .unwrap_or_default();
+            training_license_acknowledgment_error(target, &extra)
+        })
+}
+
+/// The refusal for a hand-built `lora_train` / `control_training` plan on the raw
+/// `POST /api/v1/jobs` route whose target names a catalog model that is deliberately not a training
+/// base (`sceneworks_core::training::untrainable_base_model_reason` — Qwen-Image 2.1 Turbo, epic
+/// 25899). The typed route cannot name one (no registered target has it as a base); this closes
+/// the raw route with a 400 that says what to do instead, rather than a job the worker would fail.
+pub(crate) fn raw_training_payload_base_error(payload: &JsonObject) -> Option<ApiError> {
+    let base_model = payload
+        .get("plan")
+        .and_then(|plan| plan.get("target"))
+        .and_then(|target| target.get("baseModel"))
+        .and_then(Value::as_str)?;
+    sceneworks_core::training::untrainable_base_model_reason(base_model).map(ApiError::bad_request)
+}
+
+/// The refusal for a hand-built `lora_train` plan on the raw `POST /api/v1/jobs` route whose
+/// instruction-edit shape contradicts its kernel (sc-24161): references under a captioned-only kernel
+/// or a reference-less item under an edit kernel. The typed route's target-level check never sees
+/// these plans, and both Qwen Image 2.1 kernels share one engine trainer, so this is the submit-time
+/// twin of the worker's own floor (`sceneworks_core::training::edit_pair_kernel_shape_error`).
+pub(crate) fn raw_training_payload_edit_shape_error(payload: &JsonObject) -> Option<ApiError> {
+    let plan = payload.get("plan")?;
+    let kernel = plan
+        .get("target")
+        .and_then(|target| target.get("kernel"))
+        .and_then(Value::as_str)?
+        .trim();
+    let items = plan
+        .get("dataset")
+        .and_then(|dataset| dataset.get("items"))
+        .and_then(Value::as_array)?;
+    sceneworks_core::training::edit_pair_kernel_shape_error(
+        kernel,
+        items.iter().map(|item| {
+            item.get("referenceImagePaths")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len)
+        }),
+    )
+    .map(ApiError::bad_request)
+}
+
+/// The refusal for a real run that no worker on this host can ever claim, or `None`. Off-Mac only
+/// candle workers run training, so a kernel outside `CANDLE_ROUTED_TRAINING_KERNELS` (none of the
+/// shipped targets since sc-24160 gave Qwen Image 2.1 its candle lane) would queue forever.
+/// `macos_host` is a parameter so both sides are testable.
+pub(crate) fn training_host_unavailable_message(
+    target: &TrainingTarget,
+    macos_host: bool,
+) -> Option<String> {
+    if macos_host || sceneworks_core::jobs_store::training_kernel_is_candle_routed(&target.kernel) {
+        return None;
+    }
+    Some(format!(
+        "Training '{}' runs on Apple Silicon (native MLX) only; this host has no trainer for it \
+         (kernel '{}'), so the run would never start. Train it on a Mac.",
+        target.name, target.kernel
+    ))
+}
+
+/// The licence fields a trained adapter's library entry inherits from its target (`ui.license` /
+/// `ui.licenseUrl`). Empty for a target that declares no licence, so existing entries are unchanged.
+pub(crate) fn trained_adapter_license_fields(target: &TrainingTarget) -> JsonObject {
+    ["license", "licenseUrl"]
+        .into_iter()
+        .filter_map(|key| {
+            target
+                .ui
+                .get(key)
+                .filter(|value| value.as_str().is_some_and(|text| !text.trim().is_empty()))
+                .map(|value| (key.to_owned(), value.clone()))
+        })
+        .collect()
+}
+
 /// The 400 detail to reject a real run whose base model isn't training-ready, or `None` when it is.
-/// The two blocking states get DISTINCT messages: `Missing` keeps the historical "not installed …
-/// install it from the model catalog" wording, while `TrainingTierMissing` says the model IS installed
-/// (for generation) but training needs its family-specific tier — dense bf16 generally, packed q4
-/// for LTX QLoRA. Split out as a pure fn so the wording is unit-testable without the API.
+/// Every blocking state gets a DISTINCT message, because each has its own remedy: `Missing` keeps the
+/// historical "not installed … install it from the model catalog" wording; `TrainingTierMissing` says
+/// the model IS installed (for generation) but training needs its family-specific tier — dense bf16
+/// generally, packed q4 for LTX QLoRA; and `TrainingCoRequisiteMissing` says the tier is there and
+/// names the co-requisite that isn't, so the reader is not sent to re-install weights they already
+/// hold (#2953). Split out as a pure fn so the wording is unit-testable without the API.
 pub(crate) fn training_base_unavailable_message(
     status: TrainingBaseStatus,
     base_model: &str,
@@ -2493,7 +3507,7 @@ pub(crate) fn training_base_unavailable_message(
     match status {
         TrainingBaseStatus::Ready => None,
         TrainingBaseStatus::TrainingTierMissing => {
-            let tier = if base_model == "ltx_2_3" {
+            let tier = if matches!(base_model, "ltx_2_3" | "ltx_2_5") {
                 "packed q4"
             } else {
                 "full-precision (bf16)"
@@ -2504,6 +3518,12 @@ pub(crate) fn training_base_unavailable_message(
                  model catalog before starting a real training run (dry runs work without it)."
             ))
         }
+        TrainingBaseStatus::TrainingCoRequisiteMissing(co_requisite) => Some(format!(
+            "The training tier for base model '{base_model}' is installed, but the {co_requisite} \
+             that training loads alongside it is missing or incomplete. Re-install '{base_model}' \
+             from the model catalog to fetch it, then start the real training run again (dry runs \
+             work without it)."
+        )),
         TrainingBaseStatus::Missing => Some(format!(
             "Base model '{base_model}' is not installed. Install it from the model catalog before \
              starting a real training run (dry runs work without it)."

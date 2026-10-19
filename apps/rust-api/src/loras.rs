@@ -5,6 +5,19 @@ pub(crate) async fn list_loras(
     Query(query): Query<LorasQuery>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let mut items = lora_catalog(&state, query.project_id.as_deref()).await?;
+    // Tell the client which rows sit behind a licence acknowledgment (sc-17227). The download route
+    // below refuses an unacknowledged fetch of a licence-gated repo; without this the refusal has no
+    // remedy in any shipped surface, because nothing on the row says an acknowledgment is needed and
+    // no LoRA card carries licence copy of its own. The annotation names the MODEL whose card does.
+    crate::models::annotate_license_acknowledgment_sources(&state, &mut items, |item| {
+        item.get("source")
+            .and_then(Value::as_object)
+            .and_then(|source| source.get("repo"))
+            .or_else(|| item.get("repo"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+    .await?;
     if let Some(model_family) = query.model_family {
         // `lora_families` returns canonical tokens, so canonicalize the raw query
         // param too — otherwise a `?model_family=krea-2` filter would miss a stored
@@ -30,6 +43,13 @@ pub(crate) async fn create_lora_download_job(
     Path(lora_id): Path<String>,
     ApiJson(payload): ApiJson<ModelDownloadRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    // The body is shared with model downloads; a LoRA has no co-requisite choice groups, so a
+    // requested choice is refused rather than silently ignored (sc-22998).
+    if !payload.choices.is_empty() {
+        return Err(ApiError::bad_request(
+            "LoRA downloads take no co-requisite choices",
+        ));
+    }
     let lora = lora_catalog(&state, None)
         .await?
         .into_iter()
@@ -37,6 +57,7 @@ pub(crate) async fn create_lora_download_job(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "LoRA not found".to_owned(),
+            context: None,
             code: None,
         })?;
     if lora.get("installState").and_then(Value::as_str) == Some("installed")
@@ -52,6 +73,7 @@ pub(crate) async fn create_lora_download_job(
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
             detail: "LoRA is already installed".to_owned(),
+            context: None,
             code: Some("lora_already_installed"),
         });
     }
@@ -75,6 +97,26 @@ pub(crate) async fn create_lora_download_job(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| ApiError::bad_request("LoRA download source is missing a repo"))?
         .to_owned();
+    // Licence acknowledgment, keyed on the repo this download will FETCH (sc-17227) — the same
+    // predicate `POST /api/v1/jobs`, `/models/import` and `/loras/import` apply.
+    //
+    // This route had no licence check of any kind, which made it asymmetric with
+    // `create_model_download_job`: that route gates on its catalog entry, this one did not gate at
+    // all. The reason previously recorded for leaving it alone — that the repo comes from the
+    // catalog entry the path id names, so "a caller cannot supply a repo" — answers a different
+    // question. Who CHOOSES the repo is not who is bound by its licence: a catalog LoRA whose
+    // `source.repo` names a repo a `requiresLicenseAcknowledgment` model declares would have been
+    // fetched here with no acknowledgment, while the identical `lora_download` job posted to
+    // `/api/v1/jobs` was answered 403. Unreachable in the shipped LoRA catalog today; the route
+    // comment above notes the on-demand pull at first generation, which is the path that would
+    // surface it.
+    crate::models::ensure_license_acknowledged_for_source(
+        &state,
+        &[Some(repo.as_str())],
+        None,
+        payload.license_acknowledged,
+    )
+    .await?;
     // A single `file` or an explicit `files` list narrows the snapshot to the adapter
     // weights; an empty list lets the worker fetch the (small) repo.
     let mut files: Vec<String> = Vec::new();
@@ -120,6 +162,15 @@ pub(crate) async fn create_lora_download_job(
     );
     job_payload.insert("repo".to_owned(), Value::String(repo));
     job_payload.insert("files".to_owned(), json!(files));
+    // Record the acknowledgment ON the job (sc-17227), for the reason `create_model_download_job`
+    // does: RETRY and DUPLICATE re-run `validate_raw_job_payload` over the STORED payload, and the
+    // repo-keyed gate there would otherwise refuse a download this route had already authorized.
+    if payload.license_acknowledged {
+        job_payload.insert(
+            crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+            Value::Bool(true),
+        );
+    }
     if let Some(revision) = source
         .and_then(|source| source.get("revision"))
         .or_else(|| lora.get("revision"))
@@ -144,7 +195,7 @@ pub(crate) async fn create_lora_download_job(
         requested_gpu_or_auto(payload.requested_gpu),
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn delete_lora(
@@ -157,13 +208,15 @@ pub(crate) async fn delete_lora(
         .into_iter()
         .find(|item| {
             item.get("id").and_then(Value::as_str) == Some(lora_id.as_str())
-                && query.scope.as_deref().map_or(true, |scope| {
-                    item.get("scope").and_then(Value::as_str) == Some(scope)
-                })
+                && query
+                    .scope
+                    .as_deref()
+                    .is_none_or(|scope| item.get("scope").and_then(Value::as_str) == Some(scope))
         })
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "LoRA not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let scope = query
@@ -302,6 +355,8 @@ pub(crate) async fn delete_lora(
 /// after import — the capability scoped under epic 1092 / story 1168 but never
 /// shipped. Only the fields present in the request change. Built-in entries are
 /// read-only (their manifest is compiled in); import a copy to annotate them.
+/// `family` assigns an architecture family to a LoRA whose file does not resolve one
+/// (sc-24163) — see [`resolve_lora_family_assignment`].
 pub(crate) async fn update_lora(
     State(state): State<AppState>,
     Path(lora_id): Path<String>,
@@ -313,13 +368,15 @@ pub(crate) async fn update_lora(
         .into_iter()
         .find(|item| {
             item.get("id").and_then(Value::as_str) == Some(lora_id.as_str())
-                && query.scope.as_deref().map_or(true, |scope| {
-                    item.get("scope").and_then(Value::as_str) == Some(scope)
-                })
+                && query
+                    .scope
+                    .as_deref()
+                    .is_none_or(|scope| item.get("scope").and_then(Value::as_str) == Some(scope))
         })
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "LoRA not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let scope = query
@@ -352,15 +409,42 @@ pub(crate) async fn update_lora(
         }
         // sc-10452: no manifest backs an external row, so there is nothing to write to.
         crate::external_loras::EXTERNAL_SCOPE => {
-            return Err(ApiError::bad_request(
+            return Err(ApiError::bad_request(if body.family.is_some() {
                 "LoRAs discovered in an external model folder are read-only. \
-                 Import a copy to add trigger keywords or notes.",
-            ));
+                 Import a copy to choose its family."
+            } else {
+                "LoRAs discovered in an external model folder are read-only. \
+                 Import a copy to add trigger keywords or notes."
+            }));
         }
         _ => return Err(ApiError::bad_request("Unsupported LoRA scope")),
     };
     let trigger_words = body.trigger_words.clone();
     let notes = body.notes.clone();
+    let family = match body.family.as_deref() {
+        Some(requested) => {
+            let models = model_catalog(&state).await?;
+            let lora_for_header = lora.clone();
+            let lora_id_for_header = lora_id.clone();
+            let requested = requested.to_owned();
+            // The header read touches disk; keep it off the async worker threads.
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    resolve_lora_family_assignment(
+                        &lora_id_for_header,
+                        &lora_for_header,
+                        &requested,
+                        &models,
+                    )
+                })
+                .await
+                .map_err(|err| {
+                    ApiError::internal(format!("LoRA family validation task failed: {err}"))
+                })??,
+            )
+        }
+        None => None,
+    };
     let updated = mutate_manifest_entries(&state, &manifest_path, "loras", move |entries| {
         let mut updated = None;
         let entries = entries
@@ -373,6 +457,21 @@ pub(crate) async fn update_lora(
                         }
                         if let Some(notes) = notes.as_ref() {
                             object.insert("notes".to_owned(), Value::String(notes.clone()));
+                        }
+                        if let Some(family) = family.as_ref() {
+                            // `lora_families` reads these list fields BEFORE `family`, so a stale
+                            // one would shadow the assignment; the assigned family is the whole
+                            // answer now.
+                            for shadow in ["families", "compatibleFamilies", "modelFamilies"] {
+                                object.remove(shadow);
+                            }
+                            if let Some(compatibility) = object
+                                .get_mut("compatibility")
+                                .and_then(Value::as_object_mut)
+                            {
+                                compatibility.remove("families");
+                            }
+                            object.insert("family".to_owned(), Value::String(family.clone()));
                         }
                         object.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
                     }
@@ -387,8 +486,76 @@ pub(crate) async fn update_lora(
     updated.map(Json).ok_or_else(|| ApiError {
         status: StatusCode::NOT_FOUND,
         detail: "LoRA has no editable manifest entry in this scope".to_owned(),
+        context: None,
         code: None,
     })
+}
+
+/// Validates a user family assignment for a stored LoRA (sc-24163, epic 24107 E10).
+///
+/// An adapter whose header does not resolve a family (inconclusive keys, or the bare ai-toolkit
+/// `qwen_image` stamp on keys that fit both 2.1 and 2512) is surfaced as unresolved and the USER
+/// picks. The header still wins whenever it DOES resolve: a detected family is never overridden,
+/// so assigning one is refused with the detected family named. The requested family must be one a
+/// catalog model declares, and the LoRA must be installed with a readable safetensors header —
+/// "unresolved" is a verdict about an inspected file, never about a missing one
+/// (`lora_family_not_inspectable`). Returns the canonical token to store.
+pub(crate) fn resolve_lora_family_assignment(
+    lora_id: &str,
+    lora: &Value,
+    requested: &str,
+    models: &[Value],
+) -> Result<String, ApiError> {
+    let normalized = normalize_lora_family(requested.trim());
+    if normalized.is_empty() {
+        return Err(ApiError::bad_request("LoRA family must not be empty"));
+    }
+    let known = known_lora_families(models);
+    if !known.iter().any(|family| family == &normalized) {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            detail: format!(
+                "Unknown LoRA family '{}'. Choose one of: {}",
+                requested.trim(),
+                known.join(", ")
+            ),
+            code: Some("lora_family_unknown"),
+            context: None,
+        });
+    }
+    // Only an INSPECTED file can be declared unresolved. With no installed, readable safetensors
+    // header (not installed yet, download unfinished, not a .safetensors) nothing has been
+    // checked: an assignment now could contradict the file once it lands, and the job gate and
+    // this route would then refuse it with no way back. So inspection must happen first.
+    let not_inspectable = || ApiError {
+        status: StatusCode::BAD_REQUEST,
+        detail: format!(
+            "LoRA {lora_id} has no installed safetensors file to inspect yet, so its family \
+             cannot be assigned. Install it or let its download finish first."
+        ),
+        code: Some("lora_family_not_inspectable"),
+        context: None,
+    };
+    if lora.get("installState").and_then(Value::as_str) != Some("installed") {
+        return Err(not_inspectable());
+    }
+    let Some(header) = validate_lora_safetensors_header(lora_id, lora)? else {
+        return Err(not_inspectable());
+    };
+    if let Some(detected) = detect_lora_family(&header) {
+        let detected = normalize_lora_family(&detected);
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            detail: format!(
+                "LoRA {lora_id} is detected from its file as a {detected} adapter; a detected \
+                 family cannot be reassigned. Only a LoRA whose family is unresolved can be \
+                 assigned one."
+            ),
+            code: Some("lora_family_detected"),
+            context: Some(json!({ "detectedFamily": detected })),
+        });
+    }
+    Ok(normalized)
 }
 
 /// Best-effort trigger-keyword suggestions for a LoRA, read live from the
@@ -405,13 +572,15 @@ pub(crate) async fn lora_embedded_tags(
         .into_iter()
         .find(|item| {
             item.get("id").and_then(Value::as_str) == Some(lora_id.as_str())
-                && query.scope.as_deref().map_or(true, |scope| {
-                    item.get("scope").and_then(Value::as_str) == Some(scope)
-                })
+                && query
+                    .scope
+                    .as_deref()
+                    .is_none_or(|scope| item.get("scope").and_then(Value::as_str) == Some(scope))
         })
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "LoRA not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let Some(installed_path) = lora
@@ -915,6 +1084,24 @@ pub(crate) async fn queue_lora_import_job(
     if let Some(source_url) = payload.source_url.as_deref() {
         validate_source_url(source_url)?;
     }
+    // Licence acknowledgment, keyed on the repo this import will FETCH (sc-17227) — the same
+    // predicate `POST /api/v1/jobs` and `POST /api/v1/models/import` apply.
+    //
+    // This route had no licence logic of any kind, and the reason first given for leaving it out —
+    // that no LoRA in the catalog declares the flag or names an H3 repo — was wrong on its own
+    // terms: nothing here ever consults the LoRA catalog for the repo. The worker
+    // (`run_lora_import_job`) takes the payload's `repo` verbatim, and with an empty `files` list
+    // `HuggingFaceSnapshot::resolve` + `download_snapshot` pull the WHOLE repo. So
+    // `{"repo": "MiniMaxAI/MiniMax-H3"}` fetched the restricted weights here while the identical
+    // `lora_import` job posted to `/api/v1/jobs` was answered 403. What the LoRA catalog contains
+    // has no bearing on what this route can reach; the repo the caller names is the whole of it.
+    crate::models::ensure_license_acknowledged_for_source(
+        &state,
+        &[payload.repo.as_deref()],
+        payload.source_url.as_deref(),
+        payload.license_acknowledged,
+    )
+    .await?;
     if !matches!(payload.scope.as_str(), "global" | "project") {
         return Err(ApiError::bad_request(
             "LoRA scope must be global or project",
@@ -999,6 +1186,10 @@ pub(crate) async fn queue_lora_import_job(
     let mut adapter_metadata = AdapterFileMetadata::default();
     if let Some(local_source) = payload.source_path.clone() {
         let secondary_source = payload.secondary_source_path.clone();
+        let h3_expected = payload
+            .family
+            .as_deref()
+            .is_some_and(|family| canonical_lora_family(family) == "minimax-h3");
         let (local_source, detected, declared) = tokio::task::spawn_blocking(move || {
             validate_lora_import_source_path(&local_source, &source_roots)?;
             // A paired Wan A14B MoE upload (sc-1991) carries a second low-noise
@@ -1006,7 +1197,7 @@ pub(crate) async fn queue_lora_import_job(
             if let Some(secondary_source) = secondary_source.as_deref() {
                 validate_lora_import_source_path(secondary_source, &source_roots)?;
             }
-            inspect_lora_source(&local_source)
+            inspect_lora_source_for_family(&local_source, h3_expected)
                 .map(|(detected, declared)| (local_source, detected, declared))
         })
         .await
@@ -1019,6 +1210,14 @@ pub(crate) async fn queue_lora_import_job(
             detected,
             &format!("source_path={local_source}"),
         )?;
+    }
+    if payload
+        .family
+        .as_deref()
+        .is_some_and(|family| canonical_lora_family(family) == "ltx-video")
+    {
+        let models = model_catalog(&state).await?;
+        validate_ltx_import_base_model(&models, payload.base_model.as_deref())?;
     }
     // Mint the id (see `derive_lora_id`): explicit caller id wins, else a
     // family-scoped `<family>_<slug>` so folders never collide across families.
@@ -1126,7 +1325,7 @@ pub(crate) async fn queue_lora_import_job(
         "auto".to_owned(),
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn lora_import_request_from_multipart(
@@ -1145,6 +1344,7 @@ pub(crate) async fn lora_import_request_from_multipart(
         family: None,
         base_model: None,
         expected_sha256: None,
+        license_acknowledged: false,
         scope: default_lora_scope(),
         project_id: None,
         uploaded_source_path: false,
@@ -1210,6 +1410,15 @@ pub(crate) async fn lora_import_request_from_multipart(
                 "notes" => payload.notes = value.to_owned(),
                 "scope" => payload.scope = value.to_owned(),
                 "projectId" => payload.project_id = Some(value.to_owned()),
+                // Accepted for parity with the model-import parser (sc-17227). Unlike that one,
+                // this parser accepts no `repo`/`sourceUrl` and rejects a request without an
+                // upload `file` below, so the licence gate never has a candidate here and this
+                // assertion cannot currently be needed. Parsed anyway so the field is not the
+                // missing half if a remote source is ever added to this form — the same reason
+                // `_ => {}` silently dropping it would be the wrong default.
+                "licenseAcknowledged" => {
+                    payload.license_acknowledged = value.eq_ignore_ascii_case("true")
+                }
                 _ => {}
             }
         }
@@ -1397,6 +1606,14 @@ pub(crate) fn validate_lora_specs_for_model(
             )));
         }
         let header = validate_lora_safetensors_header(lora_id, lora)?;
+        if let Some(header) = &header {
+            let h3_expected = model_families.iter().any(|family| family == "minimax-h3");
+            validate_minimax_h3_trainer_header(header, h3_expected).map_err(|error| {
+                ApiError::bad_request(format!(
+                    "LoRA {lora_id} has an unsupported MiniMax-H3 adapter layout: {error}"
+                ))
+            })?;
+        }
         if let Some(detected_family) = header.as_ref().and_then(detect_lora_family) {
             // `model_families` are normalized (via `model_lora_families` →
             // `normalize_lora_family`, `_`→`-`), but `detect_lora_family` returns the catalog/
@@ -1453,17 +1670,79 @@ pub(crate) fn validate_lora_specs_for_model(
                 .iter()
                 .any(|model_family| model_family == family)
         }) {
+            // Name BOTH sides (sc-24156): sibling families such as `qwen-image` (2512) and
+            // `qwen-image-2-1` share a model name, so "not compatible" alone leaves the user
+            // guessing which adapter belongs to which model.
             return Err(ApiError::bad_request(format!(
-                "LoRA {lora_id} is not compatible with model {model_id}"
+                "LoRA {lora_id} is not compatible with model {model_id}: the LoRA is a {} adapter, \
+                 and {model_id} loads {} adapters",
+                families.join(" / "),
+                model_families.join(" / ")
+            )));
+        }
+        // ── Declared-partition gating (sc-19563), the FAMILY-AGNOSTIC arm ──────────────────────
+        //
+        // The gate below this one is hardcoded to `wan-video`. This one deliberately is not, and
+        // that is the whole point of the story: it fires on the LoRA's own `modelIds` declaration,
+        // whatever family it belongs to, so closing the next family's version of this gap is a
+        // manifest edit rather than a third hardcoded arm here.
+        //
+        // What it closes: `family` cannot express a partition. MiniMax-H3 publishes `minimax_h3`
+        // (t2va/fl2va) and `minimax_h3_ref` (ref2va) as ONE DiT architecture with ONE geometry, so
+        // both declare `family: minimax-h3` and family detection cannot separate them — correctly,
+        // because they really are the same architecture. But lightx2v distils the fl2v and ref2v
+        // turbo adapters for one partition each, and cross-selecting one folds CLEANLY: no shape
+        // error, no refusal, just a quality mismatch. That is what makes it easy to ship and hard
+        // to notice.
+        //
+        // Absent `modelIds` means family gating alone, so no existing entry is tightened.
+        // The Iris TASK gate (sc-25681): Iris's generation, depth and restoration backbones share
+        // one architecture, so family cannot tell their adapters apart — the adapter's `irisTask`
+        // stamp (recorded at import, re-read from the file header here) must name the model's
+        // declared `loraCompatibility.irisTask`, and an unstamped file is refused. Inert for every
+        // model that declares no Iris task.
+        if let Some(message) = sceneworks_core::lora_family::iris_adapter_refusal(
+            model,
+            model_id,
+            lora_id,
+            lora,
+            header.as_ref(),
+        ) {
+            return Err(ApiError::bad_request(message));
+        }
+        let declared_model_ids = lora_model_ids(lora);
+        if !declared_model_ids.is_empty() && !declared_model_ids.iter().any(|id| id == model_id) {
+            return Err(ApiError::bad_request(format!(
+                "LoRA {lora_id} is declared for model {}, not {model_id}. These are separate \
+                 partitions of the same model family, so the adapter would attach and fold \
+                 cleanly at the wrong quality rather than fail — which is why the pairing is \
+                 enforced here rather than left to the family check.",
+                declared_model_ids.join(" or ")
+            )));
+        }
+        if families.iter().any(|family| family == "ltx-video")
+            && model_id == "ltx_2_5"
+            && declared_model_ids.is_empty()
+            && lora_base_model(lora).is_none()
+        {
+            return Err(ApiError::bad_request(format!(
+                "LoRA {lora_id} does not record which LTX base model it targets. LTX-2.5 cannot \
+                 safely load a family-only adapter; re-import it and choose LTX-2.5 as the base model."
             )));
         }
         // Base-model gating: for families where a matching family is insufficient
-        // (Wan 5B vs 14B both declare `wan-video` but have incompatible
-        // architectures — 48 vs 16 latent channels), a LoRA that records its
+        // (Wan 5B vs 14B, or LTX-2.3 vs LTX-2.5), a LoRA that records its
         // trained base model only loads on that exact model. LoRAs without a
         // recorded base model fall back to family gating (legacy/imported), so this
         // never tightens behavior for existing LoRAs.
-        if families.iter().any(|family| family == "wan-video") {
+        //
+        // Kept alongside the declared-partition gate above rather than merged into it: this one
+        // reads what an adapter RECORDS about its own training, that one reads what a catalog
+        // author DECLARES. An imported Wan LoRA has the former and no catalog entry at all.
+        if families
+            .iter()
+            .any(|family| matches!(family.as_str(), "wan-video" | "ltx-video"))
+        {
             if let Some(base_model) = lora_base_model(lora) {
                 // Shared with the worker's own gate (sc-15017): exact-id equality, plus the
                 // extra-compatible arm that keeps the 5B-vs-14B split while letting a Wan-14B
@@ -1474,9 +1753,13 @@ pub(crate) fn validate_lora_specs_for_model(
                     model_id,
                     &base_model,
                 ) {
+                    let detail = if families.iter().any(|family| family == "ltx-video") {
+                        "LTX-2.3 and LTX-2.5 LoRAs are not interchangeable"
+                    } else {
+                        "Wan 5B and 14B LoRAs are not interchangeable"
+                    };
                     return Err(ApiError::bad_request(format!(
-                        "LoRA {lora_id} was trained for base model {base_model}, not {model_id}; \
-                         Wan 5B and 14B LoRAs are not interchangeable"
+                        "LoRA {lora_id} was trained for base model {base_model}, not {model_id}; {detail}"
                     )));
                 }
             }
@@ -1591,6 +1874,34 @@ pub(crate) fn lora_source_provider(payload: &LoraImportRequest) -> &'static str 
     }
 }
 
+fn validate_ltx_import_base_model(
+    models: &[Value],
+    base_model: Option<&str>,
+) -> Result<(), ApiError> {
+    let available: Vec<&str> = models
+        .iter()
+        .filter(|model| {
+            model
+                .get("family")
+                .and_then(Value::as_str)
+                .is_some_and(|family| canonical_lora_family(family) == "ltx-video")
+        })
+        .filter_map(|model| model.get("id").and_then(Value::as_str))
+        .collect();
+    let Some(base_model) = base_model.map(str::trim).filter(|base| !base.is_empty()) else {
+        return Err(ApiError::bad_request(
+            "LTX LoRA imports require a baseModel. Choose the exact LTX base model in Model Manager so LTX-2.3 and LTX-2.5 adapters cannot be mixed.",
+        ));
+    };
+    if !available.contains(&base_model) {
+        return Err(ApiError::bad_request(format!(
+            "Base model '{base_model}' is not an available LTX model. Choose one of: {}.",
+            available.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 /// The `<stem>.high_noise.safetensors` / `<stem>.low_noise.safetensors` filenames
 /// for a paired Wan A14B MoE LoRA stored under one record (sc-1991). The high-noise
 /// file sorts first, so it resolves as the primary (transformer) and the low-noise
@@ -1628,6 +1939,13 @@ pub(crate) fn detect_family_from_local_path(source_path: &str) -> Result<Option<
 pub(crate) fn inspect_lora_source(
     source_path: &str,
 ) -> Result<(Option<String>, AdapterFileMetadata), ApiError> {
+    inspect_lora_source_for_family(source_path, false)
+}
+
+fn inspect_lora_source_for_family(
+    source_path: &str,
+    h3_expected: bool,
+) -> Result<(Option<String>, AdapterFileMetadata), ApiError> {
     let path = FsPath::new(source_path);
     let Some(safetensors_path) = first_safetensors_path(path) else {
         return Ok((None, AdapterFileMetadata::default()));
@@ -1646,6 +1964,11 @@ pub(crate) fn inspect_lora_source(
              download. Re-import the complete file."
         ))
         }
+    })?;
+    validate_minimax_h3_trainer_header(&header, h3_expected).map_err(|error| {
+        ApiError::bad_request(format!(
+            "Unsupported MiniMax-H3 adapter namespace or layout: {error}"
+        ))
     })?;
     Ok((detect_lora_family(&header), read_adapter_metadata(&header)))
 }
@@ -1763,11 +2086,17 @@ pub(crate) fn lora_artifact_paths(lora: &Value, default_root: &FsPath) -> Vec<Pa
         .filter(|value| !value.is_empty() && !value.contains("${"))
     {
         let path = PathBuf::from(source_path);
-        paths.push(if path.is_absolute() {
+        let run_dir = if path.is_absolute() {
             path
         } else {
             default_root.join(path)
-        });
+        };
+        // An Iris training run's checkpoint root and its `.prior` retirement (sc-25690), named by
+        // the engine contract. They sit inside the run directory, which goes first so a trash
+        // delete moves the run as one item; the named paths then catch any the directory missed.
+        let checkpoint_dirs = crate::iris_training::iris_run_checkpoint_paths(lora, &run_dir);
+        paths.push(run_dir);
+        paths.extend(checkpoint_dirs);
     }
     unique_paths(paths)
 }
@@ -1860,17 +2189,13 @@ fn lora_huggingface_source(lora: &Value) -> Option<(&str, Option<&str>, &str)> {
 
 fn lora_huggingface_requested_file(lora: &Value, data_dir: &FsPath) -> Option<PathBuf> {
     let (repo, file_name, revision) = lora_huggingface_source(lora)?;
-    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
-    if !repo_root.exists() {
-        return None;
-    }
     if let Some(file_name) = file_name {
-        let resolved = std::fs::read_to_string(repo_root.join("refs").join(revision))
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| revision.to_owned());
-        let candidate = repo_root.join("snapshots").join(resolved).join(file_name);
+        sceneworks_core::model_artifacts::ArtifactFile::new(file_name).ok()?;
+        let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+            sceneworks_core::hf_home::model_source_library(data_dir),
+        );
+        let (_, snapshot) = resolver.discover_source_reference(repo, revision).ok()?;
+        let candidate = snapshot.join(file_name);
         return candidate.is_file().then_some(candidate);
     }
     None
@@ -1889,7 +2214,9 @@ fn lora_huggingface_receipted_file(lora: &Value, data_dir: &FsPath) -> Option<Pa
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_else(|| vec![value]);
-    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
     for receipt in entries.iter().rev() {
         if receipt.get("repo").and_then(Value::as_str) != Some(repo) {
             continue;
@@ -1897,28 +2224,17 @@ fn lora_huggingface_receipted_file(lora: &Value, data_dir: &FsPath) -> Option<Pa
         let Some(revision) = receipt.get("snapshotRevision").and_then(Value::as_str) else {
             continue;
         };
-        let revision_path = FsPath::new(revision);
-        if revision_path.is_absolute()
-            || revision_path
-                .components()
-                .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
+        let Ok((_, snapshot)) = resolver.discover_source_snapshot(repo, Some(revision)) else {
             continue;
-        }
+        };
         let Some(files) = receipt.get("resolvedFiles").and_then(Value::as_array) else {
             continue;
         };
-        let snapshot = repo_root.join("snapshots").join(revision);
         for file in files.iter().filter_map(Value::as_str) {
-            let file_path = FsPath::new(file);
-            if file_path.is_absolute()
-                || file_path
-                    .components()
-                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
-            {
+            if sceneworks_core::model_artifacts::ArtifactFile::new(file).is_err() {
                 continue;
             }
-            let candidate = snapshot.join(file_path);
+            let candidate = snapshot.join(file);
             if candidate.is_file()
                 && candidate.extension().and_then(|ext| ext.to_str()) == Some("safetensors")
             {
@@ -1935,6 +2251,40 @@ pub(crate) fn lora_families(lora: &Value) -> Vec<String> {
         &["families", "compatibleFamilies", "modelFamilies"],
         Some("compatibility"),
     )
+}
+
+/// The exact model ids a catalog entry **declares** this adapter is for (sc-19563), or empty when
+/// it declares none.
+///
+/// The generalisation of the base-model gate below. Two things distinguish it from
+/// [`lora_base_model`], and both are why it is a separate reader rather than another spelling of
+/// the same one:
+///
+/// * **Direction.** `baseModel` is a value a trained or imported adapter *records about itself*;
+///   `modelIds` is a catalog author *declaring* which partitions an adapter may attach to.
+/// * **Arity.** A recorded base model is one id. A declaration can legitimately name several, so
+///   this is a list.
+///
+/// Absent means family gating alone, exactly as before — so adding the key tightens nothing for any
+/// entry that does not declare it. Not normalized: model ids are exact strings, like
+/// [`lora_base_model`]'s. `model_ids` is accepted alongside `modelIds` for the same reason
+/// `lora_base_model` accepts `base_model` — an inline spec may arrive in either casing.
+pub(crate) fn lora_model_ids(lora: &Value) -> Vec<String> {
+    for key in ["modelIds", "model_ids"] {
+        if let Some(items) = lora.get(key).and_then(Value::as_array) {
+            let ids: Vec<String> = items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .collect();
+            if !ids.is_empty() {
+                return ids;
+            }
+        }
+    }
+    Vec::new()
 }
 
 /// The specific base model a LoRA records it was trained for (e.g. `wan_2_2`,
@@ -2021,10 +2371,11 @@ mod huggingface_receipt_tests {
         let data_dir = temp.path();
         let repo = "author/style";
         let repo_root = huggingface_repo_cache_path(data_dir, repo).unwrap();
-        let snapshot = repo_root.join("snapshots").join("revision");
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let snapshot = repo_root.join("snapshots").join(revision);
         std::fs::create_dir_all(&snapshot).unwrap();
         std::fs::create_dir_all(repo_root.join("refs")).unwrap();
-        std::fs::write(repo_root.join("refs").join("main"), "revision").unwrap();
+        std::fs::write(repo_root.join("refs").join("main"), revision).unwrap();
         let file = snapshot.join("style.safetensors");
         std::fs::write(&file, b"hub adapter bytes").unwrap();
         let metadata = std::fs::metadata(&file).unwrap();
@@ -2076,11 +2427,13 @@ mod huggingface_receipt_tests {
 
     #[test]
     fn old_receipted_adapter_is_usable_stale_but_arbitrary_safetensors_is_not() {
+        let _env = isolate_hf_cache();
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();
         let repo = "SceneWorks/krea-edit";
         let repo_root = huggingface_repo_cache_path(data_dir, repo).unwrap();
-        let snapshot = repo_root.join("snapshots").join("old-revision");
+        let revision = "1111111111111111111111111111111111111111";
+        let snapshot = repo_root.join("snapshots").join(revision);
         std::fs::create_dir_all(&snapshot).unwrap();
         std::fs::write(snapshot.join("v1.1.safetensors"), b"old").unwrap();
         let lora = json!({
@@ -2097,7 +2450,7 @@ mod huggingface_receipt_tests {
         std::fs::write(
             marker_dir.join(".sceneworks-download-complete.json"),
             serde_json::to_vec(&json!({
-                "schemaVersion": 2, "repo": repo, "snapshotRevision": "old-revision",
+                "schemaVersion": 2, "repo": repo, "snapshotRevision": revision,
                 "resolvedFiles": ["v1.1.safetensors"]
             }))
             .unwrap(),
@@ -2126,13 +2479,15 @@ mod huggingface_receipt_tests {
 
     #[test]
     fn current_adapter_clears_update_available() {
+        let _env = isolate_hf_cache();
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();
         let repo = "SceneWorks/krea-edit";
+        let revision = "2222222222222222222222222222222222222222";
         let snapshot = huggingface_repo_cache_path(data_dir, repo)
             .unwrap()
             .join("snapshots")
-            .join("current-revision");
+            .join(revision);
         std::fs::create_dir_all(&snapshot).unwrap();
         std::fs::write(snapshot.join("v1.2.safetensors"), b"new").unwrap();
         std::fs::create_dir_all(snapshot.parent().unwrap().parent().unwrap().join("refs")).unwrap();
@@ -2144,7 +2499,7 @@ mod huggingface_receipt_tests {
                 .unwrap()
                 .join("refs")
                 .join("main"),
-            "current-revision",
+            revision,
         )
         .unwrap();
         let normalized = normalize_lora_entry(
@@ -2178,6 +2533,125 @@ mod base_model_gating_tests {
         ]
     }
 
+    fn ltx_models() -> Vec<Value> {
+        vec![
+            json!({
+                "id": "ltx_2_3",
+                "family": "ltx-video",
+                "loraCompatibility": { "families": ["ltx-video"] }
+            }),
+            json!({
+                "id": "ltx_2_5",
+                "family": "ltx-video",
+                "loraCompatibility": { "families": ["ltx-video"] }
+            }),
+        ]
+    }
+
+    /// The SHIPPED `iris_3b` row (sc-25681).
+    fn shipped_iris_model() -> Value {
+        let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")
+                .expect("builtin.models.jsonc embedded")
+                .1,
+        ))
+        .expect("builtin.models.jsonc parses");
+        shipped["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "iris_3b")
+            .expect("iris_3b is shipped")
+            .clone()
+    }
+
+    fn write_stamped_adapter(dir: &std::path::Path, name: &str, metadata: Value) -> String {
+        let header = json!({
+            "__metadata__": metadata,
+            "blocks.0.attn.qkv.lora_down.weight": { "dtype": "F32", "shape": [1], "data_offsets": [0, 4] }
+        })
+        .to_string();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&[0; 4]);
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path.display().to_string()
+    }
+
+    /// sc-25681: on the shipped Iris row, a generation-stamped LoRA/LoKr is admitted; another
+    /// family, another Iris task, and an unstamped file are refused with a typed reason — read
+    /// from the recorded entry AND the file header.
+    ///
+    /// *Mutation that reds this:* remove the `iris_adapter_refusal` call.
+    #[test]
+    fn iris_adapters_are_gated_on_the_generation_task_stamp() {
+        let models = vec![shipped_iris_model()];
+        let dir = tempfile::tempdir().unwrap();
+        let stamped =
+            |task: &str| json!({ "family": "iris", "irisTask": task, "baseModel": "iris_3b" });
+        let cases = [
+            (
+                "lora",
+                json!({ "irisTask": "generation" }),
+                stamped("generation"),
+                None,
+            ),
+            (
+                "lokr",
+                json!({ "irisTask": "generation", "networkType": "lokr" }),
+                json!({ "family": "iris", "irisTask": "generation", "networkType": "lokr" }),
+                None,
+            ),
+            (
+                "depth",
+                json!({ "irisTask": "depth" }),
+                stamped("depth"),
+                Some("Iris depth task"),
+            ),
+            // The entry claims generation but the FILE says depth: the header wins.
+            (
+                "forged",
+                json!({ "irisTask": "generation" }),
+                stamped("depth"),
+                Some("Iris depth task"),
+            ),
+            (
+                "unstamped",
+                json!({}),
+                json!({ "family": "iris" }),
+                Some("no Iris task stamp"),
+            ),
+        ];
+        for (name, extra, metadata, refusal) in cases {
+            let path = write_stamped_adapter(dir.path(), &format!("{name}.safetensors"), metadata);
+            let mut lora = json!({ "id": name, "families": ["iris"], "path": path });
+            for (key, value) in extra.as_object().unwrap() {
+                lora[key] = value.clone();
+            }
+            let outcome =
+                validate_lora_specs_for_model(&models, &[], "iris_3b", &[lora], true, "LoRA");
+            match refusal {
+                None => {
+                    outcome.unwrap_or_else(|error| panic!("{name} must be admitted: {error:?}"));
+                }
+                Some(fragment) => {
+                    let error = outcome.expect_err(name);
+                    assert!(format!("{error:?}").contains(fragment), "{name}: {error:?}");
+                }
+            }
+        }
+        // Another family's LoRA never reaches the task gate: the family gate refuses it.
+        let flux =
+            write_stamped_adapter(dir.path(), "flux.safetensors", json!({ "family": "flux" }));
+        let lora = json!({ "id": "flux", "families": ["flux"], "path": flux });
+        let error = validate_lora_specs_for_model(&models, &[], "iris_3b", &[lora], true, "LoRA")
+            .expect_err("a flux LoRA is not an Iris adapter");
+        assert!(format!("{error:?}").contains("flux"), "{error:?}");
+    }
+
     #[test]
     fn rejects_wan_5b_lora_on_14b_model() {
         let models = wan_models();
@@ -2206,6 +2680,41 @@ mod base_model_gating_tests {
         let lora = json!({ "id": "legacy", "families": ["wan-video"] });
         validate_lora_specs_for_model(&models, &[], "wan_2_2_t2v_14b", &[lora], true, "LoRA")
             .expect("family-only LoRA must still pass");
+    }
+
+    #[test]
+    fn family_only_ltx_lora_remains_usable_on_2_3_but_fails_closed_on_2_5() {
+        let models = ltx_models();
+        let lora = json!({ "id": "legacy", "families": ["ltx-video"] });
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "ltx_2_3",
+            std::slice::from_ref(&lora),
+            true,
+            "LoRA",
+        )
+        .expect("existing family-only LTX-2.3 LoRA remains usable");
+
+        let error = validate_lora_specs_for_model(&models, &[], "ltx_2_5", &[lora], true, "LoRA")
+            .expect_err("unstamped LTX adapter must fail closed on 2.5");
+        assert!(
+            format!("{error:?}").contains("does not record which LTX base model"),
+            "got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn ltx_import_requires_an_available_ltx_base_model() {
+        let models = ltx_models();
+        let missing = validate_ltx_import_base_model(&models, None)
+            .expect_err("LTX import without a base stamp must be rejected");
+        assert!(format!("{missing:?}").contains("require a baseModel"));
+        validate_ltx_import_base_model(&models, Some("ltx_2_5"))
+            .expect("catalog LTX base is accepted");
+        let unrelated = validate_ltx_import_base_model(&models, Some("wan_2_2"))
+            .expect_err("unrelated model must not be stamped onto an LTX import");
+        assert!(format!("{unrelated:?}").contains("not an available LTX model"));
     }
 
     /// Minimal valid safetensors whose tensor keys make `detect_lora_family` report `wan-video`
@@ -2447,6 +2956,456 @@ mod base_model_gating_tests {
             .unwrap()
             .write_all(&bytes)
             .unwrap();
+    }
+
+    /// Writes a MiniMax-H3 turbo LoRA fixture in the published DIFFUSERS key space (sc-18725):
+    /// `transformer_blocks.<n>.` + the `token_refiner.refiner_blocks.<n>.` marker, with PEFT's
+    /// `.default` adapter-name infix. Block counts are tiny — detection keys on the refiner segment,
+    /// not on a block census.
+    fn write_minimax_h3_turbo_lora(dir: &std::path::Path, file_name: &str) {
+        use std::io::Write;
+        let mut entries = Vec::new();
+        let mut offset = 0_usize;
+        let push = |name: String, len: usize, entries: &mut Vec<String>, offset: &mut usize| {
+            entries.push(format!(
+                r#""{name}":{{"dtype":"BF16","shape":[1],"data_offsets":[{},{}]}}"#,
+                *offset,
+                *offset + len
+            ));
+            *offset += len;
+        };
+        for target in ["attn.to_q", "attn.to_out.0", "ff.net.0.proj", "ff.net.2"] {
+            for suffix in ["lora_A.default.weight", "lora_B.default.weight"] {
+                push(
+                    format!("transformer_blocks.0.{target}.{suffix}"),
+                    2,
+                    &mut entries,
+                    &mut offset,
+                );
+                push(
+                    format!("token_refiner.refiner_blocks.0.{target}.{suffix}"),
+                    2,
+                    &mut entries,
+                    &mut offset,
+                );
+            }
+        }
+        let header = format!(
+            r#"{{"__metadata__":{{"alpha":"8"}},{}}}"#,
+            entries.join(",")
+        );
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&vec![0u8; offset]);
+        std::fs::File::create(dir.join(file_name))
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+    }
+
+    fn write_minimax_h3_trainer_lora(
+        dir: &std::path::Path,
+        file_name: &str,
+        mutate: impl FnOnce(&mut serde_json::Map<String, Value>),
+    ) {
+        use std::io::Write;
+        let rank = 16;
+        let mut header = serde_json::Map::new();
+        header.insert(
+            "__metadata__".to_owned(),
+            json!({
+                "ss_network_module": "networks.lora_minimax_h3",
+                "ss_h3_lora_token_refiner": "False",
+                "ss_network_dim": "16",
+                "ss_network_alpha": "16",
+            }),
+        );
+        for block in 0..50 {
+            for (leaf, input, output) in [
+                ("attn_qkv_proj", 5_376, 21_504),
+                ("attn_out_proj", 7_168, 5_376),
+                ("mlp_fc1", 5_376, 28_672),
+                ("mlp_fc2", 14_336, 5_376),
+            ] {
+                let target = format!("lora_unet_blocks_{block}_{leaf}");
+                header.insert(
+                    format!("{target}.lora_down.weight"),
+                    json!({ "dtype": "F16", "shape": [rank, input], "data_offsets": [0, 0] }),
+                );
+                header.insert(
+                    format!("{target}.lora_up.weight"),
+                    json!({ "dtype": "F16", "shape": [output, rank], "data_offsets": [0, 0] }),
+                );
+                header.insert(
+                    format!("{target}.alpha"),
+                    json!({ "dtype": "F32", "shape": [], "data_offsets": [0, 0] }),
+                );
+            }
+        }
+        mutate(&mut header);
+        let bytes_header = serde_json::to_vec(&Value::Object(header)).unwrap();
+        let mut bytes = (bytes_header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&bytes_header);
+        std::fs::File::create(dir.join(file_name))
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+    }
+
+    fn minimax_h3_model_fixture() -> Vec<Value> {
+        vec![json!({
+            "id": "minimax_h3",
+            "family": "minimax-h3",
+            "loraCompatibility": { "families": ["minimax-h3"] }
+        })]
+    }
+
+    #[test]
+    fn trainer_namespace_is_classified_at_import_and_accepted_by_h3_preflight() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimax_h3_trainer_lora(tmp.path(), "community.safetensors", |_| {});
+        let path = tmp.path().join("community.safetensors");
+
+        let (family, metadata) = inspect_lora_source(path.to_str().unwrap())
+            .expect("the exact trainer namespace imports");
+        assert_eq!(family.as_deref(), Some("minimax-h3"));
+        assert_eq!((metadata.rank, metadata.alpha), (Some(16), Some(16.0)));
+
+        let lora = json!({
+            "id": "minimax_h3_community",
+            "installState": "installed",
+            "installedPath": path,
+            "families": ["minimax-h3"],
+        });
+        validate_lora_specs_for_model(
+            &minimax_h3_model_fixture(),
+            &[],
+            "minimax_h3",
+            &[lora],
+            true,
+            "LoRA",
+        )
+        .expect("the intentional trunk-only trainer export passes before generation");
+    }
+
+    #[test]
+    fn malformed_or_unsupported_h3_trainer_namespaces_fail_actionably_before_generation() {
+        let partial = tempfile::tempdir().unwrap();
+        write_minimax_h3_trainer_lora(partial.path(), "partial.safetensors", |header| {
+            header.remove("lora_unet_blocks_49_mlp_fc2.alpha");
+        });
+        let import_error =
+            inspect_lora_source(partial.path().join("partial.safetensors").to_str().unwrap())
+                .expect_err("local import must reject a partial trainer export");
+        assert!(
+            format!("{import_error:?}").contains("missing alpha"),
+            "{import_error:?}"
+        );
+
+        let unsupported = tempfile::tempdir().unwrap();
+        use std::io::Write;
+        let header = serde_json::to_vec(&json!({
+            "lora_unet_transformer_blocks_0_attn_to_q.lora_down.weight": {
+                "dtype": "F16", "shape": [16, 5376], "data_offsets": [0, 0]
+            }
+        }))
+        .unwrap();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&header);
+        let path = unsupported.path().join("unknown.safetensors");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+        let local_error = inspect_lora_source_for_family(path.to_str().unwrap(), true)
+            .expect_err("a local import declared as H3 must reject an unknown namespace");
+        assert!(
+            format!("{local_error:?}").contains("unsupported MiniMax-H3 adapter namespace"),
+            "{local_error:?}"
+        );
+        let lora = json!({
+            "id": "minimax_h3_unknown_namespace",
+            "installState": "installed",
+            "installedPath": path,
+            "families": ["minimax-h3"],
+        });
+        let preflight_error = validate_lora_specs_for_model(
+            &minimax_h3_model_fixture(),
+            &[],
+            "minimax_h3",
+            &[lora],
+            true,
+            "LoRA",
+        )
+        .expect_err("an unknown H3 namespace must not reach generation");
+        assert!(
+            format!("{preflight_error:?}").contains("unsupported MiniMax-H3 adapter namespace"),
+            "{preflight_error:?}"
+        );
+    }
+
+    /// sc-18725: the end-to-end submit gate for the turbo accelerators, on BOTH H3 partitions.
+    ///
+    /// The model surfaces and the LoRA below are `json!` fixtures that MIRROR what
+    /// `builtin.models.jsonc` and `builtin.loras.jsonc` declare — this test reads neither manifest,
+    /// so a withdrawn or mistyped `families` list does NOT turn it red. What it proves is that
+    /// `validate_lora_specs_for_model` accepts that shape on both partitions. The manifest side is
+    /// held in `sceneworks-core`, by `both_minimax_h3_partitions_advertise_the_minimax_h3_lora_family`
+    /// (the model declarations) and `minimax_h3_turbo_loras_are_registered_and_sha_pinned` (the LoRA
+    /// entries), which do read the embedded manifests. Keep these fixtures in step with them by hand.
+    ///
+    /// It also pins that detection reports `minimax-h3` — before sc-18725 it reported `None`, which
+    /// let the file through this gate by ACCIDENT (the detected-family check is skipped on `None`)
+    /// while leaving a user-imported copy family-less and hidden by the web picker's fail-closed
+    /// rule.
+    #[test]
+    fn minimax_h3_turbo_lora_passes_the_submit_gate_on_both_partitions() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimax_h3_turbo_lora(
+            tmp.path(),
+            "minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors",
+        );
+        // The fixture is only meaningful if it really detects as minimax-h3 — pin that, so a change
+        // in the detector turns into a clear failure here rather than a vacuous pass.
+        let header = read_safetensors_header(
+            &tmp.path()
+                .join("minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors"),
+        )
+        .unwrap();
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("minimax-h3"));
+
+        let models = vec![
+            json!({
+                "id": "minimax_h3",
+                "family": "minimax-h3",
+                "loraCompatibility": { "families": ["minimax-h3"] }
+            }),
+            json!({
+                "id": "minimax_h3_ref",
+                "family": "minimax-h3",
+                "loraCompatibility": { "families": ["minimax-h3"] }
+            }),
+        ];
+        let lora = json!({
+            "id": "minimax_h3_turbo_8step",
+            "installState": "installed",
+            "installedPath": tmp.path().to_str().unwrap(),
+            "families": ["minimax-h3"],
+        });
+        for model_id in ["minimax_h3", "minimax_h3_ref"] {
+            validate_lora_specs_for_model(
+                &models,
+                &[],
+                model_id,
+                std::slice::from_ref(&lora),
+                true,
+                "LoRA",
+            )
+            .unwrap_or_else(|error| {
+                panic!("the turbo accelerator must be accepted on {model_id}: {error:?}")
+            });
+        }
+    }
+
+    /// sc-19563 — **the declared-partition gate**, both directions, with the control that makes it
+    /// attributable.
+    ///
+    /// The family check cannot see this: `minimax_h3` and `minimax_h3_ref` are one architecture and
+    /// one family, so before this gate the ref2v adapter attached to `minimax_h3` and **folded
+    /// cleanly** — no shape error, no refusal, just a quality mismatch, which is what made it easy
+    /// to ship and hard to notice.
+    ///
+    /// Four arms, and the two `Ok` ones are load-bearing: without them a gate that refused
+    /// *everything* would pass the two `Err` arms.
+    #[test]
+    fn a_declared_partition_gates_the_lora_to_that_model_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimax_h3_turbo_lora(
+            tmp.path(),
+            "minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors",
+        );
+        let models = vec![
+            json!({
+                "id": "minimax_h3",
+                "family": "minimax-h3",
+                "loraCompatibility": { "families": ["minimax-h3"] }
+            }),
+            json!({
+                "id": "minimax_h3_ref",
+                "family": "minimax-h3",
+                "loraCompatibility": { "families": ["minimax-h3"] }
+            }),
+        ];
+        let ref2v = json!({
+            "id": "minimax_h3_ref2v_turbo_4step",
+            "installState": "installed",
+            "installedPath": tmp.path().to_str().unwrap(),
+            "families": ["minimax-h3"],
+            "modelIds": ["minimax_h3_ref"],
+        });
+        let fl2v = json!({
+            "id": "minimax_h3_turbo_8step",
+            "installState": "installed",
+            "installedPath": tmp.path().to_str().unwrap(),
+            "families": ["minimax-h3"],
+            "modelIds": ["minimax_h3"],
+        });
+
+        // ── the two refusals, each naming BOTH the LoRA and the partition.
+        for (lora, model_id, declared) in [
+            (&ref2v, "minimax_h3", "minimax_h3_ref"),
+            (&fl2v, "minimax_h3_ref", "minimax_h3"),
+        ] {
+            let error = validate_lora_specs_for_model(
+                &models,
+                &[],
+                model_id,
+                std::slice::from_ref(lora),
+                true,
+                "LoRA",
+            )
+            .expect_err("a cross-selected partition adapter must be refused");
+            let message = format!("{error:?}");
+            let lora_id = lora["id"].as_str().unwrap();
+            assert!(
+                message.contains(lora_id),
+                "the refusal must name the LoRA; got {message}"
+            );
+            assert!(
+                message.contains(model_id),
+                "the refusal must name the model it was refused ON; got {message}"
+            );
+            // **The exact phrase, not a substring search.** `minimax_h3_ref2v_turbo_4step`
+            // CONTAINS `minimax_h3_ref`, so a bare `message.contains(declared)` is satisfied by
+            // the LoRA id already in the message and asserts nothing — mutation testing caught
+            // exactly that: blanking the declared-partition interpolation left this green.
+            assert!(
+                message.contains(&format!("is declared for model {declared}")),
+                "the refusal must name the partition it IS for; got {message}"
+            );
+        }
+
+        // ── the controls: each adapter is accepted on its OWN partition. Without these the test
+        //    would pass against a gate that refused every H3 LoRA outright.
+        for (lora, model_id) in [(&ref2v, "minimax_h3_ref"), (&fl2v, "minimax_h3")] {
+            validate_lora_specs_for_model(
+                &models,
+                &[],
+                model_id,
+                std::slice::from_ref(lora),
+                true,
+                "LoRA",
+            )
+            .unwrap_or_else(|error| panic!("must be accepted on its own partition: {error:?}"));
+        }
+    }
+
+    /// The gate is **not** hardcoded to a family — that was the whole point of sc-19563, whose
+    /// predecessor gate reads `families.iter().any(|f| f == "wan-video")`.
+    ///
+    /// A `modelIds` declaration on an invented family with no in-tree special-casing must gate just
+    /// as hard. If someone later re-hardcodes this to `minimax-h3`, this arm reds and the H3 arms
+    /// above do not.
+    #[test]
+    fn the_declared_partition_gate_is_family_agnostic() {
+        let models = vec![
+            json!({
+                "id": "acme_alpha",
+                "family": "acme",
+                "loraCompatibility": { "families": ["acme"] }
+            }),
+            json!({
+                "id": "acme_beta",
+                "family": "acme",
+                "loraCompatibility": { "families": ["acme"] }
+            }),
+        ];
+        // No `installedPath`, so no header is read and no family detection runs — this isolates the
+        // declared-partition gate from the detected-family one.
+        let lora = json!({
+            "id": "acme_style",
+            "installState": "installed",
+            "families": ["acme"],
+            "modelIds": ["acme_beta"],
+        });
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "acme_beta",
+            std::slice::from_ref(&lora),
+            true,
+            "LoRA",
+        )
+        .expect("accepted on the partition it declares");
+        let error = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "acme_alpha",
+            std::slice::from_ref(&lora),
+            true,
+            "LoRA",
+        )
+        .expect_err("a family with no in-tree special-casing must still be gated");
+        assert!(format!("{error:?}").contains("acme_beta"), "{error:?}");
+    }
+
+    /// **A LoRA that declares NO `modelIds` is untouched.** The key is optional, so the gate must
+    /// not tighten a single existing catalog entry — every LoRA in the tree today declares none.
+    #[test]
+    fn a_lora_without_declared_model_ids_is_not_gated() {
+        let models = vec![json!({
+            "id": "minimax_h3_ref",
+            "family": "minimax-h3",
+            "loraCompatibility": { "families": ["minimax-h3"] }
+        })];
+        let lora = json!({
+            "id": "legacy_h3_style",
+            "installState": "installed",
+            "families": ["minimax-h3"],
+        });
+        validate_lora_specs_for_model(&models, &[], "minimax_h3_ref", &[lora], true, "LoRA")
+            .expect("an undeclared LoRA keeps family gating alone");
+        // ...and the reader itself agrees there is nothing to gate on.
+        assert!(lora_model_ids(&json!({ "id": "x" })).is_empty());
+        assert!(lora_model_ids(&json!({ "modelIds": [] })).is_empty());
+        assert!(lora_model_ids(&json!({ "modelIds": ["  ", ""] })).is_empty());
+        assert_eq!(
+            lora_model_ids(&json!({ "modelIds": [" minimax_h3_ref "] })),
+            vec!["minimax_h3_ref".to_string()],
+            "ids are trimmed, matching lora_base_model"
+        );
+        assert_eq!(
+            lora_model_ids(&json!({ "model_ids": ["minimax_h3"] })),
+            vec!["minimax_h3".to_string()],
+            "the snake_case alias is read too, like base_model"
+        );
+    }
+
+    /// The detected-family gate is a REAL gate for this family, not a formality: a LoRA from another
+    /// architecture is still refused on H3. Without this, `minimax_h3_turbo_lora_passes_...` above
+    /// would pass just as well against a model surface that accepted everything.
+    #[test]
+    fn a_foreign_lora_is_still_rejected_on_minimax_h3() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wan_i2v_lightning_lora(tmp.path());
+        let models = vec![json!({
+            "id": "minimax_h3",
+            "family": "minimax-h3",
+            "loraCompatibility": { "families": ["minimax-h3"] }
+        })];
+        let lora = json!({
+            "id": "some_wan_lora",
+            "installState": "installed",
+            "installedPath": tmp.path().to_str().unwrap(),
+            "families": ["minimax-h3"],
+        });
+        let error =
+            validate_lora_specs_for_model(&models, &[], "minimax_h3", &[lora], true, "LoRA")
+                .expect_err("a wan-video LoRA must not be accepted on minimax_h3");
+        assert!(
+            format!("{error:?}").contains("wan-video"),
+            "the rejection must name the detected family; got {error:?}"
+        );
     }
 
     /// sc-18200: the bundled `scail2_lightning` speed toggle IS a lightx2v Wan2.1-I2V LoRA, applied
@@ -2738,5 +3697,302 @@ mod base_model_gating_tests {
             meta.is_empty(),
             "an adapter that declares no rank/alpha/type must record none: {meta:?}"
         );
+    }
+
+    // ---- Qwen-Image 2.1 vs 2512 (sc-24156, epic 24107 E10) ----------------------------------
+
+    /// The SHIPPED Qwen rows — 2512, 2.1 and its Turbo sibling (sc-25907) — read out of the
+    /// embedded `builtin.models.jsonc`, the exact bytes the API seeds and serves, so the test fails
+    /// if any advertisement drifts.
+    fn shipped_qwen_models() -> Vec<Value> {
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .expect("builtin.models.jsonc embedded");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin.models.jsonc parses");
+        let models: Vec<Value> = manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter(|model| {
+                matches!(
+                    model["id"].as_str(),
+                    Some("qwen_image") | Some("qwen_image_2_1") | Some("qwen_image_2_1_turbo")
+                )
+            })
+            .cloned()
+            .collect();
+        assert_eq!(models.len(), 3, "every shipped Qwen row is present");
+        models
+    }
+
+    /// 2.1 and 2512 adapters never cross, in either direction, and the refusal names BOTH
+    /// families — on the declared-family path (catalog stamp) AND the detected-family path (the
+    /// file's own trainer stamp), because the latter fires first whenever the file is readable.
+    #[test]
+    fn qwen_image_2_1_and_2512_loras_never_cross_and_the_refusal_names_both_families() {
+        let models = shipped_qwen_models();
+        let qwen_2_1 = models
+            .iter()
+            .find(|model| model["id"] == "qwen_image_2_1")
+            .unwrap();
+        assert_eq!(
+            qwen_2_1["loraCompatibility"]["families"],
+            json!(["qwen-image-2-1"])
+        );
+
+        // Declared-family path (no file header). sc-25907: Turbo shares 2.1's family (E9), so a
+        // 2512 adapter is refused on it with the same two-family message.
+        for (lora_family, model_id, model_family) in [
+            ("qwen-image", "qwen_image_2_1", "qwen-image-2-1"),
+            ("qwen-image", "qwen_image_2_1_turbo", "qwen-image-2-1"),
+            ("qwen-image-2-1", "qwen_image", "qwen-image"),
+        ] {
+            let lora = json!({
+                "id": "cross_style", "installState": "installed", "families": [lora_family],
+            });
+            let error =
+                validate_lora_specs_for_model(&models, &[], model_id, &[lora], true, "LoRA")
+                    .expect_err("a cross-version Qwen LoRA must be refused");
+            assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+            let detail = error.detail.clone();
+            assert!(
+                detail.contains(&format!("a {lora_family} adapter"))
+                    && detail.contains(&format!("loads {model_family} adapters")),
+                "the refusal must name both families: {detail}"
+            );
+        }
+
+        // Detected-family path: the file itself carries the trainer stamp.
+        for (stamp, detected, model_id, model_family) in [
+            (
+                "Qwen-Image-2512",
+                "qwen-image",
+                "qwen_image_2_1",
+                "qwen-image-2-1",
+            ),
+            (
+                "Qwen-Image-2512",
+                "qwen-image",
+                "qwen_image_2_1_turbo",
+                "qwen-image-2-1",
+            ),
+            (
+                "qwen_image_2_1",
+                "qwen-image-2-1",
+                "qwen_image",
+                "qwen-image",
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            write_adapter(
+                &tmp.path().join("adapter.safetensors"),
+                &format!(r#"{{"ss_base_model_version":"{stamp}"}}"#),
+                &["transformer_blocks.0.attn.to_q.lora_A.weight".to_owned()],
+            );
+            // The catalog record claims the TARGET's family; the header must still win.
+            let lora = json!({
+                "id": "stamped_style",
+                "installState": "installed",
+                "installedPath": tmp.path().to_str().unwrap(),
+                "families": [model_family],
+            });
+            let error =
+                validate_lora_specs_for_model(&models, &[], model_id, &[lora], true, "LoRA")
+                    .expect_err("a file stamped for the other Qwen version must be refused");
+            assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+            let detail = error.detail.clone();
+            assert!(
+                detail.contains(&format!("appears to be a {detected} LoRA"))
+                    && detail.contains(&format!("({model_family})")),
+                "the refusal must name both families: {detail}"
+            );
+        }
+
+        // Same-version adapters still pass on every model of their family — a 2.1 adapter on the
+        // distilled Turbo checkpoint included (sc-25907, E9).
+        for (family, model_id) in [
+            ("qwen-image-2-1", "qwen_image_2_1"),
+            ("qwen-image-2-1", "qwen_image_2_1_turbo"),
+            ("qwen-image", "qwen_image"),
+        ] {
+            let lora = json!({
+                "id": "own_style", "installState": "installed", "families": [family],
+            });
+            validate_lora_specs_for_model(&models, &[], model_id, &[lora], true, "LoRA")
+                .unwrap_or_else(|error| panic!("{family} LoRA on {model_id}: {error:?}"));
+        }
+    }
+
+    /// sc-24163 (round 2): a family is assigned only after the file was INSPECTED. An installed
+    /// row with no readable safetensors header (no path, or a non-safetensors file) is refused as
+    /// not inspectable — never treated as "unresolved".
+    #[test]
+    fn family_assignment_needs_an_inspected_header() {
+        let models = shipped_qwen_models();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("legacy.ckpt"), b"not safetensors").unwrap();
+        let keys: Vec<String> = (0..32)
+            .map(|block| format!("transformer.transformer_blocks.{block}.attn.to_q.lora_A.weight"))
+            .collect();
+        let adapter = tmp.path().join("adapter.safetensors");
+        write_adapter(&adapter, r#"{"ss_base_model_version":"qwen_image"}"#, &keys);
+        let adapter = adapter.to_str().unwrap();
+        for lora in [
+            json!({ "id": "no_path", "installState": "installed" }),
+            json!({
+                "id": "ckpt_only",
+                "installState": "installed",
+                "installedPath": tmp.path().join("legacy.ckpt").to_str().unwrap(),
+            }),
+            // A readable file whose install has not completed is not yet the installed adapter.
+            json!({ "id": "downloading", "installState": "missing", "installedPath": adapter }),
+        ] {
+            let error =
+                resolve_lora_family_assignment("x", &lora, "qwen-image-2-1", &models).unwrap_err();
+            assert_eq!(error.code, Some("lora_family_not_inspectable"), "{lora}");
+        }
+        // The inspected, installed, unresolved file is the one case that is accepted.
+        let lora =
+            json!({ "id": "inspected", "installState": "installed", "installedPath": adapter });
+        assert_eq!(
+            resolve_lora_family_assignment("x", &lora, "qwen-image-2-1", &models).unwrap(),
+            "qwen-image-2-1"
+        );
+    }
+
+    /// sc-24163 (E10 review): a file whose header does NOT resolve a family — the bare ai-toolkit
+    /// `qwen_image` stamp on attention-only keys within 2.1's 32-block depth — is gated on the
+    /// user-DECLARED family alone. "The header must still win" only applies when the header
+    /// resolves; an unresolved header must not block a user who declares `qwen-image-2-1`.
+    #[test]
+    fn header_unresolved_qwen_adapter_is_gated_on_the_user_declared_family() {
+        let models = shipped_qwen_models();
+        let tmp = tempfile::tempdir().unwrap();
+        let keys: Vec<String> = (0..32)
+            .map(|block| format!("transformer.transformer_blocks.{block}.attn.to_q.lora_A.weight"))
+            .collect();
+        write_adapter(
+            &tmp.path().join("adapter.safetensors"),
+            r#"{"ss_base_model_version":"qwen_image"}"#,
+            &keys,
+        );
+        let header = validate_lora_safetensors_header(
+            "generic_stamp",
+            &json!({ "installedPath": tmp.path().to_str().unwrap() }),
+        )
+        .unwrap()
+        .expect("the header is readable");
+        assert_eq!(
+            detect_lora_family(&header),
+            None,
+            "precondition: the generic stamp on 2.1-compatible keys is header-unresolved"
+        );
+        let lora = |family: &str| {
+            json!({
+                "id": "generic_stamp",
+                "installState": "installed",
+                "installedPath": tmp.path().to_str().unwrap(),
+                "families": [family],
+            })
+        };
+
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "qwen_image_2_1",
+            &[lora("qwen-image-2-1")],
+            true,
+            "LoRA",
+        )
+        .expect("a header-unresolved adapter declared qwen-image-2-1 loads on 2.1");
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "qwen_image",
+            &[lora("qwen-image")],
+            true,
+            "LoRA",
+        )
+        .expect("the same file declared qwen-image loads on 2512");
+
+        let error = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "qwen_image_2_1",
+            &[lora("qwen-image")],
+            true,
+            "LoRA",
+        )
+        .expect_err("declared qwen-image is refused on 2.1");
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            error.detail.contains("a qwen-image adapter")
+                && error.detail.contains("loads qwen-image-2-1 adapters"),
+            "the refusal must name both families: {}",
+            error.detail
+        );
+    }
+
+    /// A version-explicit 2.1 stamp cannot override tensor depth that only the 60-block 2512
+    /// architecture owns. This stays a positive 2512 detection so automatic import and manual
+    /// family assignment both reject the contradiction instead of accepting a claimed 2.1 family.
+    #[test]
+    fn qwen_2_1_stamp_with_2512_depth_is_refused_before_manual_assignment() {
+        let models = shipped_qwen_models();
+        for key in [
+            "transformer.transformer_blocks.32.attn.to_q.lora_A.weight",
+            "lora_unet_transformer_blocks_59_attn_to_out_0.lora_down.weight",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            write_adapter(
+                &tmp.path().join("adapter.safetensors"),
+                r#"{"ss_base_model_version":"qwen_image_2_1"}"#,
+                &[key.to_owned()],
+            );
+            let lora = json!({
+                "id": "contradictory_depth",
+                "installState": "installed",
+                "installedPath": tmp.path().to_str().unwrap(),
+                "families": ["qwen-image-2-1"],
+            });
+
+            let header = validate_lora_safetensors_header("contradictory_depth", &lora)
+                .unwrap()
+                .expect("header is readable");
+            assert_eq!(detect_lora_family(&header).as_deref(), Some("qwen-image"));
+
+            let assignment = resolve_lora_family_assignment(
+                "contradictory_depth",
+                &lora,
+                "qwen-image-2-1",
+                &models,
+            )
+            .expect_err("detected 2512 depth cannot be manually assigned to 2.1");
+            assert_eq!(assignment.code, Some("lora_family_detected"));
+            assert!(
+                assignment.detail.contains("qwen-image"),
+                "{}",
+                assignment.detail
+            );
+
+            let load = validate_lora_specs_for_model(
+                &models,
+                &[],
+                "qwen_image_2_1",
+                &[lora],
+                true,
+                "LoRA",
+            )
+            .expect_err("a 2512-depth adapter must not load on Qwen-Image 2.1");
+            assert!(
+                load.detail.contains("qwen-image") && load.detail.contains("qwen-image-2-1"),
+                "{}",
+                load.detail
+            );
+        }
     }
 }

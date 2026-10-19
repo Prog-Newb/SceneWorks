@@ -1,3 +1,4 @@
+pub mod admission_geometry;
 pub mod angle_kps;
 pub mod app_paths;
 pub mod asset_index;
@@ -5,21 +6,50 @@ pub mod base_weights;
 pub mod builtin_manifests;
 pub mod catalog_store;
 pub mod character_store;
+pub mod checkpoint_derivative;
+pub mod checkpoint_import;
+pub mod checkpoint_ingest;
+pub mod checkpoint_inspector;
+pub mod checkpoint_plan_store;
+pub mod checkpoint_weight_facts;
 pub mod contracts;
 pub mod control_weights;
 pub mod credentials;
 pub mod dataset_quality;
+pub mod decoder_support;
+pub mod depth_map;
+pub mod download_receipt;
 pub mod external_roots;
+pub mod file_lock;
+pub mod film_compile;
+pub mod film_plan;
+pub mod film_planner;
+pub mod film_review;
+pub mod film_timeline;
+pub mod film_workspace;
+pub mod h3_keyframes;
+mod h3_veda;
 pub mod hf_home;
+pub mod hf_repo_renames;
+pub mod hf_revision_supersessions;
 pub mod ideogram_caption;
 pub mod image_request;
+pub mod image_restoration;
+pub mod image_sampling_controls;
 pub mod jobs_store;
 pub mod jsonc;
+pub mod license_acknowledgments;
 pub mod lora_family;
 pub mod lora_url;
+pub mod managed_checkpoint_variants;
+pub mod managed_file;
 pub mod media_convert;
+pub mod memory_anchor;
 pub mod memory_calibration;
+pub mod minimax_h3_turbo;
 pub mod mlx_tier_completeness;
+pub mod model_artifacts;
+pub mod model_usage_policy;
 pub mod observability;
 pub mod payload_util;
 pub mod preview_support;
@@ -32,6 +62,8 @@ pub mod style_composer;
 pub mod time;
 pub mod training;
 pub mod training_store;
+pub mod training_subject_masks;
+pub mod video_memory_curves;
 pub mod video_request;
 pub mod voice_store;
 pub mod workflow_mp4;
@@ -39,9 +71,19 @@ pub mod workflow_parameters;
 pub mod workflow_png;
 pub mod workflow_resolution;
 pub mod workflow_share;
+pub mod yue2_score;
 
 pub const API_PREFIX: &str = "/api/v1";
 pub const HEALTH_ROUTE: &str = "/health";
+
+/// sc-8884 (F-082): the char cap the API applies to every free-text prompt field (`prompt` and
+/// `negativePrompt`). Both are persisted into jobs.db and re-broadcast over SSE on every
+/// `job.updated`, so an uncapped field bloats the row and every subscriber's payload.
+///
+/// It lives here rather than in rust-api because pre-dispatch validators outside that crate
+/// (`film_plan`, sc-22710) must refuse a prompt the enqueue route would refuse; a hand-copied
+/// number turns an actionable pre-flight diagnostic into a 400 at enqueue when the two drift.
+pub const MAX_PROMPT_CHARS: usize = 4000;
 
 /// Stdout sentinel for remote worker-restart (epic 4484 story 12). The API process
 /// doesn't supervise the desktop's GPU worker, so `POST /api/v1/worker/restart` prints

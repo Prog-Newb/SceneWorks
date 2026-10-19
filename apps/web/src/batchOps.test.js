@@ -8,6 +8,7 @@ import {
   batchItemStatusForItem,
   batchItemResultAsset,
   summarizeBatchProgress,
+  settlePromptBatchRun,
   summarizeBatchRun,
 } from "./batchOps.js";
 
@@ -15,8 +16,9 @@ const project = { id: "project_1", name: "My Project" };
 const asset = { id: "asset_1", displayName: "shot.png" };
 
 describe("batch ops (sc-6112)", () => {
-  it("exposes the three ops + their endpoints", () => {
-    expect(BATCH_OPS.map((op) => op.key)).toEqual(["upscale", "detail", "edit"]);
+  it("exposes the ops + their endpoints", () => {
+    expect(BATCH_OPS.map((op) => op.key)).toEqual(["upscale", "detail", "edit", "depth"]);
+    expect(batchOpByKey("depth").endpoint).toBe("/api/v1/image/depth/jobs");
     expect(batchOpByKey("edit").endpoint).toBe("/api/v1/image/jobs");
     expect(batchOpByKey("upscale").endpoint).toBe("/api/v1/jobs");
     expect(batchOpByKey("nope")).toBeNull();
@@ -44,6 +46,24 @@ describe("batch ops (sc-6112)", () => {
 
     const seed = buildBatchJob({ op: "upscale", asset, params: { engine: "seedvr2", factor: 2, softness: 0.3 }, project, requestedGpu: "auto" });
     expect(seed.body.payload.softness).toBe(0.3);
+  });
+
+  it("builds one typed depth job per image with the explicit resolution choice (sc-25682)", () => {
+    const capped = buildBatchJob({ op: "depth", asset, params: { resolution: { mode: "capped", maxSide: 2048 } }, project, requestedGpu: "auto" });
+    expect(capped.endpoint).toBe("/api/v1/image/depth/jobs");
+    expect(capped.body).toEqual({
+      projectId: "project_1",
+      projectName: "My Project",
+      sourceAssetId: "asset_1",
+      resolution: { mode: "capped", maxSide: 2048 },
+      requestedGpu: "auto",
+      displayName: "shot.png",
+    });
+    const native = buildBatchJob({ op: "depth", asset, params: { resolution: { mode: "native" } }, project, requestedGpu: "0" });
+    expect(native.body.resolution).toEqual({ mode: "native" });
+    // No choice at all is the documented default cap, never an implicit native run.
+    const fallback = buildBatchJob({ op: "depth", asset, params: {}, project, requestedGpu: "auto" });
+    expect(fallback.body.resolution).toEqual({ mode: "capped", maxSide: 1024 });
   });
 
   it("builds a detail job with the recipe advanced params", () => {
@@ -172,18 +192,27 @@ describe("batch ops (sc-6112)", () => {
 });
 
 describe("summarizeBatchRun (sc-9980)", () => {
-  it("counts not-yet-submitted items as pending, not failed", () => {
+  it("counts an unstreamed suffix as pending when the run total is known", () => {
     const summary = summarizeBatchRun(
-      [{ jobId: "j1" }, { jobId: null }, { jobId: null }],
+      { total: 4, submitted: 1, completed: 0, failed: 0, activeJobIds: ["j1"] },
+      [{ id: "j1", status: "queued" }],
+    );
+    expect(summary).toMatchObject({ total: 4, pending: 3, queued: 1, failed: 0, done: 0, allDone: false });
+  });
+
+  it("counts not-yet-submitted prompts as pending, not failed", () => {
+    const summary = summarizeBatchRun(
+      { total: 3, submitted: 1, completed: 0, failed: 0, activeJobIds: ["j1"] },
       [{ id: "j1", status: "queued" }],
     );
     expect(summary).toMatchObject({ total: 3, pending: 2, queued: 1, failed: 0, done: 0, allDone: false });
   });
 
-  it("marks a thrown submission as failed via the error flag", () => {
-    const summary = summarizeBatchRun([{ jobId: null, error: true }, { jobId: "j1" }], [
-      { id: "j1", status: "completed" },
-    ]);
+  it("counts a failed submission without retaining its prompt", () => {
+    const summary = summarizeBatchRun(
+      { total: 2, submitted: 2, completed: 0, failed: 1, activeJobIds: ["j1"] },
+      [{ id: "j1", status: "completed" }],
+    );
     expect(summary).toMatchObject({ total: 2, failed: 1, completed: 1, pending: 0, done: 2 });
   });
 
@@ -192,9 +221,45 @@ describe("summarizeBatchRun (sc-9980)", () => {
       { id: "j1", status: "completed" },
       { id: "j2", status: "running" },
     ];
-    const mid = summarizeBatchRun([{ jobId: "j1" }, { jobId: "j2" }], jobs);
+    const mid = summarizeBatchRun(
+      { total: 2, submitted: 2, completed: 0, failed: 0, activeJobIds: ["j1", "j2"] },
+      jobs,
+    );
     expect(mid).toMatchObject({ completed: 1, running: 1, active: 1, allDone: false });
-    const doneAll = summarizeBatchRun([{ jobId: "j1" }], [{ id: "j1", status: "completed" }]);
+    const doneAll = summarizeBatchRun(
+      { total: 1, submitted: 1, completed: 0, failed: 0, activeJobIds: ["j1"] },
+      [{ id: "j1", status: "completed" }],
+    );
     expect(doneAll).toMatchObject({ done: 1, active: 0, allDone: true });
+  });
+
+  it("settles terminal jobs into scalar totals and drops their ids", () => {
+    const observed = new Map([["j1", "observed"]]);
+    const settled = settlePromptBatchRun(
+      { total: 3, submitted: 3, completed: 0, failed: 1, activeJobIds: ["j1", "j2"] },
+      [{ id: "j1", status: "completed" }, { id: "j2", status: "running" }],
+      observed,
+    );
+    expect(settled).toEqual({ total: 3, submitted: 3, completed: 1, failed: 1, activeJobIds: ["j2"] });
+    expect(observed.has("j1")).toBe(false);
+  });
+});
+
+// sc-25681: a native prompt-batch job carries several prompts; the run counts every one of them.
+// Mutation that reds this: count each settled/active job as 1 regardless of `sizes`.
+describe("prompt-batch runs weighted by native batch size (sc-25681)", () => {
+  it("settles and summarizes a multi-prompt job as all of its prompts", () => {
+    const run = { total: 3, submitted: 3, completed: 0, failed: 0, activeJobIds: ["a", "b"], sizes: { a: 2 } };
+    const jobs = [
+      { id: "a", status: "completed" },
+      { id: "b", status: "running" },
+    ];
+    expect(summarizeBatchRun(run, [{ id: "a", status: "running" }, { id: "b", status: "queued" }], new Map())).toMatchObject({
+      running: 2,
+      queued: 1,
+    });
+    const settled = settlePromptBatchRun(run, jobs, new Map());
+    expect(settled).toMatchObject({ completed: 2, activeJobIds: ["b"] });
+    expect(summarizeBatchRun(settled, jobs, new Map())).toMatchObject({ completed: 2, running: 1, done: 2 });
   });
 });

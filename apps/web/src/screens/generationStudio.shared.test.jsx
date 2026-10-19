@@ -35,6 +35,7 @@ function TierHarness({
   reseedOnModelChange = false,
   useGenerationQuality = false,
   autoTier = null,
+  preferencesHydrated = true,
 }) {
   const state = useQuantTierPicker({
     screen,
@@ -45,10 +46,22 @@ function TierHarness({
     reseedOnModelChange,
     useGenerationQuality,
     autoTier,
+    preferencesHydrated,
   });
   return (
     <div>
       <output>{state.quantTier}|{state.tierSwitching}</output>
+      <span data-tier-state>{`${state.tierExplicit}|${state.tierSuggested}`}</span>
+      <button data-action="confirm" onClick={state.confirmTier}>confirm</button>
+      <button
+        data-action="recipe-nvfp4"
+        onClick={() => {
+          state.skipNextReseed();
+          state.setQuantTier("nvfp4");
+        }}
+      >
+        recipe nvfp4
+      </button>
       <button data-action="q8" onClick={() => state.handleTierChange("q8")}>q8</button>
       <button data-action="invalid" onClick={() => state.handleTierChange("bf16")}>invalid</button>
       <button
@@ -142,6 +155,37 @@ describe("shared generation-studio controls", () => {
     expect(container.querySelector("output").textContent).toBe("q4|");
   });
 
+  it("waits for durable preferences before seeding instead of locking in a catalog-race default", async () => {
+    vi.mocked(readLastTier).mockReturnValue(null);
+    await act(async () => root.render(
+      <TierHarness
+        model="imported-int8"
+        availableTiers={["q4", "q8", "bf16"]}
+        screen="image"
+        useGenerationQuality
+        autoTier="q8"
+        preferencesHydrated={false}
+      />,
+    ));
+    expect(container.querySelector("output").textContent).toBe("|");
+    expect(readLastTier).not.toHaveBeenCalled();
+
+    // App seeds the server's per-model map into lastTierStore before flipping this flag.
+    vi.mocked(readLastTier).mockReturnValue("bf16");
+    await act(async () => root.render(
+      <TierHarness
+        model="imported-int8"
+        availableTiers={["q4", "q8", "bf16"]}
+        screen="image"
+        useGenerationQuality
+        autoTier="q8"
+        preferencesHydrated
+      />,
+    ));
+    expect(container.querySelector("output").textContent).toBe("bf16|");
+    expect(readLastTier).toHaveBeenCalledWith("image", "imported-int8");
+  });
+
   it("persists only valid manual selections and rejects unavailable tiers", async () => {
     await act(async () => root.render(<TierHarness model="one" />));
     await act(async () => container.querySelector('[data-action="invalid"]').click());
@@ -165,6 +209,35 @@ describe("shared generation-studio controls", () => {
     expect(text.getAttribute("aria-selected")).toBe("true");
     expect(edit.disabled).toBe(true);
     expect(edit.title).toBe("Unavailable");
+  });
+
+  it("labels a derived bits tier a suggestion until confirmTier writes its sticky (sc-22246)", async () => {
+    const tierState = () => container.querySelector("[data-tier-state]").textContent;
+    await act(async () => root.render(<TierHarness availableTiers={["q4", "q8"]} />));
+    expect(container.querySelector("output").textContent).toBe("q4|");
+    expect(tierState()).toBe("false|true");
+
+    // confirmTier persists the SHOWN tier for this (screen, model); the hook re-reads it as explicit.
+    readLastTier.mockReturnValue("q4");
+    await act(async () => container.querySelector('[data-action="confirm"]').click());
+    expect(writeLastTier).toHaveBeenCalledWith("video", "one", "q4");
+    expect(tierState()).toBe("true|false");
+  });
+
+  it("never labels a non-bits tier or an unresolved tier a suggestion (sc-22246)", async () => {
+    const tierState = () => container.querySelector("[data-tier-state]").textContent;
+    // nvfp4 never rides mlxQuantizeExplicit and is never downtiered — a suggestion label would lie.
+    await act(async () => root.render(<TierHarness availableTiers={["q4", "nvfp4"]} />));
+    await act(async () => container.querySelector('[data-action="recipe-nvfp4"]').click());
+    expect(container.querySelector("output").textContent).toBe("nvfp4|");
+    expect(tierState()).toBe("false|false");
+
+    // Before preferences hydrate no tier is seeded: no label and confirmTier is a no-op.
+    await act(async () => root.render(<TierHarness key="fresh" model="two" preferencesHydrated={false} />));
+    expect(container.querySelector("output").textContent).toBe("|");
+    expect(tierState()).toBe("false|false");
+    await act(async () => container.querySelector('[data-action="confirm"]').click());
+    expect(writeLastTier).not.toHaveBeenCalled();
   });
 
   it("renders shared tier warnings and style/general preset chips", async () => {

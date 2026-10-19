@@ -2,11 +2,13 @@ import React, { useState } from "react";
 
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { Modal } from "./Modal.jsx";
+import { errorMessage } from "../errorMessage.js";
 
 const initialSettings = {
   sourcePath: "",
   urlColumn: "URL",
   captionColumn: "TEXT",
+  captionFieldColumns: "",
   maxItems: 1000,
   minEdge: 512,
   concurrency: 16,
@@ -25,6 +27,7 @@ const captionPresets = {
 export function DatasetParquetImportDialog({ running = false, onClose, onRun }) {
   const [settings, setSettings] = useState(initialSettings);
   const [pickerError, setPickerError] = useState("");
+  const [submitError, setSubmitError] = useState("");
 
   function update(field, value) {
     setSettings((current) => ({ ...current, [field]: value }));
@@ -53,22 +56,38 @@ export function DatasetParquetImportDialog({ running = false, onClose, onRun }) 
   async function submit(event) {
     event.preventDefault();
     if (!settings.sourcePath.trim() || running) return;
-    await onRun({
-      sourcePath: settings.sourcePath.trim(),
-      urlColumn: settings.urlColumn.trim(),
-      captionColumn: settings.captionColumn.trim(),
-      maxItems: Number(settings.maxItems),
-      minEdge: Number(settings.minEdge),
-      concurrency: Number(settings.concurrency),
-      captionIncludes: settings.captionIncludes
-        .split(",")
-        .map((term) => term.trim())
-        .filter(Boolean),
-      captionExcludes: settings.captionExcludes
-        .split(",")
-        .map((term) => term.trim())
-        .filter(Boolean),
-    });
+    setSubmitError("");
+    // sc-25685: each named column becomes a named caption field on the item (Iris
+    // `caption_field(s)`). Omitted when empty so a plain import's request is unchanged.
+    const captionFieldColumns = Array.from(
+      new Set(
+        settings.captionFieldColumns
+          .split(",")
+          .map((column) => column.trim())
+          .filter(Boolean),
+      ),
+    );
+    try {
+      await onRun({
+        sourcePath: settings.sourcePath.trim(),
+        urlColumn: settings.urlColumn.trim(),
+        captionColumn: settings.captionColumn.trim(),
+        maxItems: Number(settings.maxItems),
+        minEdge: Number(settings.minEdge),
+        concurrency: Number(settings.concurrency),
+        captionIncludes: settings.captionIncludes
+          .split(",")
+          .map((term) => term.trim())
+          .filter(Boolean),
+        captionExcludes: settings.captionExcludes
+          .split(",")
+          .map((term) => term.trim())
+          .filter(Boolean),
+        ...(captionFieldColumns.length ? { captionFieldColumns } : {}),
+      });
+    } catch (error) {
+      setSubmitError(errorMessage(error, "Could not start the Parquet import."));
+    }
   }
 
   return (
@@ -110,6 +129,7 @@ export function DatasetParquetImportDialog({ running = false, onClose, onRun }) 
           </small>
         ) : null}
         {pickerError ? <p className="inline-warning">{pickerError}</p> : null}
+        {submitError ? <p className="inline-warning">{submitError}</p> : null}
 
         <div className="dataset-caption-row">
           <label>
@@ -124,6 +144,18 @@ export function DatasetParquetImportDialog({ running = false, onClose, onRun }) 
             />
           </label>
         </div>
+        <label>
+          Extra caption columns
+          <input
+            onChange={(event) => update("captionFieldColumns", event.target.value)}
+            placeholder="short_caption, tags"
+            value={settings.captionFieldColumns}
+          />
+        </label>
+        <small className="dataset-parquet-hint">
+          Optional, comma-separated. Each column is kept as a named caption field on the item, which Iris
+          training can select from.
+        </small>
         <label>
           Caption category preset (heuristic)
           <select

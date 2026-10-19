@@ -1,8 +1,9 @@
 import React, { useCallback, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
-import { AssetThumbnail, assetUrl } from "../components/assetMedia.jsx";
+import { AssetThumbnail, assetDisplayUrl, assetUrl } from "../components/assetMedia.jsx";
 import { assetCanCarryWorkflow, stripWorkflowUrl } from "../assetActions.js";
 import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbed.js";
+import { yue2AssetFilename } from "../yue2Policy.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
 import { terminalStatuses } from "../constants.js";
 import { STYLE_GROUPS } from "../data/styleCatalog.js";
@@ -84,7 +85,7 @@ export function ReferenceTile({ label, hint, asset, assets, onChange, required =
       options: assets.map((item) => ({
         value: item.id,
         label: item.displayName ?? item.id,
-        thumbnail: assetUrl(item),
+        thumbnail: assetDisplayUrl(item),
       })),
       onSelect: (id) => {
         onChange(id);
@@ -173,6 +174,32 @@ export function SheetSelect({ label, value, options, onSelect, title, kind = "li
       </button>
     </div>
   );
+}
+
+// sc-17162 — the model's declared `ui.description`, under the Model field it describes.
+//
+// `ui.description` had exactly ONE reader in the whole app: the advanced Models screen's card
+// (`ModelManagerScreen.jsx`). Simple is an alternative shell, not a subset view, and its only route
+// to that screen is "Manage", which switches the shell out from under the user — so a Simple user
+// who never leaves Simple met the model by NAME ALONE. That is the same reachability gap sc-17227
+// closed for `ui.attribution` and 28b5fea6d closed for `ui.durationHint`, and it is the expensive
+// one here: `description` is where the withheld-component disclosure lives (H3-Context-IR and
+// H3-Regenerate-2K are unreleased, so this is not the hosted Hailuo product and 2K is unreachable;
+// sparse attention is unreleased, so the shortest clip at full canvas is a ~2 hour render). A
+// disclosure that only renders on a screen the reduced shell hands off to is not discharged for
+// the users of that shell.
+//
+// Read off the SELECTED model rather than special-cased, so every model with a declared description
+// gets one and a family added later needs no change here. Rendering nothing is always correct: a
+// model that declares no description owes none. Deliberately NOT falling back to `family`/`id` the
+// way the advanced card does — the card needs a non-empty body, whereas here the name is already on
+// the field directly above, so a fallback would just repeat it.
+export function ModelDescription({ model = null, className = "su-model-desc" }) {
+  const description = model?.ui?.description;
+  if (typeof description !== "string" || !description.trim()) {
+    return null;
+  }
+  return <p className={className}>{description.trim()}</p>;
 }
 
 // `label` doubles as the visible field label and the group's accessible name. A caller
@@ -323,11 +350,13 @@ export function DownloadButton({ asset, className = "su-result-action su-result-
   // On the FORMAT, not on whether this particular file has a chunk: answering that needs the bytes,
   // and the answer is the same either way — a PNG with no chunk downloads as a plain copy.
   const canStrip = Boolean(href) && assetCanCarryWorkflow(asset);
+  // A YuE2 take downloads under its licence-marked name, never its style text (E2).
+  const filename = yue2AssetFilename(asset) ?? asset.displayName ?? "";
   return (
     <>
       <a
         aria-hidden="true"
-        download={asset.displayName ?? ""}
+        download={filename}
         href={href}
         ref={anchorRef}
         style={{ display: "none" }}
@@ -351,7 +380,7 @@ export function DownloadButton({ asset, className = "su-result-action su-result-
         <>
           <a
             aria-hidden="true"
-            download={asset.displayName ?? ""}
+            download={filename}
             href={stripWorkflowUrl(href)}
             ref={strippedRef}
             style={{ display: "none" }}

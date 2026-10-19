@@ -24,6 +24,7 @@ is linked into the app, so first run starts straight on the native engine.
 - [Install](#install)
 - [First run](#first-run)
 - [Where your files live](#where-your-files-live)
+- [Keeping models on an external drive](#keeping-models-on-an-external-drive)
 - [GPU memory tuning (macOS)](#gpu-memory-tuning-macos)
 - [Supported features & known limitations](#supported-features--known-limitations)
 - [Desktop vs. server](#desktop-vs-server)
@@ -191,6 +192,20 @@ playback libraries are included (`bundleMediaFramework: true`). This keeps MP4
 previews working on a stock supported Ubuntu install rather than relying on
 multimedia plugins that happen to be present on the build or user machine.
 
+AppImage packaging excludes host NVIDIA driver libraries, including `libcuda.so`
+and NVML, through `apps/desktop/.appimageignore`. The host's installed NVIDIA
+driver supplies those libraries; the CUDA toolkit, cuDNN, and playback libraries
+remain bundled or provisioned as above. Both Linux packaging workflows inspect
+the finished AppImages before uploading them or attaching them to a release:
+
+```sh
+npm --prefix apps/desktop run check:linux-drivers -- --appimage /absolute/path/SceneWorks.AppImage
+```
+
+The check requires Linux for extraction, but no GPU or FUSE mount. It rejects
+driver libraries and driver symlinks anywhere in the image. Exclusion happens
+while creating the SquashFS image, before Tauri creates updater signatures.
+
 Inspect a built Debian package's dependency declaration with:
 
 ```sh
@@ -297,6 +312,67 @@ environment variables in parentheses override them for advanced setups.
 Model weights default to the shared Hugging Face cache so SceneWorks reuses
 anything already downloaded by other tools on the machine (and vice versa). Point
 `HF_HOME` (or the splash field) at a larger drive if your boot volume is tight.
+
+If you point it at an external or network drive, read
+[Keeping models on an external drive](#keeping-models-on-an-external-drive) next — SceneWorks can
+keep its own working copies of the models you actually use so they still load when that drive is
+disconnected.
+
+## Keeping models on an external drive
+
+Your **model library** is the Hugging Face folder above: the authoritative copy of every model you
+have downloaded. It can live on an external or network drive. When it does, SceneWorks can also
+keep a **local copy** of each model you actually generate with, inside its own storage, so that
+model keeps working when the drive is not attached.
+
+Two locations, two different jobs:
+
+| | Model library | Local model copies |
+| --- | --- | --- |
+| What it is | every model you have downloaded | working copies of the models you have actually used |
+| Where | wherever you pointed `HF_HOME` | inside SceneWorks' own data folder |
+| Managed by | you (and any other tool sharing the cache) | SceneWorks, within a size limit you set |
+| Survives the drive being unplugged | no | yes |
+
+### Turning it on
+
+**Settings → Local model copies → "Keep a working copy of models from external libraries."**
+It is **off by default**, and **takes effect after a restart**. You also set the size limit
+("use at most N GiB") and how long an unused copy is kept ("remove copies unused for N days")
+there.
+
+Copies are made in the background, after a generation finishes — never in the middle of one, and
+never by downloading anything. SceneWorks copies bytes that are already on your drive. Nothing is
+copied until you have generated with that model at least once, so the cache only ever fills with
+models you actually use.
+
+If the local copies would land on the *same* volume as the library, Settings says so: they then
+protect against neither a disconnect nor a slow drive, and only use extra space.
+
+### What each badge means
+
+In **Model Manager**, every model shows where it will load from:
+
+| Badge | Meaning |
+| --- | --- |
+| **local copy** | a SceneWorks-owned copy is on this machine; loads even if the library is disconnected |
+| **on external library** | installed, and will load from the library drive |
+| **library disconnected** | installed, but the library holding it is not attached right now |
+| **incomplete** | the library is attached but this model's files are not all there |
+| **not installed** | not downloaded yet |
+
+Use **Keep locally** to pin a copy so automatic cleanup never removes it, and **Remove local copy**
+to reclaim its space. Removing a local copy never touches the model library — the model stays
+installed and simply goes back to loading from the drive.
+
+### Limits worth knowing
+
+- Two models keep an **optional** extra component (currently Qwen-Image and ACE-Step v1.5 Turbo)
+  that is *not* copied locally. The model itself still works while the drive is disconnected; a
+  generation that needs that optional component does not.
+- A model whose download was recorded without an exact revision cannot be served from a local copy
+  and always loads from the library.
+- LoRAs and control overlays are not part of this feature; they always load from the library.
 
 Service credentials (gated Hugging Face / Civitai tokens) are **not** stored in
 these folders — they go in the per-user OS keychain (Windows Credential Manager,
@@ -445,11 +521,18 @@ connection and free space, then retry from the setup screen. The download resume
 into `%APPDATA%\SceneWorks\gpu-runtime`. On a machine with no internet access, pre-stage
 the runtime instead — see [Offline / air-gapped install](docs/offline-install.md).
 
-**Linux: "GPU runtime setup failed" / "unresolved shared-library dependencies."**
+**Linux: "GPU runtime setup failed" / "missing shared libraries."**
 The first-run runtime download or ELF dependency check did not complete. Retry
-after checking network and disk space. If the message names `libgomp`, install
-the GNU OpenMP runtime (`sudo apt install libgomp1` on Debian/Ubuntu or
-`sudo dnf install libgomp` on Fedora/RHEL), then relaunch. Offline machines can
+after checking network and disk space. The message names each library `ldd` could
+not resolve; install whichever package provides them and relaunch — if that is
+`libgomp`, the GNU OpenMP runtime is `sudo apt install libgomp1` on Debian/Ubuntu
+or `sudo dnf install libgomp` on Fedora/RHEL. On an immutable/atomic distribution
+(Bazzite, Silverblue, Bluefin, …) there is no `dnf`/`apt` writing into the running
+system: layer the package with `rpm-ostree install <package>` and reboot — a
+layered package only arrives on the next boot — or start SceneWorks from a
+toolbox/distrobox container that already has it. A name beginning `libcuda` or
+`libnvidia-ml` is installed by the NVIDIA driver rather than by a distribution
+package, so install or update the driver and reboot instead. Offline machines can
 copy a provisioned Linux runtime as described in
 [Offline / air-gapped install](docs/offline-install.md).
 
@@ -463,6 +546,27 @@ CPU-only generation, and Turing (sm_75) are not supported by this v1 package.
 Install FFmpeg (`sudo apt install ffmpeg` on Ubuntu, `sudo dnf install ffmpeg`
 on Fedora after enabling the appropriate multimedia repository, or
 `sudo pacman -S ffmpeg` on Arch), then retry the job.
+
+**"The external model library holding this installed model is disconnected."**
+The drive holding your model library is not attached, and this model has no local copy. Reconnect
+the drive and retry — the job is refused rather than re-downloading, and your installed models and
+their download receipts are left exactly as they were. Nothing is lost by unplugging the drive.
+To make a model survive this, generate with it once while the drive is attached and leave
+[Local model copies](#keeping-models-on-an-external-drive) on, or press **Keep locally** on it in
+Model Manager.
+
+**A model shows "library disconnected" even though the drive is plugged in.**
+The folder is there but it is not the same library SceneWorks recorded — a different drive
+mounted at the same path, or the library was moved. SceneWorks fails closed here rather than
+guessing, because guessing wrong would silently re-download or serve the wrong weights. The
+reconnect prompt offers to point SceneWorks at the library's new location; it re-binds the
+identity without downloading anything or rewriting any receipts. Moving the library to a new path
+on the *same* drive is recognized automatically and needs no action.
+
+**Generation still works but Settings shows no storage numbers / the cache card looks stuck.**
+The cache status view is temporarily unavailable while SceneWorks is copying a model into local
+storage or running its periodic cleanup. It recovers on its own once that finishes; the numbers
+are cosmetic and nothing is wrong with the copies themselves.
 
 **"The local API did not start in time."**
 The bundled API didn't become healthy within the startup window. Retry from the

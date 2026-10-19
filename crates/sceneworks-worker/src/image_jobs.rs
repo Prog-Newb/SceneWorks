@@ -72,6 +72,17 @@ use gen_core::ControlKind;
 // concrete InstantID API stay MLX-typed until the face stack moves onto a neutral contract.
 #[cfg(target_os = "macos")]
 use runtime_macos::media::weights::Weights;
+
+/// Load an MLX safetensors file and read its bytes now, before any GPU kernel consumes them
+/// (sc-24245). MLX loads lazily on its CPU stream; a model built over an unread load makes its
+/// first Metal command buffers wait on the disk read, which trips the GPU watchdog
+/// (`kIOGPUCommandBufferCallbackErrorTimeout`, then `SubmissionsIgnored`) on a cold page cache.
+#[cfg(target_os = "macos")]
+pub(crate) fn read_weights(
+    path: impl AsRef<std::path::Path>,
+) -> Result<Weights, impl std::fmt::Display + std::fmt::Debug> {
+    Weights::from_file(path).and_then(|weights| weights.materialize().map(|()| weights))
+}
 #[cfg(target_os = "macos")]
 use runtime_macos::providers::instantid::{
     BodyPoint, InstantId, InstantIdPaths, InstantIdRequest, FACE_RESTORE_PROMPT,
@@ -208,6 +219,22 @@ const MAX_JOB_LORAS: usize = 5;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use crate::engines::{mlx_model, ResolvedModel};
+
+/// Parse the request-selected terminal decoder. Missing, null, empty, and `native` all preserve the
+/// provider's built-in decoder byte-for-byte; every other value must be a bounded string id.
+fn requested_decoder_id(
+    advanced: &sceneworks_core::contracts::JsonObject,
+) -> WorkerResult<Option<&str>> {
+    match advanced.get("decoder") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value.trim().is_empty() || value == "native" => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.as_str())),
+        Some(_) => Err(WorkerError::InvalidPayload(
+            "advanced.decoder must be a decoder id string (or 'native')".to_owned(),
+        )),
+    }
+}
+
 /// Dispatch handler for `JobType::ImageGenerate`: generate, save, and stream image
 /// assets through the Rust GPU worker.
 ///
@@ -304,6 +331,40 @@ fn prompt_enhancement_has_reference_input(request: &ImageRequest) -> bool {
         .as_deref()
         .is_some_and(|id| !id.trim().is_empty())
         || !request.reference_asset_ids.is_empty()
+}
+
+/// How many CONDITION IMAGES this request carries, for the declared admission envelope (sc-24112).
+///
+/// The Qwen-Image 2.1 family (`qwen_image_2_1`, `qwen_image_2_1_turbo`) — the routes that declare an
+/// envelope — is priced off the EXACT ordered list its lane renders
+/// ([`qwen_image_2_1_reference_ids`]): the working image, the mask (an ORDINARY reference to this
+/// engine — it has no mask tensor), the plural list and the singular reference, deduped by asset id. Every entry is one reference block of the joint attention
+/// sequence, so counting anything else prices a different request than the one that runs: a
+/// `max` over the carriers priced source + mask + 8 references as 8.
+///
+/// Every other model falls through to the carrier `max` (whichever of the plural list, the
+/// singular `referenceAssetId` or `sourceAssetId` is largest); a model with no declared envelope
+/// never consults this, so it costs nothing on those routes.
+fn reference_image_count(request: &ImageRequest) -> u32 {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    if sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
+        return u32::try_from(qwen_image_2_1_reference_ids(request).len()).unwrap_or(u32::MAX);
+    }
+    let plural = request
+        .reference_asset_ids
+        .iter()
+        .filter(|id| !id.trim().is_empty())
+        .count();
+    let non_blank = |id: &Option<String>| {
+        u32::from(id.as_deref().is_some_and(|value| !value.trim().is_empty()))
+    };
+    u32::try_from(plural)
+        .unwrap_or(u32::MAX)
+        .max(non_blank(&request.reference_asset_id))
+        .max(non_blank(&request.source_asset_id))
 }
 
 fn validate_prompt_enhancement_route(
@@ -425,6 +486,51 @@ pub(crate) async fn run_image_generate_job(
     }
     validate_hires_fix_request(&request)?;
     validate_prompt_enhancement_request(&request, settings)?;
+    // sc-24112: the declared request-geometry envelope, checked ONCE here rather than per lane.
+    // The joint attention sequence a route like `qwen_image_2_1` runs over grows with the reference
+    // count as well as the target area, and no resolution menu can express that — so a request can
+    // satisfy every individual limit and still be outside what the engine can do. This refuses it
+    // with the number; it never resizes the image, drops a reference or lowers the batch. Inert for
+    // every model that declares no envelope, which is all of them but one.
+    if let Some(refusal) = crate::admission_geometry::refuse_over_envelope(
+        &request.model,
+        &request.model_manifest_entry,
+        request.width,
+        request.height,
+        reference_image_count(&request),
+        request.count,
+    ) {
+        return Err(WorkerError::InvalidPayload(refusal));
+    }
+    if let Some(decoder_id) = requested_decoder_id(&request.advanced)? {
+        #[cfg(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ))]
+        {
+            let backend = if cfg!(target_os = "macos") {
+                "mlx"
+            } else {
+                "candle"
+            };
+            let provider_id = sceneworks_core::decoder_support::provider_id_for_backend(
+                &request.model_manifest_entry,
+                backend,
+            )
+            .or_else(|| mlx_model(&request.model).map(|model| model.engine_id().to_owned()))
+            .unwrap_or_else(|| request.model.clone());
+            validate_selected_decoder_request(&provider_id, decoder_id, &request.advanced)?;
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        )))]
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "decoder '{decoder_id}' is unavailable because this worker has no compatible image backend"
+            )));
+        }
+    }
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -449,7 +555,7 @@ pub(crate) async fn run_image_generate_job(
     // the plan so the generation set + streamed `expectedCount` match what lands in
     // the gallery.
     #[cfg(target_os = "macos")]
-    let route = resolve_image_route(&request, settings);
+    let route = prepare_image_route(&request, settings)?;
     // Whether — and from what — every image this job writes embeds its sanitized workflow
     // (sc-15948). Resolved once here so the base write and the inline-upscale write share one
     // answer, and read live off the config dir so flipping the Settings toggle takes effect on the
@@ -459,8 +565,12 @@ pub(crate) async fn run_image_generate_job(
     #[cfg(target_os = "macos")]
     let plan = ImagePlan::with_count_and_adapter(
         &request,
-        route.map_or(request.count, |route| route.image_count(&request, settings)) * upscale_mult,
-        route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request)),
+        route.as_ref().map_or(request.count, |route| {
+            route.kind().image_count(&request, settings)
+        }) * upscale_mult,
+        route
+            .as_ref()
+            .map_or(STUB_ADAPTER, |route| route.kind().adapter_label(&request)),
         workflow_source,
     );
     // Windows/CUDA candle lane: resolve the candle dispatch branch once and bake THAT branch's real
@@ -471,12 +581,16 @@ pub(crate) async fn run_image_generate_job(
     // (sc-5491 InstantID; sc-11171 F-009 strict-pose). `resolve_candle_image_route` returns `None` when
     // candle is disabled, so any other job (or a disabled backend) keeps `request.count`.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let route = resolve_candle_image_route(&request, settings);
+    let route = prepare_candle_image_route(&request, settings)?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let plan = ImagePlan::with_count_and_adapter(
         &request,
-        route.map_or(request.count, |route| route.image_count(&request, settings)) * upscale_mult,
-        route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request)),
+        route.as_ref().map_or(request.count, |route| {
+            route.kind().image_count(&request, settings)
+        }) * upscale_mult,
+        route
+            .as_ref()
+            .map_or(STUB_ADAPTER, |route| route.kind().adapter_label(&request)),
         workflow_source,
     );
     #[cfg(all(
@@ -512,11 +626,15 @@ pub(crate) async fn run_image_generate_job(
         let route_applies_loras = {
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             {
-                route.is_some_and(|route| route.applies_request_loras(&request))
+                route
+                    .as_ref()
+                    .is_some_and(|route| route.kind().applies_request_loras(&request))
             }
             #[cfg(target_os = "macos")]
             {
-                route.is_some_and(ImageRoute::applies_request_loras)
+                route
+                    .as_ref()
+                    .is_some_and(|route| route.kind().applies_request_loras())
             }
         };
         // sc-18477: a request-owned adapter stack is part of the generation contract, not an
@@ -527,8 +645,12 @@ pub(crate) async fn run_image_generate_job(
         // provider load, which makes this guard fail closed for direct worker callers as well as API
         // submissions.
         if !request.loras.is_empty() && !route_applies_loras {
+            // Label with the route KIND, not the prepared route itself: the prepared value carries
+            // pinned load payloads and is deliberately not `Debug`, and the kind is what names the
+            // lane in the refusal anyway.
             let route_label = route
-                .map(|selected| format!("{selected:?}"))
+                .as_ref()
+                .map(|selected| format!("{:?}", selected.kind()))
                 .unwrap_or_else(|| "unavailable".to_owned());
             return Err(WorkerError::InvalidPayload(format!(
                 "{} cannot apply the selected LoRA/LoKr stack through the resolved {} image route; \
@@ -558,13 +680,27 @@ pub(crate) async fn run_image_generate_job(
     )
     .await?;
 
+    // Everything from here to the terminal post is covered by a region heartbeat.
+    //
+    // The routes below each run a pre-load admission pass — provider footprint queries, the tier
+    // ladder's residency probes, decode-quality binding — before they open a generation stream, and
+    // only the stream has a heartbeat of its own (its `select!` interval arm, sc-4276). The pass
+    // between the two posted nothing: on a 33 GB Krea bundle it measured 95 s, and the 90 s stale
+    // sweep marked the job `interrupted` under a healthy worker, which then died on its next
+    // progress POST with `409 ... is already interrupted`.
+    //
+    // Scoped at the dispatch seam rather than inside one route on purpose. Every arm below has the
+    // same pass and would otherwise each have to remember its own pump; overlapping the stream's
+    // interval arm costs nothing, because a heartbeat is an idempotent `last_seen_at` stamp.
+    let preload_heartbeat = crate::progress::HeartbeatPump::start(api, settings, &job.id);
+
     let mut asset_writes: Vec<Value> = Vec::with_capacity(plan.image_count as usize);
 
     // Real in-process MLX inference on macOS for engine-backed models; otherwise the
     // procedural stub (keeps non-macOS + not-yet-ported models working).
     #[cfg(target_os = "macos")]
     let handled = if let Some(route) = route {
-        match route {
+        match route.kind() {
             ImageRoute::ZImageControl => {
                 // Z-Image strict-pose (advanced.poses) → Fun-Controlnet-Union, one image per pose.
                 generate_zimage_control_stream(
@@ -735,15 +871,40 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::CheckpointPlan => {
+                // Plan-driven checkpoint (epic 20398, sc-20634): a persisted ImportPlanV1 resolved
+                // and re-verified before load; provider selected by family/source/operation through
+                // the registry. txt2img, `count` renders each its own seed.
+                let PreparedImageRoute::CheckpointPlan(sources) = route else {
+                    unreachable!("checkpoint plan route missing its prepared sources")
+                };
+                generate_checkpoint_plan_stream(
+                    api,
+                    settings,
+                    job,
+                    *sources,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::KreaImportedControl => {
                 // Imported single-file Krea 2 checkpoint + strict-pose set: the trained pose
                 // control-branch overlay rides the file-loaded imported DiT (the imported twin of
                 // the `KreaControl` arm above), one pose-locked image per pose.
+                let PreparedImageRoute::KreaImportedControl(sources) = route else {
+                    unreachable!("Krea imported-control route missing its prepared sources")
+                };
                 generate_krea_imported_control_stream(
                     api,
                     settings,
                     job,
-                    &plan,
+                    PreparedFileDispatch {
+                        plan: &plan,
+                        sources: *sources,
+                    },
                     &project_path,
                     backend,
                     &mut asset_writes,
@@ -754,11 +915,17 @@ pub(crate) async fn run_image_generate_job(
                 // Imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): pair the
                 // imported DiT with a resident `krea_2` base tier (shared TE/VAE/tokenizer) and load via
                 // the S0b MLX native single-file entrypoint. txt2img, `count` renders each its own seed.
+                let PreparedImageRoute::KreaImported(sources) = route else {
+                    unreachable!("Krea imported route missing its prepared sources")
+                };
                 generate_krea_imported_stream(
                     api,
                     settings,
                     job,
-                    &plan,
+                    PreparedFileDispatch {
+                        plan: &plan,
+                        sources: *sources,
+                    },
                     &project_path,
                     backend,
                     &mut asset_writes,
@@ -769,10 +936,14 @@ pub(crate) async fn run_image_generate_job(
                 // A full base fine-tune's own checkpoint (sc-15036): pair the trained transformer
                 // with the installed Mage-Flow base's shared text encoder + VAE and render through
                 // `load_finetuned`. txt2img, `count` renders each its own seed.
+                let PreparedImageRoute::MageFinetuned(transformer) = route else {
+                    unreachable!("Mage fine-tuned route missing its prepared transformer")
+                };
                 generate_mage_finetuned_stream(
                     api,
                     settings,
                     job,
+                    *transformer,
                     &plan,
                     &project_path,
                     backend,
@@ -781,11 +952,17 @@ pub(crate) async fn run_image_generate_job(
                 .await?;
             }
             ImageRoute::SdxlImported => {
+                let PreparedImageRoute::SdxlImported(sources) = route else {
+                    unreachable!("SDXL imported route missing its prepared sources")
+                };
                 generate_sdxl_imported_stream(
                     api,
                     settings,
                     job,
-                    &plan,
+                    PreparedFileDispatch {
+                        plan: &plan,
+                        sources: *sources,
+                    },
                     &project_path,
                     backend,
                     &mut asset_writes,
@@ -796,6 +973,18 @@ pub(crate) async fn run_image_generate_job(
                 // InstantID identity-preserving character image (sc-3345): single identity or
                 // grouped angle/pose sets, on RealVisXL + IdentityNet + the native face stack.
                 generate_instantid_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
+            ImageRoute::SdxlControl => {
+                generate_sdxl_control_stream(
                     api,
                     settings,
                     job,
@@ -862,6 +1051,13 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::FluxIpAdapterPoseReject => {
+                return Err(WorkerError::InvalidPayload(
+                    "FLUX.1 IP-Adapter reference conditioning cannot be combined with strict pose control; \
+                     this backend has separate IP-Adapter and ControlNet providers, so refusing rather \
+                     than silently dropping either requested conditioning".to_owned(),
+                ));
+            }
             ImageRoute::PoseControlBaseMissing => {
                 // A strict-pose job on a WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
                 // base/overlay snapshot is NOT installed (its `…_control_available` weight-gate failed, so
@@ -876,14 +1072,13 @@ pub(crate) async fn run_image_generate_job(
                 )));
             }
             ImageRoute::PoseReject => {
-                // No-silent-T2I (sc-5968): a strict-pose job on an MLX model with NO pose-control lane
-                // (e.g. a plain `sdxl` pose job with no reference — SDXL identity-pose ships via InstantID /
-                // IP-Adapter) that `mlx_available` would otherwise render as plain txt2img, dropping the
-                // poses. Refuse loudly — the MLX twin of the candle `PoseReject` reject.
+                // No-silent-T2I (sc-5968): control intent on an MLX model with NO pose-control lane
+                // that `mlx_available` would otherwise render as plain txt2img, dropping the intent.
+                // Refuse loudly — the MLX twin of the candle `PoseReject` reject.
                 return Err(WorkerError::InvalidPayload(format!(
-                    "strict pose (advanced.poses) is not supported for model '{}' on the MLX backend — \
-                     refusing rather than silently generating an unconditioned image (wired MLX pose \
-                     families: {}; SDXL identity-pose runs via InstantID)",
+                    "control intent (advanced.poses/controlMode/controlImage/controlWeights) is not supported for model '{}' on the MLX backend — \
+                     refusing rather than silently generating an unconditioned image (wired MLX control \
+                     families: {})",
                     request.model,
                     WIRED_MLX_POSE_FAMILIES.join(", ")
                 )));
@@ -914,11 +1109,23 @@ pub(crate) async fn run_image_generate_job(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let handled = match route {
         Some(route) => {
-            match route {
+            match route.kind() {
                 // InstantID (sc-5491, epic 5480): the candle InstantID provider's bespoke path (the
                 // off-Mac sibling of the macOS `ImageRoute::InstantId` arm).
                 CandleImageRoute::InstantId => {
                     generate_instantid_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                CandleImageRoute::SdxlControl => {
+                    generate_sdxl_control_stream(
                         api,
                         settings,
                         job,
@@ -993,11 +1200,17 @@ pub(crate) async fn run_image_generate_job(
                 // forwarded row carries the DiT/TE/VAE component paths — render the user's ComfyUI weights
                 // in place via `runtime_cuda::providers::z_image::load_from_comfyui_components`.
                 CandleImageRoute::ZimageComfyui => {
+                    let PreparedCandleImageRoute::ZimageComfyui(sources) = route else {
+                        unreachable!("Z-Image ComfyUI route missing its prepared sources")
+                    };
                     generate_candle_zimage_comfyui_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
@@ -1005,11 +1218,17 @@ pub(crate) async fn run_image_generate_job(
                     .await?;
                 }
                 CandleImageRoute::QwenImageComfyui => {
+                    let PreparedCandleImageRoute::QwenImageComfyui(sources) = route else {
+                        unreachable!("Qwen ComfyUI route missing its prepared sources")
+                    };
                     generate_candle_qwen_comfyui_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
@@ -1021,11 +1240,17 @@ pub(crate) async fn run_image_generate_job(
                 // weights in place via `runtime_cuda::providers::flux2::load_from_comfyui_dit` (inline-scale fp8 dequant
                 // + BFL→diffusers remap; TE/VAE/tokenizer from a resident FLUX.2-dev snapshot).
                 CandleImageRoute::Flux2Comfyui => {
+                    let PreparedCandleImageRoute::Flux2Comfyui(sources) = route else {
+                        unreachable!("FLUX.2 ComfyUI route missing its prepared sources")
+                    };
                     generate_candle_flux2_comfyui_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
@@ -1129,6 +1354,11 @@ pub(crate) async fn run_image_generate_job(
                         &mut asset_writes,
                     )
                     .await?;
+                }
+                CandleImageRoute::KolorsCompositeReject => {
+                    return Err(WorkerError::InvalidPayload(
+                        "Kolors Candle does not compose IP-Adapter identity with pose ControlNet or PiD; refusing the crossed request before model load".to_owned(),
+                    ));
                 }
                 // Z-Image strict-pose Fun-ControlNet (sc-5489).
                 CandleImageRoute::ZimageControl => {
@@ -1243,11 +1473,17 @@ pub(crate) async fn run_image_generate_job(
                 // entrypoint. The resolver has already proved this is a non-builtin, single-file,
                 // unconditioned request; keep it distinct from the builtin registry path.
                 CandleImageRoute::KreaImported => {
+                    let PreparedCandleImageRoute::KreaImported(sources) = route else {
+                        unreachable!("Krea imported route missing its prepared sources")
+                    };
                     generate_krea_imported_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
@@ -1266,11 +1502,31 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
+                CandleImageRoute::CheckpointPlan => {
+                    let PreparedCandleImageRoute::CheckpointPlan(sources) = route else {
+                        unreachable!("checkpoint plan route missing its prepared sources")
+                    };
+                    generate_checkpoint_plan_stream(
+                        api,
+                        settings,
+                        job,
+                        *sources,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
                 CandleImageRoute::MageFinetuned => {
+                    let PreparedCandleImageRoute::MageFinetuned(transformer) = route else {
+                        unreachable!("Mage fine-tuned route missing its prepared transformer")
+                    };
                     generate_mage_finetuned_stream(
                         api,
                         settings,
                         job,
+                        *transformer,
                         &plan,
                         &project_path,
                         backend,
@@ -1279,30 +1535,42 @@ pub(crate) async fn run_image_generate_job(
                     .await?;
                 }
                 CandleImageRoute::SdxlImported => {
+                    let PreparedCandleImageRoute::SdxlImported(sources) = route else {
+                        unreachable!("SDXL imported route missing its prepared sources")
+                    };
                     generate_sdxl_imported_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
                     )
                     .await?;
                 }
-                // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane (e.g.
-                // sdxl) must be REJECTED with a clear error, not silently rendered as plain txt2img (poses
-                // dropped) and not rerouted. The candle worker CLAIMS these (jobs_store
-                // `image_job_candle_pose_reject`) precisely to fail them loudly here. SDXL identity-pose
-                // ships via InstantID; the wired candle pose families are `WIRED_CANDLE_POSE_FAMILIES`.
+                // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane must be
+                // REJECTED with a clear error, not silently rendered as plain txt2img (poses dropped) and
+                // not rerouted. The candle worker CLAIMS these (jobs_store `image_job_candle_pose_reject`)
+                // precisely to fail them loudly here.
                 CandleImageRoute::PoseReject => {
                     return Err(WorkerError::InvalidPayload(format!(
-                        "strict pose (advanced.poses) is not supported for model '{}' on the candle backend — \
-                         refusing rather than silently generating an unconditioned image (wired candle pose \
-                         families: {}; SDXL identity-pose runs via InstantID)",
+                        "control intent (advanced.poses/controlMode/controlImage/controlWeights) is not supported for model '{}' on the candle backend — \
+                         refusing rather than silently generating an unconditioned image (wired candle control \
+                         families: {})",
                         request.model,
                         WIRED_CANDLE_POSE_FAMILIES.join(", ")
                     )));
+                }
+                CandleImageRoute::FluxIpAdapterPoseReject => {
+                    return Err(WorkerError::InvalidPayload(
+                        "FLUX.1 IP-Adapter reference conditioning cannot be combined with strict pose control; \
+                         this backend has separate IP-Adapter and ControlNet providers, so refusing rather \
+                         than silently dropping either requested conditioning".to_owned(),
+                    ));
                 }
                 // No-silent-T2I (sc-11171, F-008): a strict-pose job on a WIRED candle pose family whose
                 // control base snapshot is NOT installed (the family's `…_control_available` weight-gate
@@ -1322,6 +1590,7 @@ pub(crate) async fn run_image_generate_job(
                 // an edit without its required source can never fall through as plain T2I; both variants
                 // use the same generic stream once their request shapes are resolved.
                 CandleImageRoute::MageEdit
+                | CandleImageRoute::QwenImage21Edit
                 | CandleImageRoute::SenseNovaEdit
                 | CandleImageRoute::KolorsEdit
                 | CandleImageRoute::CandleTxt2Img => {
@@ -1358,6 +1627,20 @@ pub(crate) async fn run_image_generate_job(
     #[cfg(target_os = "macos")]
     if !handled {
         if let Some(gap) = mlx_weights_gap(&request, settings) {
+            return Err(WorkerError::InvalidPayload(gap));
+        }
+    }
+
+    // The candle twin of the gate above (sc-20529). An `edit_image` job on an UNCONVERTED
+    // convert-at-install model is claimed by no candle route at all — every `…_available` edit gate
+    // collapses the resolver's typed `Err` to `false`, and each terminal ladder arm excludes
+    // `mode == "edit_image"` — so it arrived here and completed with procedural stub output instead
+    // of the actionable "convert it first" refusal the t2i lanes already raise. Fail loudly with the
+    // SAME preflight message (sc-5099 no-silent-fallback). `None` for every other job, so ordinary
+    // stub models still stub.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if !handled {
+        if let Some(gap) = candle_weights_gap(&request) {
             return Err(WorkerError::InvalidPayload(gap));
         }
     }
@@ -1402,6 +1685,37 @@ pub(crate) async fn run_image_generate_job(
         .await?;
     }
 
+    // Explicitly, and BEFORE the terminal post. A pump tick that lands after the job completes is
+    // a no-op on the job row (the heartbeat's job update is scoped to the owning worker), but it
+    // would still write `busy` + this job id back onto the WORKER row — racing the loop's own Idle
+    // heartbeat and briefly advertising a worker that is free as occupied.
+    //
+    // NARROWS that race rather than closing it: `Drop` aborts the pump task, which cannot recall a
+    // POST already on the wire. One in-flight request can still land after the terminal write. The
+    // loop's next Idle heartbeat (one progress interval, ≤15s) corrects the worker row, and the job
+    // row was never at risk, so the residue is a worker that reads busy for at most that interval.
+    // Closing it outright would need the pump to await its in-flight request, which would put a
+    // network round-trip in front of every job's terminal post to fix a self-correcting cosmetic
+    // window.
+    drop(preload_heartbeat);
+
+    // A render's non-fatal engine warnings (sc-25681, e.g. Iris's `caption_truncated`) are on each
+    // asset's provenance; the completion message names them too, so the user sees them on the job
+    // without opening an asset.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    let warnings = lane_controls::job_warning_messages(&asset_writes);
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    let warnings: Vec<String> = Vec::new();
+    let mut message = format!("Generated {} image(s).", plan.image_count);
+    if !warnings.is_empty() {
+        message.push_str(&format!(" Warning: {}", warnings.join(" ")));
+    }
     update_job(
         api,
         &job.id,
@@ -1409,7 +1723,7 @@ pub(crate) async fn run_image_generate_job(
             JobStatus::Completed,
             ProgressStage::Completed,
             1.0,
-            &format!("Generated {} image(s).", plan.image_count),
+            &message,
             Some(streaming_result(&plan, &asset_writes)),
             backend,
         ),
@@ -1654,6 +1968,34 @@ fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathB
     Ok(file)
 }
 
+/// Resolve and pin the exact adapter entry inference will load. Directory-valued imports are first
+/// confined as directories, then their selected child is independently pinned and confined so a
+/// child symlink cannot inherit trust from its parent.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_prepared_adapter_file(
+    lora: &Value,
+    settings: &Settings,
+) -> WorkerResult<gen_core::PinnedWeightsFile> {
+    let raw = lora_path(lora)
+        .ok_or_else(|| WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned()))?;
+    let confined = crate::normalize_app_managed_lora_path(settings, &raw)?;
+    let candidate = if confined.is_dir() {
+        let directory = confined;
+        crate::resolve_adapter_in_dir(&directory, declared_adapter_file(lora)).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "LoRA has no .safetensors under {}",
+                directory.display()
+            ))
+        })?
+    } else {
+        raw
+    };
+    crate::paths::pin_app_managed_model_file(settings, &candidate, "LoRA file")
+}
+
 /// The exact weight parser used by every adapter lane and by the gallery attribution renderer.
 #[cfg(any(
     target_os = "macos",
@@ -1667,7 +2009,10 @@ fn lora_weight(lora: &Value) -> f64 {
                 .as_f64()
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
-        .unwrap_or(0.8)
+        // Last resort only — the API always stamps a weight onto the spec. Matches the API/web
+        // default (`DEFAULT_LORA_WEIGHT`) so a weightless payload can't apply at a scale no
+        // surface would have shown.
+        .unwrap_or(1.0)
 }
 
 #[cfg(any(
@@ -2140,6 +2485,67 @@ pub(crate) fn standalone_upscale_workflow_share(
     )
 }
 
+/// The workflow envelope for a standalone Iris restoration (`image_upscale` with `engine: "iris"`,
+/// sc-25683). The same rule as [`standalone_upscale_workflow_share`] — the pass is a distinct job, so
+/// nothing is inherited from whatever generated the source — with the Iris controls in place of the
+/// factor: the APPLIED scale, input sizing and colour fix the engine ran (`plan`), never the requested
+/// ones. Geometry is the SOURCE image's, so the recipe reads "this image, restored at N×".
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn standalone_restore_workflow_share(
+    job_payload: &JsonObject,
+    plan: &gen_core::iris::restoration::RestorationPlan,
+    trained_model: Option<&str>,
+) -> Option<sceneworks_core::workflow_share::WorkflowShare> {
+    let mut overlay = job_payload.clone();
+    overlay.insert(
+        "upscale".to_owned(),
+        iris_upscale_overlay(plan, trained_model),
+    );
+    embeddable_workflow_share(
+        &WorkflowAssetFacts {
+            mode: "image_upscale".to_owned(),
+            model: trained_model
+                .unwrap_or(crate::iris_restore::IRIS_RESTORE_MODEL_ID)
+                .to_owned(),
+            prompt: String::new(),
+            negative_prompt: String::new(),
+            seed: 0,
+            width: Some(plan.source.width),
+            height: Some(plan.source.height),
+        },
+        &overlay,
+    )
+}
+
+/// The envelope's `upscale` record for an applied Iris restoration: exactly the reopenable controls
+/// (incl. `irisModel` when a trained restoration model ran).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn iris_upscale_overlay(
+    plan: &gen_core::iris::restoration::RestorationPlan,
+    trained_model: Option<&str>,
+) -> Value {
+    let mut overlay = json!({
+        "enabled": true,
+        "engine": sceneworks_core::image_restoration::IRIS_RESTORE_ENGINE,
+        "scale": plan.scale,
+        "inputSizing": match plan.input_sizing {
+            gen_core::InputSizing::Budgeted => "budgeted",
+            gen_core::InputSizing::Original => "original",
+        },
+        "colorFix": plan.color_fix,
+    });
+    if let Some(model) = trained_model {
+        overlay[sceneworks_core::image_restoration::IRIS_MODEL_KEY] = json!(model);
+    }
+    overlay
+}
+
 impl ImagePlan {
     /// Test-only convenience: a plan whose image count is the request count, embedding nothing.
     /// Production always goes through [`ImagePlan::with_count`] (the FLUX.2 angle/pose sets need an
@@ -2241,8 +2647,151 @@ fn resolved_sampler_for_share<'a>(adapter: &str, raw_settings: &'a JsonObject) -
         .filter(|sampler| matches!(*sampler, "euler"))
 }
 
-/// Save image `index` (its RGB8 `pixels`) under `assets/images/` and return the flat
-/// fact the API turns into an indexed asset (every key here is consumed by
+/// The engine's flat pixel buffer, typed by the channel count it actually carries (sc-24111).
+///
+/// `write_image_asset` used to call `image::RgbImage::from_raw(width, height, pixels)` directly,
+/// and since it is the one funnel EVERY generated image asset is written through, that single
+/// constructor decided that no image job in the app could ever emit an RGBA PNG. Widening
+/// `workflow_png::write_workflow_chunk` to accept alpha was necessary and not sufficient: the
+/// buffer never got that far with four channels.
+///
+/// The mapping is keyed on the buffer's channel count, derived from its own length, and on nothing
+/// else. Not on the model id: the inference half of this story makes `qwen_image_2_1` emit a
+/// 4-channel `Image` when transparency is requested, and the next model to do so must work here
+/// without a second edit. A buffer whose length is not an exact 3- or 4-channel multiple of the
+/// declared geometry is a typed refusal rather than a silent reinterpretation — the old code's
+/// `from_raw` returning `None` was the same decision for 3 channels only, and a 4-channel buffer
+/// used to fail it as "size mismatch" when it was in fact perfectly well formed.
+pub(crate) enum GeneratedPixels {
+    /// 8-bit RGB. Every lane before sc-24111, byte-identical.
+    Rgb(image::RgbImage),
+    /// 8-bit RGBA. Native transparency, written straight through to the PNG.
+    Rgba(image::RgbaImage),
+}
+
+impl GeneratedPixels {
+    /// Type an engine buffer by its channel count, or refuse it by name.
+    pub(crate) fn from_engine_buffer(
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    ) -> WorkerResult<Self> {
+        let geometry = (width as usize)
+            .checked_mul(height as usize)
+            .filter(|count| *count > 0)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "image buffer geometry is degenerate: {width}x{height}"
+                ))
+            })?;
+        let channels = if pixels.len().is_multiple_of(geometry) {
+            pixels.len() / geometry
+        } else {
+            0
+        };
+        match channels {
+            3 => image::RgbImage::from_raw(width, height, pixels)
+                .map(Self::Rgb)
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload("image buffer size mismatch".to_owned())
+                }),
+            4 => image::RgbaImage::from_raw(width, height, pixels)
+                .map(Self::Rgba)
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload("image buffer size mismatch".to_owned())
+                }),
+            _ => Err(WorkerError::InvalidPayload(format!(
+                "image buffer of {} bytes is neither 3- nor 4-channel at {width}x{height}",
+                pixels.len()
+            ))),
+        }
+    }
+
+    pub(crate) fn as_workflow_image(&self) -> sceneworks_core::workflow_png::WorkflowImage<'_> {
+        match self {
+            Self::Rgb(image) => image.into(),
+            Self::Rgba(image) => image.into(),
+        }
+    }
+}
+
+/// Split a decoded source into the 3-channel buffer the post-pass engines accept and the alpha
+/// plane they cannot see (sc-24111).
+///
+/// Real-ESRGAN's ONNX export is `(1, 3, H, W)` and SeedVR2 returns a 3-channel `GenerationOutput`;
+/// the SDXL tile refiner takes the same flat 3-channel `gen_core::Image`. None of them can be
+/// handed an alpha channel, and widening them is not this repo's call. So the plane travels
+/// AROUND the model: split here, resampled and re-attached by [`reattach_alpha`] after the pass.
+///
+/// `None` for a source that has no alpha, which keeps every pre-sc-24111 render on exactly the
+/// path it was on — the `Rgb` arm of [`GeneratedPixels`], byte-identical output.
+// Every caller (upscale, detail refine, the reference alpha reader) is a backend lane, so a
+// no-backend build compiles this only for its tests.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn split_alpha(
+    decoded: &image::DynamicImage,
+) -> (image::RgbImage, Option<image::GrayImage>) {
+    let rgb = decoded.to_rgb8();
+    if !decoded.color().has_alpha() {
+        return (rgb, None);
+    }
+    let rgba = decoded.to_rgba8();
+    let (width, height) = (rgba.width(), rgba.height());
+    let alpha = image::GrayImage::from_fn(width, height, |x, y| {
+        image::Luma([rgba.get_pixel(x, y).0[3]])
+    });
+    (rgb, Some(alpha))
+}
+
+/// Re-attach a split alpha plane to a post-pass result, resampling it to the result's geometry.
+///
+/// Two regimes, and the distinction matters:
+///
+/// * **Same geometry** (the detail refiner, which refines in place) — the plane is attached
+///   verbatim, so the source's alpha survives exactly, soft edges included. No resampler touches
+///   it, so there is nothing to round.
+/// * **Scaled geometry** (upscale) — bilinear (`Triangle`). Nearest would stair-step every soft
+///   edge at 2x/4x, which is precisely the edge quality an upscale exists to improve; bilinear on
+///   the plane matches what the model is doing to the colour beside it. A fully transparent or
+///   fully opaque REGION stays fully transparent or opaque because bilinear is interpolating
+///   between equal values there; only the ramp is resampled.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn reattach_alpha(
+    rgb: image::RgbImage,
+    alpha: Option<&image::GrayImage>,
+) -> GeneratedPixels {
+    let Some(alpha) = alpha else {
+        return GeneratedPixels::Rgb(rgb);
+    };
+    let (width, height) = (rgb.width(), rgb.height());
+    let scaled;
+    let alpha = if alpha.dimensions() == (width, height) {
+        alpha
+    } else {
+        scaled =
+            image::imageops::resize(alpha, width, height, image::imageops::FilterType::Triangle);
+        &scaled
+    };
+    GeneratedPixels::Rgba(image::RgbaImage::from_fn(width, height, |x, y| {
+        let source = rgb.get_pixel(x, y).0;
+        image::Rgba([source[0], source[1], source[2], alpha.get_pixel(x, y).0[0]])
+    }))
+}
+
+/// `rawAdapterSettings` key of a native prompt batch's full prompt list (sc-25681), recorded on
+/// every image of the batch so reopening any one restores the batch.
+pub(crate) const PROMPT_BATCH_KEY: &str = "promptBatch";
+
+/// Save image `index` (its engine `pixels`, 3- or 4-channel) under `assets/images/` and return the
+/// flat fact the API turns into an indexed asset (every key here is consumed by
 /// `build_image_sidecar_parts`). Shared by the stub and real paths.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_image_asset(
@@ -2253,12 +2802,66 @@ pub(crate) fn write_image_asset(
     height: u32,
     pixels: Vec<u8>,
     adapter: &str,
-    raw_settings: JsonObject,
+    mut raw_settings: JsonObject,
     project_path: &Path,
 ) -> WorkerResult<JsonObject> {
     let request = &plan.request;
-    let rgb_image = image::RgbImage::from_raw(width, height, pixels)
-        .ok_or_else(|| WorkerError::InvalidPayload("image buffer size mismatch".to_owned()))?;
+    // The three checkpoint facts (sc-21484, epic 11037), stamped here because EVERY generated image
+    // asset funnels through this one function — so the source codec a checkpoint stores, the host's
+    // native-execution capability, and what the load actually materialized reach the receipt from
+    // every lane rather than only the two that happen to build them themselves.
+    //
+    // A lane that already assembled its own set keeps it: `krea_imported` resolves the DiT path and
+    // can therefore tie the facts to a source BINDING, which is strictly more than this site can
+    // state. Never overwrite a richer fact set with a poorer one.
+    //
+    // Nothing is inserted at all when the model carries no verified source classification. That
+    // absence is the honest answer for a builtin turnkey tier and a diffusers-tree import, and it
+    // is the one a consumer must handle anyway — filling it from `advanced.quantTier` would put the
+    // requested TIER into a field that means the stored CODEC.
+    if !raw_settings.contains_key(crate::checkpoint_weight_facts_host::FACTS_RAW_SETTINGS_KEY) {
+        crate::checkpoint_weight_facts_host::insert_facts_into_raw_settings(
+            &mut raw_settings,
+            crate::checkpoint_weight_facts_host::imported_checkpoint_facts(
+                &request.model_manifest_entry,
+                None,
+                crate::checkpoint_weight_facts_host::materialization_from_runtime(None),
+            )
+            .as_ref(),
+        );
+    }
+    // sc-24113 — the transparency request, resolved and recorded at the one funnel every generated
+    // image passes through.
+    //
+    // Two things happen here and they are deliberately separate:
+    //
+    //  1. RESOLVE + REFUSE. `resolve_output_channels` turns the user's toggle into a channel count,
+    //     and refuses by name when the model cannot emit alpha at all. Doing it at the funnel means
+    //     no lane can add a transparency path that skips the check.
+    //  2. ROUND-TRIP. The resolved count is stamped into `raw_settings`, so the workflow PNG and the
+    //     recipe carry what was ASKED FOR — which is what makes a re-run reproduce a cut-out rather
+    //     than quietly re-rendering it opaque.
+    //
+    // The ENGINE side of the request is assigned in the generic lane (`LaneRgbaSurface`), which
+    // puts `OutputChannels::Rgba` on the request and receives `GenerationOutput::ImagesRgba`; the
+    // egress below is channel-driven — `from_engine_buffer` types whatever arrives — so those four
+    // channels become an RGBA PNG with no second decision here. The count is deliberately not
+    // compared against the buffer: the stub render (no weights installed) is always three-channel.
+    let requested_channels =
+        crate::qwen_alpha::resolve_output_channels(&request.model, &request.advanced)?;
+    crate::qwen_alpha::record_requested_channels(&mut raw_settings, requested_channels);
+    // A native prompt batch (sc-25681): THIS image's prompt is `prompts[index % len]`, and the
+    // whole list is recorded (worker-owned — a replayed `advanced` can never forge it) so the
+    // studio reopens the batch, not just this one prompt.
+    let prompt = request.image_prompt(index).to_owned();
+    raw_settings.remove(PROMPT_BATCH_KEY);
+    if !request.prompts.is_empty() {
+        raw_settings.insert(PROMPT_BATCH_KEY.to_owned(), json!(request.prompts));
+    }
+
+    // Typed by the engine's channel count, not assumed to be three (sc-24111). See
+    // `GeneratedPixels` for why this is the load-bearing line rather than the writer below.
+    let generated = GeneratedPixels::from_engine_buffer(width, height, pixels)?;
 
     // Sanitize the payload-supplied model id before it becomes a path component: it
     // arrives verbatim from the untrusted job payload, and a `../` / `\` / absolute id
@@ -2287,7 +2890,7 @@ pub(crate) fn write_image_asset(
             &WorkflowAssetFacts {
                 mode: request.mode.clone(),
                 model: request.model.clone(),
-                prompt: request.prompt.clone(),
+                prompt: prompt.clone(),
                 negative_prompt: request.negative_prompt.clone(),
                 // THIS image's seed, not the batch base the payload carries.
                 seed,
@@ -2319,13 +2922,13 @@ pub(crate) fn write_image_asset(
         share.upscale = None;
         Some(share)
     });
-    write_workflow_chunk(&rgb_image, &temp_path, share.as_ref())
+    write_workflow_chunk(generated.as_workflow_image(), &temp_path, share.as_ref())
         .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
     std::fs::rename(&temp_path, &media_path).inspect_err(|_| {
         let _ = std::fs::remove_file(&temp_path);
     })?;
 
-    let title: String = request.prompt.chars().take(56).collect();
+    let title: String = prompt.chars().take(56).collect();
     let title = title.trim();
     let display_name = format!(
         "{} #{}",
@@ -2369,7 +2972,7 @@ pub(crate) fn write_image_asset(
         "mode": request.mode,
         "model": request.model,
         "adapter": adapter,
-        "prompt": request.prompt,
+        "prompt": prompt,
         "negativePrompt": request.negative_prompt,
         "loras": request.loras,
         "stylePreset": request.style_preset,
@@ -2416,6 +3019,20 @@ async fn apply_inline_upscale(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    // Iris restoration (sc-25683) is sized by `scale`, not `factor`, and runs as a transform.
+    if request.upscale.is_iris() {
+        return apply_inline_iris_restore(
+            api,
+            settings,
+            job,
+            plan,
+            project_path,
+            backend,
+            asset_writes,
+            crate::iris_restore::registry_transform_loader,
+        )
+        .await;
+    }
     let factor: u8 = if request.upscale.factor == 4 { 4 } else { 2 };
     let engine_id = normalize_upscale_engine(&request.upscale.engine);
     let softness = request.upscale.softness();
@@ -2444,14 +3061,16 @@ async fn apply_inline_upscale(
             })?;
         // Decode the base image off the async runtime thread (sc-8909 / F-107).
         let source_path = project_path.join(media_rel);
-        let source = tokio::task::spawn_blocking(move || {
+        // The base render may carry native transparency (sc-24111). The engine only takes three
+        // channels, so the alpha plane is split off here and re-attached at the write below.
+        let (source, source_alpha) = tokio::task::spawn_blocking(move || {
             crate::image_decode::decode_image_any(source_path)
                 .map_err(|error| {
                     WorkerError::InvalidPayload(format!(
                         "Upscale source could not be loaded: {error}"
                     ))
                 })
-                .map(|decoded| decoded.to_rgb8())
+                .map(|decoded| split_alpha(&decoded))
         })
         .await
         .map_err(|error| crate::task_join_error("upscale source decode task", error))??;
@@ -2499,14 +3118,140 @@ async fn apply_inline_upscale(
                 &plan_for_task,
                 &base_fact_for_task,
                 &upscaled,
+                source_alpha.as_ref(),
                 &engine_for_task,
                 factor,
                 softness,
+                None,
                 &project_path_for_task,
             )
         })
         .await
         .map_err(|error| crate::task_join_error("upscaled asset write task", error))??;
+        asset_writes.push(Value::Object(fact));
+        heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    }
+    Ok(())
+}
+
+/// The Image Studio inline post-processing pass with the Iris restoration engine (sc-25683): restore
+/// every base image the generation produced into a second, lineage-linked asset. Same placement and
+/// lifetime as the other engines' inline pass (the base images are already streamed, so they persist
+/// if a late restore refuses or is canceled; a canceled restore writes nothing for its image).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_inline_iris_restore(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+    loader: crate::iris_restore::TransformLoader,
+) -> WorkerResult<()> {
+    let params = plan
+        .request
+        .upscale
+        .iris_params()
+        .map_err(|error| WorkerError::InvalidPayload(format!("upscale: {error}")))?;
+    let trained_model = sceneworks_core::image_restoration::parse_iris_restore_model(
+        &plan.request.upscale.iris_controls(),
+    )
+    .map_err(|error| WorkerError::InvalidPayload(format!("upscale: {error}")))?;
+    let base_facts: Vec<JsonObject> = asset_writes
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|fact| fact.get("type").and_then(Value::as_str) == Some("image"))
+        .cloned()
+        .collect();
+    let total_images = base_facts.len();
+
+    for (i, base_fact) in base_facts.iter().enumerate() {
+        check_cancel(api, &job.id, "Iris restoration canceled by user.").await?;
+        let media_rel = base_fact
+            .get("mediaPath")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("restoration source asset missing mediaPath".to_owned())
+            })?;
+        let source_path = project_path.join(media_rel);
+        let (source, source_alpha) = tokio::task::spawn_blocking(move || {
+            crate::iris_restore::decode_oriented(&source_path)
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "Restoration source could not be loaded: {error}"
+                    ))
+                })
+                .map(|decoded| split_alpha(&decoded))
+        })
+        .await
+        .map_err(|error| crate::task_join_error("restoration source decode task", error))??;
+
+        let streaming = streaming_result(plan, asset_writes);
+        let backend_label = backend.to_owned();
+        let index = i + 1;
+        update_job(
+            api,
+            &job.id,
+            image_progress(
+                JobStatus::Running,
+                ProgressStage::Running,
+                0.9,
+                &format!("Restoring image {index}/{total_images} with Iris."),
+                Some(streaming.clone()),
+                backend,
+            ),
+        )
+        .await?;
+        let outcome = crate::upscale_jobs::restore_with_progress(
+            api,
+            settings,
+            &job.id,
+            loader,
+            source,
+            params,
+            trained_model.clone(),
+            move |current, total| {
+                image_progress(
+                    JobStatus::Running,
+                    ProgressStage::Running,
+                    0.9,
+                    &format!(
+                        "Restoring image {index}/{total_images} with Iris: tile {current}/{total}."
+                    ),
+                    Some(streaming.clone()),
+                    &backend_label,
+                )
+            },
+        )
+        .await?;
+        // A cancel requested after the last per-tile reply trips no flag; re-check the job before
+        // writing the restored variant so a canceled pass publishes nothing new.
+        check_cancel(api, &job.id, "Iris restoration canceled by user.").await?;
+
+        let plan_for_task = plan.clone();
+        let base_fact_for_task = base_fact.clone();
+        let project_path_for_task = project_path.to_owned();
+        let trained_model_for_task = trained_model.clone();
+        let fact = tokio::task::spawn_blocking(move || {
+            write_upscaled_asset(
+                &plan_for_task,
+                &base_fact_for_task,
+                &outcome.image,
+                source_alpha.as_ref(),
+                sceneworks_core::image_restoration::IRIS_RESTORE_ENGINE,
+                0,
+                0.0,
+                Some((&outcome.plan, trained_model_for_task.as_deref())),
+                &project_path_for_task,
+            )
+        })
+        .await
+        .map_err(|error| crate::task_join_error("restored asset write task", error))??;
         asset_writes.push(Value::Object(fact));
         heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     }
@@ -2520,24 +3265,40 @@ async fn apply_inline_upscale(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+#[allow(clippy::too_many_arguments)]
 fn write_upscaled_asset(
     plan: &ImagePlan,
     base_fact: &JsonObject,
     upscaled: &image::RgbImage,
+    // The base render's alpha plane, split off before the engine (sc-24111). `None` for an
+    // opaque source, which keeps the write byte-identical to what it always was.
+    source_alpha: Option<&image::GrayImage>,
     engine_id: &str,
     factor: u8,
     softness: f32,
+    // The applied Iris restoration plan (sc-25683) when the pass was the `iris` engine — it sizes by
+    // `scale`, so `factor`/`softness` are unused and the record/name/lineage carry the plan instead —
+    // with the trained restoration model it ran, if any (sc-25688).
+    iris: Option<(&gen_core::iris::restoration::RestorationPlan, Option<&str>)>,
     project_path: &Path,
 ) -> WorkerResult<JsonObject> {
     let request = &plan.request;
     let index = base_fact.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
     let (width, height) = (upscaled.width(), upscaled.height());
+    let (iris, iris_model) = match iris {
+        Some((iris, model)) => (Some(iris), model),
+        None => (None, None),
+    };
+    let size_tag = match iris {
+        Some(iris) => crate::iris_restore::file_tag(iris),
+        None => format!("up{factor}x"),
+    };
 
     // Sanitize the untrusted model id before it becomes a path component (F-003 / sc-11159),
     // mirroring `write_image_asset` so the upscaled variant is confined identically.
     let model_slug = slugify(&request.model, "model", None);
     let filename = format!(
-        "{}_{}_{}_{:04}_up{factor}x.png",
+        "{}_{}_{}_{:04}_{size_tag}.png",
         &plan.created_at[..10],
         model_slug,
         plan.slug,
@@ -2551,10 +3312,18 @@ fn write_upscaled_asset(
     // The APPLIED pass, not the requested one. Hoisted above the write because two things now read
     // it: the embedded workflow (sc-15948) and the `rawAdapterSettings.upscale` record below, and a
     // shared image must not describe a different pass from the one the sidecar records.
-    let upscale_record = if engine_id == "seedvr2" {
+    let upscale_record = if let Some(iris) = iris {
+        crate::iris_restore::applied_settings_record(iris, iris_model)
+    } else if engine_id == "seedvr2" {
         json!({ "enabled": true, "engine": engine_id, "factor": factor, "softness": softness })
     } else {
         json!({ "enabled": true, "engine": engine_id, "factor": factor })
+    };
+    // The envelope carries the reopenable controls only (the record's plan/dimension facts are
+    // sidecar observability, not a recipe).
+    let envelope_record = match iris {
+        Some(iris) => iris_upscale_overlay(iris, iris_model),
+        None => upscale_record.clone(),
     };
 
     let temp_path = media_path.with_extension("tmp.png");
@@ -2563,12 +3332,14 @@ fn write_upscaled_asset(
     let mut share = plan
         .workflow_source
         .as_deref()
-        .and_then(|payload| upscaled_workflow_share(request, base_fact, payload, &upscale_record));
+        .and_then(|payload| upscaled_workflow_share(request, base_fact, payload, &envelope_record));
     if let Some(share) = share.as_mut() {
         share.model_hash = plan.model_hash.clone();
         share.loras = plan.loras.clone();
     }
-    write_workflow_chunk(upscaled, &temp_path, share.as_ref())
+    // Re-attach the plane the engine could not carry, resampled to the upscaled geometry.
+    let written = reattach_alpha(upscaled.clone(), source_alpha);
+    write_workflow_chunk(written.as_workflow_image(), &temp_path, share.as_ref())
         .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
     std::fs::rename(&temp_path, &media_path).inspect_err(|_| {
         let _ = std::fs::remove_file(&temp_path);
@@ -2578,7 +3349,13 @@ fn write_upscaled_asset(
         .get("displayName")
         .and_then(Value::as_str)
         .unwrap_or("Generated image");
-    let display_name = format!("{base_display} ({factor}x upscaled)");
+    let display_name = match iris {
+        Some(iris) => format!(
+            "{base_display} ({})",
+            crate::iris_restore::display_suffix(iris)
+        ),
+        None => format!("{base_display} ({factor}x upscaled)"),
+    };
 
     // rawAdapterSettings: the base settings + an `upscale` record (mirrors the Python worker so the
     // gallery / preset restore can read back the engine/factor/softness).
@@ -2613,7 +3390,18 @@ fn write_upscaled_asset(
         .unwrap_or_default();
     extra.insert("isUpscaled".to_owned(), json!(true));
     extra.insert("upscaledFromAssetId".to_owned(), source_asset_id);
-    extra.insert("factor".to_owned(), json!(factor));
+    match iris {
+        Some(iris) => {
+            extra.insert("scale".to_owned(), json!(iris.scale));
+            extra.insert(
+                "restoration".to_owned(),
+                json!(crate::iris_restore::RestorePlanView::from_plan(iris)),
+            );
+        }
+        None => {
+            extra.insert("factor".to_owned(), json!(factor));
+        }
+    }
     extra.insert("engine".to_owned(), json!(engine_id));
     fact.insert("extra".to_owned(), Value::Object(extra));
     Ok(fact)
@@ -2629,7 +3417,7 @@ fn write_upscaled_asset(
 /// generation itself, so it is left as-is; if sets grow large, stream this only on `Image` /
 /// `Decoding` events (where the fact set actually changes) rather than on every step.
 fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
-    json!({
+    let mut result = json!({
         "generationSetId": plan.genset_id,
         "expectedCount": plan.image_count,
         "adapter": plan.adapter,
@@ -2639,7 +3427,35 @@ fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     })
     .as_object()
     .cloned()
-    .expect("json! object literal")
+    .expect("json! object literal");
+    let prefix_kv_cache = job_prefix_kv_cache_records(asset_writes);
+    if !prefix_kv_cache.is_empty() {
+        result.insert(
+            PREFIX_KV_CACHE_RESULT_KEY.to_owned(),
+            Value::Array(prefix_kv_cache),
+        );
+    }
+    result
+}
+
+/// The job result's prefix-KV-cache summary (epic 25899): each written image's
+/// `rawAdapterSettings.prefixKvCache` record — what the admission selected and priced, the path
+/// the render REPORTS it ran, its cache bytes and any shed-over-priced-bound overflow — in asset
+/// order, so a finished job says which path ran without opening an asset. Absent (not empty) for a
+/// job whose provider prices no cache.
+pub(crate) const PREFIX_KV_CACHE_RESULT_KEY: &str = "prefixKvCache";
+
+fn job_prefix_kv_cache_records(asset_writes: &[Value]) -> Vec<Value> {
+    asset_writes
+        .iter()
+        .filter_map(|write| {
+            write
+                .get("rawAdapterSettings")
+                .and_then(|settings| settings.get(PREFIX_KV_CACHE_RESULT_KEY))
+                .filter(|record| record.is_object())
+                .cloned()
+        })
+        .collect()
 }
 
 /// Request-only fallback used by test plans and the backend-less stub plan. Production MLX/candle
@@ -2664,6 +3480,9 @@ fn adapter_id(request: &ImageRequest) -> &'static str {
 
 fn stub_raw_settings(request: &ImageRequest) -> JsonObject {
     let mut raw = request.advanced.clone();
+    // Worker-owned (epic 25899): the stub renders no prefix cache, so a replayed record must not
+    // reach the asset or the job result's `prefixKvCache` summary.
+    raw.remove(PREFIX_KV_CACHE_RESULT_KEY);
     raw.insert("realModelInference".to_owned(), Value::Bool(false));
     raw
 }
@@ -2859,7 +3678,7 @@ pub(crate) fn backend_label(gpu_id: &str) -> &str {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-async fn begin_image_cancel(
+pub(crate) async fn begin_image_cancel(
     api: &ApiClient,
     job_id: &str,
     cancel: &CancelFlag,
@@ -2926,6 +3745,29 @@ fn lerp(a: u8, t: f32) -> u8 {
 // MLX/candle generator stream helpers.
 include!("image_jobs/stream.rs");
 
+// Iris-3B generation-task wiring (sc-25679 MLX / sc-25680 Candle / sc-25681 controls): its tests
+// drive the MLX `generate_stream` arm and the Candle `generate_candle_stream` arm end to end.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod iris;
+
+// The generic image lane's request controls beyond the positional knobs (CFG interval,
+// caption-overflow policy, CFG-bound negative prompt) and the per-image provenance facts (engine
+// warnings, adapter apply reports), resolved identically by both arms (sc-25681).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod lane_controls;
+// The Candle shared-ladder selector reads the declared activation term so it never prices the same
+// batch and area twice (sc-25690, `candle_memory_strategy::law_geometry`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) use lane_controls::{
+    declared_activation_gb_per_megapixel, DECLARED_ACTIVATION_FLOOR_PIXELS,
+};
+
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 mod tier_resolver;
 #[cfg(target_os = "macos")]
@@ -2969,6 +3811,13 @@ include!("image_jobs/pid.rs");
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 include!("image_jobs/strict_control.rs");
+// Generic SDXL OpenPose ControlNet. One backend-neutral route drives the registered `sdxl`
+// provider on both MLX and Candle; platform bundles select the implementation behind the registry.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+include!("image_jobs/sdxl_control.rs");
 #[cfg(target_os = "macos")]
 // Z-Image strict-pose and prompt augmentation helpers.
 include!("image_jobs/zimage.rs");
@@ -3019,6 +3868,16 @@ include!("image_jobs/krea_control.rs");
 // loaded through the selected runtime's native single-file entrypoint, bypassing the registry
 // snapshot-dir path. Shared by MLX and Candle so global import acceptance always has a real route.
 include!("image_jobs/krea_imported.rs");
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+// Plan-driven checkpoint routing (epic 20398, sc-20634): a user model bound to a persisted
+// `ImportPlanV1` (`importPlan.checkpointId` on its manifest entry) is resolved and re-verified
+// through the checkpoint plan store, its provider selected by family + source shape + operation
+// through the registry's imported-model authority, and rendered through the shared cached-generator
+// seam. Backend-neutral: the same file serves MLX and Candle.
+include!("image_jobs/checkpoint_plan.rs");
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -3128,9 +3987,9 @@ use conditioning_gate::{admit_conditioning_overlay, admit_conditioning_paths};
 mod base_admission;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use base_admission::{
-    admit_candle_base, admit_candle_base_floor, admit_candle_base_floor_with_resident_overlay,
-    admit_candle_load_spec_floor, has_candle_tier_peak_row, safetensors_tensor_bytes_with_prefixes,
-    CandleBaseEvidence,
+    admit_candle_base, admit_candle_base_floor_with_resident_overlay, admit_candle_load_spec_floor,
+    has_candle_tier_peak_row, prepare_cached_candle_base_floor,
+    safetensors_tensor_bytes_with_prefixes, CandleBaseEvidence,
 };
 // Shared candle strict-control driver (sc-8304, epic 8236): the `CandleStrictControl` trait + the one
 // `run_candle_strict_control` driver the candle trio (qwen/zimage/flux2 control below) route through —
@@ -3193,14 +4052,14 @@ use zimage_edit_candle::zimage_edit_candle_available;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod zimage_comfyui_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use zimage_comfyui_candle::{generate_candle_zimage_comfyui_stream, zimage_comfyui_available};
+use zimage_comfyui_candle::generate_candle_zimage_comfyui_stream;
 // Qwen-Image txt2img from an in-place ComfyUI DiT (plain fp8_e4m3fn → bf16) — the Windows/CUDA candle
 // lane ONLY (sc-10670, epic 10451 Phase 2b). Sibling of the Z-Image comfyui lane; TE/VAE/tokenizer come
 // from a resident `SceneWorks/qwen-image-mlx` snapshot tier.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod qwen_comfyui_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use qwen_comfyui_candle::{generate_candle_qwen_comfyui_stream, qwen_comfyui_available};
+use qwen_comfyui_candle::generate_candle_qwen_comfyui_stream;
 // FLUX.2-dev txt2img from an in-place ComfyUI fp8-mixed DiT (inline-scale fp8 dequant → f32, then
 // quantized onto the GPU) — the Windows/CUDA candle lane ONLY (sc-10680, epic 10451 Phase 2e). Sibling
 // of the Qwen-Image comfyui lane; the Mistral-3 TE / VAE / tokenizer come from a resident FLUX.2-dev
@@ -3208,7 +4067,7 @@ use qwen_comfyui_candle::{generate_candle_qwen_comfyui_stream, qwen_comfyui_avai
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod flux2_comfyui_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use flux2_comfyui_candle::{flux2_comfyui_available, generate_candle_flux2_comfyui_stream};
+use flux2_comfyui_candle::generate_candle_flux2_comfyui_stream;
 // Z-Image identity-init request gate for Image Studio "With Character" (sc-8409, epic 4406). Both
 // backends now generate through their registered `z_image_turbo` provider; this candle-only helper
 // preserves the off-Mac availability/base-resolution predicate while the generic stream owns Reference

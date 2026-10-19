@@ -32,12 +32,14 @@ the existing `/api/v1/*` surface (no side-door into the engine or DB).
 | Tool | Kind | What it does |
 | --- | --- | --- |
 | `list_projects` | read | Project ids/names — `projectId` for every other call |
-| `list_models` | read | Generation model catalog: id, family, type (image/video), capabilities, `installState`, defaults, resolutions |
-| `list_loras` | read | LoRA adapter catalog (filter by `modelFamily` / `projectId`) |
+| `list_models` | read | Generation model catalog: id, family, type (image/video), capabilities, `installState`, defaults, the resolution/duration/fps menus, `minSteps`, the reference-media caps, `promptGuide`, any licence-required `attribution`, and a trained model's `trainedCheckpoint` `{task, engineModel, baseModel}` |
+| `list_loras` | read | LoRA adapter catalog (filter by `modelFamily` / `projectId`); an Iris adapter carries its `irisTask` / `baseModel` / `networkType` |
 | `generate_image` | **blocking** | Submits an image job, relays progress notifications, returns the images inline as base64 (default `count` 1) |
-| `submit_video_job` | non-blocking | Submits a video job (`generate` / `extend` / `bridge` / `person_replace`) and returns the job id immediately |
+| `submit_video_job` | non-blocking | Submits a video job (`generate` / `reference` / `extend` / `bridge` / `person_replace` / `video_to_video` / `reference_video_to_video` / `multi_video_to_video` / `ads2v` / `animate_character` — every mode the API admits, sc-19576) and returns the job id immediately |
+| `estimate_depth` | non-blocking | Submits an Iris-3B depth job for an image asset (`resolutionMode` `capped` (default, `maxSide` 1024) or `native`, sc-25682; `irisModel` = an installed trained depth model) and returns the job id; the result is a depth asset — raw float32 `.npy` plus a PNG preview |
+| `restore_image` | non-blocking | Submits an Iris-3B restoration (`image_upscale` on the `iris` engine) for an image asset — `scale` (default 4, any positive factor), `inputSizing` `budgeted` (default) / `original`, `colorFix`, `irisModel` = an installed trained restoration model — and returns the job id; the result is a new linked asset recording the actual processing and output size |
 | `get_job_status` | read | Status/stage/progress/eta for any job id (video and image) |
-| `get_job_result` | read | For a completed job: ticketed download links (media bytes are never inlined) |
+| `get_job_result` | read | For a completed job: ticketed download links (media bytes are never inlined); an asset with a separate preview (depth `.npy`, vector SVG) also links its preview PNG |
 
 `generate_image` blocks until the job is terminal (poll interval 1 s, overall
 deadline 30 min — generous because a cold first run legitimately spends minutes
@@ -314,7 +316,34 @@ Expected failure modes: no/wrong token → `401` with
    summary block carries the created asset ids.
 4. `submit_video_job` with `projectId`, `prompt`, and optionally a video
    `model` (type `"video"` in `list_models`), `duration`/`fps`/`width`/
-   `height`/`quality` — returns `jobId`.
+   `height`/`quality`/`steps` — returns `jobId`. Use `mode: "reference"` with
+   `referenceAssetIds` and/or `sourceClipAssetIds` to render from reference
+   media, optionally adding `referenceAudioAssetIds`. Audio references are a
+   companion: they condition the soundtrack and never reach the visual
+   conditioner, so an audio-only reference set is refused (sc-19574).
+
+   Every mode the API admits is reachable (sc-19576): besides `generate` /
+   `reference` / `extend` / `bridge` / `person_replace`, the tool takes
+   `video_to_video`, `reference_video_to_video`, `multi_video_to_video`,
+   `ads2v` (which needs the `referenceClipAssetId` reference-video slot) and
+   `animate_character`. Each model serves only some of them — check
+   `capabilities` in `list_models` first.
+
+   ⚠️ **The `durations` and `fps` menus from `list_models` are exhaustive, and an
+   off-menu value is refused rather than rounded to the nearest one.** MiniMax-H3
+   is the case that makes this bite: its fourteen legal clip lengths are a `17n+5`
+   frame lattice at 24 fps, so nothing between them renders, and the 15 s its own
+   documentation advertises is between the last rung and the next. `minSteps` is
+   the same shape — below it the request is refused, not raised.
+
+   ⚡ **A `loras` entry whose `list_loras` row carries `role: "accelerator"` and a
+   `sampling` block is a step-distill accelerator, and attaching it changes the
+   SCHEDULE as well as the weights** (sc-18726): the render switches to that
+   adapter's own `sampling.steps` and `sampling.schedulerShift`. This is the
+   difference between a two-and-a-half-hour MiniMax-H3 render and a twelve-minute
+   one, and there is no separate "turbo" parameter — the adapter *is* the switch.
+   Omit `steps` to take the adapter's trained count; set it to override. Attach at
+   most one accelerator per job: two asking for different schedules are refused.
 5. Poll `get_job_status` until `"status": "completed"`, then `get_job_result`
    → download each asset URL within the ticket TTL (300 s; re-call for fresh
    links). If the absolute URL host is not reachable from your machine, apply

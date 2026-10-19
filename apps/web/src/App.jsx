@@ -1,4 +1,13 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { AppVersion, useAppUpdate } from "./components/AppVersion.jsx";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { apiFetch, isAbortError } from "./api.js";
 import {
   beginAssetRequest,
@@ -9,12 +18,12 @@ import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "./createJob.js";
 import { pollJobToCompletion } from "./pollJob.js";
 import { AccentPicker } from "./components/AccentPicker.jsx";
 import { Icon } from "./components/Icons.jsx";
-import { lazyScreen } from "./components/LazyScreen.jsx";
+import { lazyInteraction, lazyScreen } from "./components/LazyScreen.jsx";
 import { AccessGate } from "./components/AccessGate.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview, assetSeed } from "./components/assetPanels.jsx";
-import { fallbackModels, isLibraryAsset, terminalStatuses } from "./constants.js";
+import { isLibraryAsset, terminalStatuses } from "./constants.js";
 import { isEditorJob } from "./jobTypes.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { editModelForAsset, workflowModelType } from "./presetUtils.js";
@@ -30,7 +39,6 @@ import { useTimelines } from "./hooks/useTimelines.js";
 import { useAccessGate } from "./hooks/useAccessGate.js";
 import { useDropNavigationGuard } from "./hooks/useDropNavigationGuard.js";
 import { useWorkflowDrop } from "./hooks/useWorkflowDrop.js";
-import { WorkflowDropPanel } from "./components/WorkflowDropPanel.jsx";
 import { WorkflowEmbedDecisionModal } from "./components/WorkflowEmbedNotice.jsx";
 import {
   persistWorkflowEmbedPreference,
@@ -60,6 +68,16 @@ import {
 import { buildWorkersById } from "./workers.js";
 import { createEditorScratchRegistry } from "./editorScratch.js";
 import { appConfirm, ConfirmHost } from "./appConfirm.jsx";
+import { ModelLibraryDialog } from "./components/ModelLibraryDialog.jsx";
+import { ModelLibraryRestartDialog } from "./components/ModelLibraryRestartDialog.jsx";
+import {
+  adoptModelLibrary,
+  createModelLibraryGate,
+  fetchModelLibraryStatus,
+  relocateModelLibrary,
+  setModelLibraryHandler,
+  validateModelLibrary,
+} from "./modelLibrary.js";
 import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
 // Simple UI (design handoff "Simple UI for creative studios") — an ALTERNATIVE shell that
 // renders instead of this workspace when the sidebar switch is on Simple. The workspace
@@ -94,6 +112,7 @@ import {
   hasVisibleLocalFailureForView,
   isCurrentProjectRequest,
   reconcileSelectedAssetId,
+  selectEditorMediaAssets,
 } from "./appStateHelpers.js";
 import {
   hydrationDomainsForRoute,
@@ -167,6 +186,11 @@ const ImageEditor = lazyScreen(
   "ImageEditor",
   "Image Editor",
 );
+const VectorStudio = lazyScreen(
+  () => import("./screens/VectorStudio.jsx"),
+  "VectorStudio",
+  "Vector Studio",
+);
 const QueueScreen = lazyScreen(
   () => import("./screens/QueueScreen.jsx"),
   "QueueScreen",
@@ -212,6 +236,11 @@ const SimpleShell = lazyScreen(
   "SimpleShell",
   "Simple UI",
 );
+const WorkflowDropPanel = lazyInteraction(
+  () => import("./components/WorkflowDropPanel.jsx"),
+  "WorkflowDropPanel",
+  "Workflow details",
+);
 
 // Selective lazy keep-alive (sc-11959, backbone for epic 11949's edit persistence).
 // These view ids mount on FIRST visit and then stay mounted (hidden) so their React
@@ -235,6 +264,7 @@ export const KEEP_ALIVE_VIEWS = Object.freeze(
     "Keypoints",
     "Editor",
     "ImageEditor",
+    "VectorStudio",
   ]),
 );
 
@@ -254,10 +284,6 @@ function KeepAlivePane({ active, children }) {
   );
 }
 
-// Product version, injected at build time from package.json (see vite.config.js).
-// Empty in unconfigured contexts (e.g. some test paths); the footer is hidden then.
-const APP_VERSION = import.meta.env.VITE_APP_VERSION ?? "";
-
 // Exported so the nav registration (Workspace / Library / System sections) is assertable in
 // unit tests without rendering the whole App (epic 13400 C0 mirrors the KEEP_ALIVE_VIEWS export).
 export const navSections = [
@@ -274,6 +300,7 @@ export const navSections = [
       { id: "Document", icon: Icon.Wand },
       { id: "Train", icon: Icon.Train },
       { id: "ImageEditor", label: "Image Editor", icon: Icon.ImageEditor },
+      { id: "VectorStudio", label: "Vector Studio", icon: Icon.Wand },
       { id: "Editor", label: "Video Editor", icon: Icon.Editor },
     ],
   },
@@ -321,6 +348,7 @@ export const viewTitles = {
   Train: { title: "Training Studio", blurb: "Build datasets and prepare LoRA training plans." },
   Editor: { title: "Video Editor", blurb: "Cut, sequence and export your timeline." },
   ImageEditor: { title: "Image Editor", blurb: "Crop, upscale and refine a single image on a canvas." },
+  VectorStudio: { title: "Vector Studio", blurb: "Convert a project raster image or create one through a disclosed raster-to-vector workflow." },
   Characters: { title: "Characters", blurb: "Keep the same face across every shot." },
   Presets: { title: "Presets", blurb: "Save and share recurring generation setups." },
   Models: { title: "Models", blurb: "Download, import and manage local checkpoints." },
@@ -549,8 +577,18 @@ export function App() {
   const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [], audio: [], document: [] });
   const [workers, setWorkers] = useState([]);
   const [queueSummary, setQueueSummary] = useState(null);
-  // Mac UI gating (sc-3486): inert until the capabilities endpoint reports macGatingActive.
+  // Mac UI gating (sc-3486): the value is inert until the capabilities endpoint reports
+  // macGatingActive, but keep a separate readiness bit so consumers do not mistake that
+  // temporary fallback for authoritative Candle capability facts.
   const [macCapabilities, setMacCapabilities] = useState(DEFAULT_MAC_CAPABILITIES);
+  const [macCapabilitiesAuthoritative, setMacCapabilitiesAuthoritative] = useState(false);
+  const [macCapabilitiesError, setMacCapabilitiesError] = useState("");
+  const [macCapabilitiesLoading, setMacCapabilitiesLoading] = useState(false);
+  // The generation pickers must not treat the hand-authored fallback catalog as proof that a
+  // model is present on this machine. Until GET /models completes its install/availability sweep,
+  // keep the studios in an explicit initializing state instead (the request may legitimately take
+  // tens of seconds on a cold start). A settled refresh keeps the last authoritative catalog live.
+  const [modelCatalogStatus, setModelCatalogStatus] = useState("idle");
   const [trainingTargets, setTrainingTargets] = useState({ schemaVersion: 1, targets: [] });
   const [trainingPresets, setTrainingPresets] = useState({ schemaVersion: 1, presets: [] });
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
@@ -695,6 +733,108 @@ export function App() {
     saveToken,
     lockRemote,
   } = useAccessGate({ setError, pushNotice, dismissNoticeKind });
+  // The unavailable-model-library prompt (sc-19709). One gate for the whole app: it holds at most
+  // one blocked action and resumes it at most once, so a reconnect (or an impatient second click)
+  // can never turn one blocked generation into two jobs. Registered as the module-level handler so
+  // every submission path — and the studios' selection check — reaches it without prop threading.
+  // The relocation sequence's three seams, built once and shared by the blocked-action prompt
+  // (below) and the Settings → Storage "Model library" control, which relocates with no blocked
+  // action to resume but with exactly the same two-write ordering and undo.
+  const modelLibraryRelocator = useMemo(
+    () => ({
+      validate: (path) => validateModelLibrary(token, path),
+      adopt: (path) => relocateModelLibrary(token, path),
+      // Durable persistence of a relocated library is desktop state: the API hands back the exact
+      // HF_HOME the shell must store, in the same field, file and normalization as the first-run
+      // storage step. Returns an undo so the gate can restore the previous location if the
+      // server's re-bind then fails — the two copies must never disagree.
+      //
+      // Fails CLOSED when the previous location cannot be read, BEFORE the first durable write:
+      // without a previous location there is no undo, so a re-bind failure afterwards would leave
+      // the shell pointed at the new library while the gate reported the previous location still
+      // in use — the disagreement this undo path exists to prevent, with the wrong message on top.
+      persist: async (target) => {
+        // Nothing to persist — the browser shell keeps no copy of the location. A NO-OP undo, not
+        // `null`: the gate treats a missing undo as "changed and unrestorable", and here nothing
+        // changed, so the previous location genuinely is still in use.
+        if (!isDesktopShell || !target?.hfHome) return () => {};
+        let before = null;
+        try {
+          before = await tauriInvoke("get_storage_setup");
+        } catch (error) {
+          throw new Error(
+            `The current model library location could not be read, so nothing was changed. ${String(error)}`.trim(),
+          );
+        }
+        const previous = before?.hfHome ?? before?.hfHomeDefault ?? null;
+        if (!previous) {
+          throw new Error(
+            "The current model library location could not be read, so nothing was changed.",
+          );
+        }
+        await tauriInvoke("set_model_library", { path: target.hfHome });
+        return () => tauriInvoke("set_model_library", { path: previous });
+      },
+    }),
+    [token],
+  );
+  const modelLibraryGate = useMemo(
+    () =>
+      createModelLibraryGate({
+        probe: () => fetchModelLibraryStatus(token),
+        ...modelLibraryRelocator,
+      }),
+    [token, modelLibraryRelocator],
+  );
+  const modelLibraryState = useSyncExternalStore(
+    modelLibraryGate.subscribe,
+    modelLibraryGate.getState,
+  );
+  useEffect(() => setModelLibraryHandler(modelLibraryGate.block), [modelLibraryGate]);
+  // The relocated library, held until the user answers the restart disclosure. The relocation is
+  // already durable at this point — this only decides WHEN the app picks it up.
+  const [modelLibraryRelocation, setModelLibraryRelocation] = useState(null);
+  // True while the NATIVE folder picker is up. The prompt's auto re-probe pauses on it: a drive
+  // that comes back while the user is choosing a folder must not resume the submission behind a
+  // modal OS dialog the user cannot see past.
+  const [modelLibraryPickerOpen, setModelLibraryPickerOpen] = useState(false);
+  const chooseModelLibraryLocation = useCallback(async () => {
+    if (!isDesktopShell) return;
+    setModelLibraryPickerOpen(true);
+    let picked = null;
+    try {
+      picked = await tauriInvoke("choose_folder").catch(() => null);
+    } finally {
+      setModelLibraryPickerOpen(false);
+    }
+    if (!picked) return;
+    const adopted = await modelLibraryGate.relocate(picked);
+    if (adopted?.hfHome) {
+      // `droppedSubmission`: the prompt path dropped whatever the user was submitting; the restart
+      // disclosure says so. The Settings path below has no submission to drop.
+      setModelLibraryRelocation({ ...adopted, droppedSubmission: true });
+      // The notice outlives the dialog, so "Later" still leaves the reason visible.
+      pushNotice(
+        "general",
+        `Model library set to ${adopted.hfHome} — restart SceneWorks to apply it. The generation you started was not queued; submit it again after the restart.`,
+      );
+    }
+  }, [modelLibraryGate, pushNotice]);
+  // Settings → Storage → Model library → Change…: the same relocation (validate, persist, re-bind,
+  // undo on failure) and the same restart disclosure as the prompt, with no blocked action. Resolves
+  // to the adopted target, `null` when the picker was dismissed; rejects with the user-facing
+  // message when the folder was refused or a write failed, for the Settings screen to show inline.
+  // Unlike the prompt path there is no `modelLibraryPickerOpen` bracket: that flag only pauses the
+  // gate's auto re-probe, and with no blocked action pending there is nothing a re-probe could
+  // resume behind the native dialog.
+  const changeModelLibrary = useCallback(async () => {
+    if (!isDesktopShell) return null;
+    const picked = await tauriInvoke("choose_folder").catch(() => null);
+    if (!picked) return null;
+    const adopted = await adoptModelLibrary(modelLibraryRelocator, picked);
+    setModelLibraryRelocation({ ...adopted, droppedSubmission: false });
+    return adopted;
+  }, [modelLibraryRelocator]);
   // The drop guard that stops a stray file from navigating the webview (issue #1308) is
   // installed further down, next to `useWorkflowDrop` — it now hands the unclaimed file to
   // the workflow inspector (sc-15951), which needs the active project and `importAsset`.
@@ -872,7 +1012,12 @@ export function App() {
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
   const generatedAssetRefreshesRef = useRef(new Map());
   const refreshShellDataRef = useRef(null);
+  // A retry or token transition supersedes any older capabilities request. Fetch aborts normally
+  // provide this guarantee too, but the request id keeps a late/non-cooperative response from
+  // restoring stale platform facts after a newer request has started.
+  const macCapabilitiesRequestRef = useRef(0);
   const refreshModelsRef = useRef(null);
+  const modelCatalogRequestRef = useRef(0);
   const refreshModelAndLorasRef = useRef(null);
   const refreshTrainingTargetsRef = useRef(null);
   const refreshTrainingPresetsRef = useRef(null);
@@ -1110,6 +1255,7 @@ export function App() {
     setTrainingDatasetItemQualityAck,
     createTrainingDataset,
     uploadTrainingDatasetItem,
+    uploadLtxPreparedBundle,
     updateTrainingDataset,
     batchRenameTrainingDataset,
     deleteTrainingDataset,
@@ -1119,6 +1265,9 @@ export function App() {
     createTrainingDatasetUpscaleJob,
     createTrainingDatasetAnalysisJob,
     createTrainingDatasetFaceAnalysisJob,
+    createTrainingDatasetSubjectMaskJob,
+    loadTrainingDatasetSubjectMasks,
+    uploadTrainingDatasetSubjectMask,
     smartCropTrainingDataset,
     stripExifTrainingDataset,
     createTrainingJob,
@@ -1204,6 +1353,7 @@ export function App() {
     refreshTimelines,
     createTimeline,
     saveTimeline,
+    resolveTimelineTrim,
     exportTimeline,
     extractTimelineFrame,
     queueTimelineVideoJob,
@@ -1224,18 +1374,13 @@ export function App() {
   // loaders are sc-10668+), so they must not be offered as a generation target.
   // Manifest models never set `usable`, so they are unaffected.
   const imageModels = useMemo(() => {
-    const items = generationModelsForType(models, "image");
-    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "image");
+    return generationModelsForType(models, "image");
   }, [models]);
-  const videoModels = useMemo(() => {
-    const items = generationModelsForType(models, "video");
-    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "video");
-  }, [models]);
-  // Audio models (epic 13400) — same live-catalog-then-fallback split as image/video, consumed by
-  // the Audio Studio (C0/C1). Per-mode eligibility comes from audioModelServesMode.
+  const videoModels = useMemo(() => generationModelsForType(models, "video"), [models]);
+  // Audio models (epic 13400) are resolved from the authoritative live catalog and consumed by
+  // Audio Studio (C0/C1). Per-mode eligibility comes from audioModelServesMode.
   const audioModels = useMemo(() => {
-    const items = generationModelsForType(models, "audio");
-    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "audio");
+    return generationModelsForType(models, "audio");
   }, [models]);
   const selectedAsset = useMemo(
     () => assets.find((asset) => asset.id === selectedAssetId) ?? assets[0] ?? null,
@@ -1356,6 +1501,16 @@ export function App() {
       { active: 0 },
     );
   }, [jobs, queueSummary]);
+  // Jobs actually executing on a worker. The restart disclosure (sc-19709) withholds "Restart now"
+  // while any of these are in flight: the teardown is graceful, but interrupting a render still
+  // throws away the work, so the user defers rather than discovers. Prefers the server's own count
+  // when the queue summary is loaded, since `jobs` is a recent window rather than the whole queue.
+  const runningJobCount = useMemo(
+    () =>
+      queueSummary?.counts?.running ??
+      jobs.filter((job) => job.status === "running").length,
+    [jobs, queueSummary],
+  );
   const filteredJobs = useMemo(() => {
     if (projectFilter === "all") {
       return jobs;
@@ -1393,10 +1548,7 @@ export function App() {
     const ids = visibleWorkers.filter(isSelectableGpuWorker).map((worker) => worker.gpuId);
     return ["auto", ...Array.from(new Set(ids))];
   }, [visibleWorkers]);
-  const mediaAssets = useMemo(
-    () => assets.filter((asset) => ["image", "video", "upload", "frame", "render", "document"].includes(asset.type)),
-    [assets],
-  );
+  const mediaAssets = useMemo(() => selectEditorMediaAssets(assets), [assets]);
 
   useEffect(() => {
     activeViewRef.current = activeView;
@@ -1818,6 +1970,49 @@ export function App() {
     editorScratchRegistry.sweep(jobs);
   }, [jobs, editorScratchRegistry]);
 
+  const refreshMacCapabilities = useCallback(async ({ signal } = {}) => {
+    const requestId = macCapabilitiesRequestRef.current + 1;
+    macCapabilitiesRequestRef.current = requestId;
+    // Preserve the last payload for inert Mac-gating helpers, but it is not authorization for
+    // decoder reconciliation/submission while this request is unsettled.
+    setMacCapabilitiesAuthoritative(false);
+    setMacCapabilitiesLoading(true);
+    try {
+      const value = await apiFetch("/api/v1/capabilities/mac", token, { signal });
+      if (signal?.aborted || macCapabilitiesRequestRef.current !== requestId) {
+        return false;
+      }
+      if (
+        !value ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        typeof value.macGatingActive !== "boolean"
+      ) {
+        throw new Error("the API returned an invalid capability response");
+      }
+      setMacCapabilities(value);
+      setMacCapabilitiesAuthoritative(true);
+      setMacCapabilitiesError("");
+      return true;
+    } catch (err) {
+      if (
+        isAbortError(err) ||
+        signal?.aborted ||
+        macCapabilitiesRequestRef.current !== requestId
+      ) {
+        return false;
+      }
+      setMacCapabilitiesError(
+        `Could not load engine capabilities: ${err?.message || "unknown error"}`,
+      );
+      return false;
+    } finally {
+      if (macCapabilitiesRequestRef.current === requestId) {
+        setMacCapabilitiesLoading(false);
+      }
+    }
+  }, [token]);
+
   async function refreshShellData({ signal } = {}) {
     const fetchInitial = async (domain, label, path, fallback, optional = false) => {
       try {
@@ -1830,7 +2025,7 @@ export function App() {
         }
         const error = optional ? "" : `${label}: ${err.message}`;
         setDomainError(domain, error);
-        return { label, value: fallback, error };
+        return { label, value: fallback, error, failed: true };
       }
     };
     const projectsPromise = fetchInitial(
@@ -1844,15 +2039,9 @@ export function App() {
       setProjectsLoaded(true);
       return result;
     });
-    fetchInitial(
-      "mac-capabilities",
-      "Mac capabilities",
-      "/api/v1/capabilities/mac",
-      DEFAULT_MAC_CAPABILITIES,
-      true,
-    )
-      .then((result) => setMacCapabilities(result.value ?? DEFAULT_MAC_CAPABILITIES))
-      .catch(() => {});
+    // This optional surface must not hold up shell hydration. Its own state keeps alternate
+    // decoder requests fail-closed and gives affected users retry/reset recovery on failure.
+    void refreshMacCapabilities({ signal });
     const shellPromises = [
       fetchInitial("jobs", "Jobs", "/api/v1/jobs", []).then((result) => {
         if (result.aborted) return result;
@@ -1870,13 +2059,28 @@ export function App() {
   }
 
   async function refreshModels({ signal } = {}) {
+    const requestId = ++modelCatalogRequestRef.current;
+    // Do not blank an already-authoritative catalog during an SSE/manual refresh. This state is
+    // specifically the cold-start boundary where no availability answer exists yet.
+    setModelCatalogStatus((current) => (current === "ready" ? current : "loading"));
     try {
       const items = await apiFetch("/api/v1/models", token, { signal });
+      if (requestId !== modelCatalogRequestRef.current) {
+        return refreshFailure("stale");
+      }
       setModels(items);
+      setModelCatalogStatus("ready");
       domainErrors.models("");
       return refreshSuccess(items);
     } catch (err) {
-      if (isAbortError(err)) return refreshFailure("aborted", err);
+      if (requestId !== modelCatalogRequestRef.current) {
+        return refreshFailure("stale", err);
+      }
+      if (isAbortError(err)) {
+        setModelCatalogStatus((current) => (current === "loading" ? "idle" : current));
+        return refreshFailure("aborted", err);
+      }
+      setModelCatalogStatus((current) => (current === "loading" ? "error" : current));
       domainErrors.models(err.message);
       return refreshFailure("error", err);
     }
@@ -2323,6 +2527,14 @@ export function App() {
       }),
     [token, activeProject, requestedGpu, setError, confirmWorkflowEmbeddingBeforeGeneration],
   );
+  const createVectorJob = useMemo(
+    () => makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.vector, token, project: activeProject, requestedGpu, setJobs, setError }),
+    [token, activeProject, requestedGpu, setError],
+  );
+  const createVectorPromptWorkflow = useMemo(
+    () => makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.vectorPrompt, token, project: activeProject, requestedGpu, setJobs, setError }),
+    [token, activeProject, requestedGpu, setError],
+  );
 
   // Standalone video upscale (epic 4811 / sc-4816): the net-new `video_upscale` job runs
   // on the generic /api/v1/jobs endpoint (like image_upscale), not the generation video
@@ -2349,7 +2561,10 @@ export function App() {
       pollJobToCompletion({
         createPath: "/api/v1/prompts/refine",
         body: { prompt, modelId, workflow, guide },
-        deadlineMs: 120000,
+        // 180 s, matching magicPrompt: a rewrite that runs to the worker's full 1536-token budget
+        // (sc-24029) measures ~60-75 s on the dev Mac and can exceed 120 s on a slower host, so the
+        // old 120 s deadline could time out a decode that was still going to succeed.
+        deadlineMs: 180000,
         resolveResult: (job) => {
           const refined = job.result?.refinedPrompt;
           if (!refined) {
@@ -2362,6 +2577,54 @@ export function App() {
         startError: "Could not start prompt refinement.",
         failureError: "Prompt refinement failed.",
         timeoutError: "Prompt refinement timed out. Is the refinement runtime running?",
+      }),
+    [token],
+  );
+
+  // Qwen-Image 2.1's OFFICIAL prompt rewriting (sc-24113, epic 24107): the SAME `prompts/refine`
+  // endpoint and poll-to-completion contract as the refiner above, with `task:
+  // "qwen_image_rewrite"`. No new route and no second LLM runtime — the two PE checkpoints are
+  // Qwen3.5/3.6 (`qwen3_5`), the architecture the native TextLlm lane already loads for the
+  // optional film planner.
+  //
+  // Two differences from `refinePrompt`, both of which the caller needs:
+  //
+  //  * It resolves the WHOLE result object, not just a string. The rewriter returns an aspect-ratio
+  //    suggestion alongside the prose, and the user accepts or ignores the two independently.
+  //  * `sourceAssetIds` carries the ORDERED references. Their presence is what selects the editing
+  //    rewriter over the text-to-image one — server-side, from the request — and their order is
+  //    what the rewrite's `<imageN>` numbering refers to.
+  //
+  // The deadline matches the caption tasks rather than the 120 s rewrite: a 9B checkpoint emitting
+  // a reasoning block and a long paragraph is closer to a caption than to a one-line rewrite, and a
+  // cold load of ~19 GB of weights happens inside this window.
+  const qwenRewritePrompt = useCallback(
+    ({ prompt, modelId, projectId, sourceAssetIds, signal }) =>
+      pollJobToCompletion({
+        createPath: "/api/v1/prompts/refine",
+        body: {
+          prompt,
+          modelId,
+          projectId,
+          task: "qwen_image_rewrite",
+          workflow: "image",
+          sourceAssetIds: Array.isArray(sourceAssetIds) ? sourceAssetIds : [],
+        },
+        deadlineMs: 180000,
+        resolveResult: (job) => {
+          const refinedPrompt = job.result?.refinedPrompt;
+          if (!refinedPrompt) {
+            // An empty rewrite must never reach the review panel: Apply would paste it over the
+            // user's own prompt.
+            throw new Error("The rewriter returned an empty prompt.");
+          }
+          return { refinedPrompt, rewriteSuggestion: job.result?.rewriteSuggestion ?? null };
+        },
+        signal,
+        token,
+        startError: "Could not start prompt rewriting.",
+        failureError: "Prompt rewriting failed.",
+        timeoutError: "Prompt rewriting timed out. Is the worker running?",
       }),
     [token],
   );
@@ -2572,11 +2835,9 @@ export function App() {
     return asset?.generationSet?.recipe ?? asset?.recipe ?? null;
   }
 
-  // THE prefill path into Image Studio (sc-15951). Every caller that wants the studio's form
-  // populated from a recorded recipe goes through here — the viewer's "Use this recipe" below,
-  // and the dropped-image "Use this workflow" — so there is one launch shape, one hydration
-  // race guard, and one injection effect on the other side (`screens/ImageStudio.jsx`). A second
-  // parallel prefill would drift from this one the first time the recipe shape changed.
+  // Shared-workflow prefill (sc-15951) lands in the studio named by the envelope kind. Keep the
+  // hydration race guard and launch shape shared so a video envelope reaches Video Studio's
+  // existing recipe effect instead of silently loading its controls into Image Studio.
   //
   // `assetId` / `sourceAssetId` are null for a launch with no asset behind it, which is exactly
   // the dropped-file case: the studio's edit branch then leaves its source picker empty rather
@@ -2588,6 +2849,7 @@ export function App() {
   // pretend worked.
   async function launchImageRecipe({
     recipe,
+    view = "Image",
     replaySeed = null,
     assetId = null,
     sourceAssetId = null,
@@ -2596,7 +2858,7 @@ export function App() {
       return { ok: false, reason: "no-recipe" };
     }
     // The Simple shell renders its OWN studios and consumes no `studioLaunch`, so from in there
-    // `setActiveView("Image")` alone points the workspace at a screen nobody is looking at: the
+    // `setActiveView(targetView)` alone points the workspace at a screen nobody is looking at: the
     // panel dismisses, nothing visible happens, and the launch sits queued to fire unprompted the
     // next time the user opens the Advanced studio. Flip the shell the way `SimpleShell`'s own
     // `openInAdvanced` does — and refuse for the same reason it does when the viewport has Simple
@@ -2612,14 +2874,14 @@ export function App() {
       setUiModeOverride(ADVANCED_MODE);
     }
     const projectId = activeProjectRef.current?.id;
-    setActiveView("Image");
-    const hydration = await stableHydrateLaunchDomains("Image", projectId);
+    setActiveView(view);
+    const hydration = await stableHydrateLaunchDomains(view, projectId);
     if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) {
       return { ok: false, reason: "raced" };
     }
     setStudioLaunch({
       id: crypto.randomUUID(),
-      view: "Image",
+      view,
       assetId,
       sourceAssetId,
       recipe,
@@ -2681,6 +2943,13 @@ export function App() {
   function sendAssetRecipeToStudio(asset, options = {}) {
     if (asset?.type === "video") {
       sendAssetRecipeToVideo(asset, options);
+      return;
+    }
+    if (asset?.type === "vector") {
+      setSelectedAssetId(asset.id);
+      closePreview();
+      setActiveView("VectorStudio");
+      setStudioLaunch({ id: crypto.randomUUID(), view: "VectorStudio", assetId: asset.lineage?.sourceAssetId, recipe: asset.recipe });
       return;
     }
     sendAssetRecipeToImage(asset, options);
@@ -2991,7 +3260,7 @@ export function App() {
   // canvas, DatasetAddDialog, DocumentStudio, PoseLibraryScreen) each preventDefault() as the
   // event bubbles through them, so their drops never reach either behaviour.
   //
-  // `launchRecipe` is `launchImageRecipe`, the same seam the viewer's "Use this recipe" uses.
+  // The envelope kind selects Image or Video; both use the studio's ordinary recipe injection.
   // `importAsset` is the ordinary upload path, which is what records `extra.importedWorkflow`
   // on the asset (sc-15949).
   // The images the panel's input pickers may offer (sc-15952). The same filter Image Studio's own
@@ -3053,6 +3322,13 @@ export function App() {
     // The list the studio's own picker is built from, so a substitute chosen in the panel cannot be
     // a row the picker would drop on the next render (sc-15952).
     models: imageModels,
+    // The whole catalog, so an install requirement resolves to its real entry — including a VIDEO
+    // model, which `imageModels` filters out — before the download starts (sc-17227).
+    catalogModels: models,
+    // The LoRA catalog, for the same reason: `createLoraDownloadJob` gates on the row's
+    // server-stamped `licenseAcknowledgmentModelId`, which a `{ id }` stub does not carry
+    // (sc-17227).
+    catalogLoras: loras,
     macCapabilities,
     catalogRevision,
     failedInstallJobIds,
@@ -3075,7 +3351,7 @@ export function App() {
   useDropNavigationGuard({ onUnclaimedFileDrop: workflowDrop.handleDroppedFile });
   // Rendered from a single place even though the app has two shells: `Modal` portals to
   // <body>, so this element does not have to sit inside whichever shell is on screen.
-  const workflowDropPanel = (
+  const workflowDropPanel = workflowDrop.offer ? (
     <WorkflowDropPanel
       assets={workflowInputAssets}
       canImport={Boolean(activeProject)}
@@ -3086,7 +3362,43 @@ export function App() {
       onImport={workflowDrop.importImage}
       onUse={workflowDrop.useWorkflow}
     />
+  ) : null;
+
+  // The unavailable-model-library prompt and its post-relocation restart disclosure (sc-19709).
+  // Built once and rendered in BOTH shells for the same reason `workflowDropPanel` is: the handler
+  // that opens them is registered at App level and therefore fires in both, so a Simple-UI user
+  // whose library is disconnected would otherwise have their submission swallowed by a dialog that
+  // was never mounted — a silently dead Generate button. Both portal to <body>, so neither
+  // disturbs the shell it renders in.
+  const modelLibraryOverlays = (
+    <>
+      <ModelLibraryDialog
+        autoProbePaused={modelLibraryPickerOpen}
+        canRelocate={isDesktopShell}
+        onCancel={modelLibraryGate.cancel}
+        onRelocate={chooseModelLibraryLocation}
+        onRetry={modelLibraryGate.retry}
+        state={modelLibraryState}
+      />
+      <ModelLibraryRestartDialog
+        canRestart={isDesktopShell}
+        onLater={() => setModelLibraryRelocation(null)}
+        // The rejection is RE-THROWN after the notice: the dialog needs it to leave its restarting
+        // state, or a restart that never launched would leave the disclosure permanently stuck on
+        // "Restarting SceneWorks…" with both buttons disabled, for this and every later relocation.
+        onRestart={() =>
+          tauriInvoke("restart_app").catch((error) => {
+            pushNotice("general", `SceneWorks could not restart: ${String(error)}`);
+            throw error;
+          })
+        }
+        relocation={modelLibraryRelocation}
+        runningJobCount={runningJobCount}
+      />
+    </>
   );
+
+  const appUpdate = useAppUpdate(token, authenticated);
 
   const jobAction = useCallback(
     async (job, action, options = {}) => {
@@ -3094,7 +3406,13 @@ export function App() {
         const path = action === "duplicate" ? `/api/v1/jobs/${job.id}/duplicate` : `/api/v1/jobs/${job.id}/${action}`;
         const body =
           action === "duplicate"
-            ? { payloadChanges: { duplicatedAt: new Date().toISOString() } }
+            ? {
+                ...options.body,
+                payloadChanges: {
+                  ...options.body?.payloadChanges,
+                  duplicatedAt: new Date().toISOString(),
+                },
+              }
             : (options.body ?? {});
         const updatedJob = await apiFetch(path, token, { method: "POST", body: JSON.stringify(body) });
         setJobs((items) => upsertJobNewest(items, updatedJob));
@@ -3153,6 +3471,31 @@ export function App() {
         setError("");
       } catch (err) {
         setError(err.message);
+      }
+    },
+    [setError, token],
+  );
+
+  // Move an explicit Queue-screen selection ahead of all work that was waiting when the action
+  // was submitted. The server ignores anything a worker claimed in the meantime, so this updates
+  // ordering without becoming a preemption control. Returned snapshots carry their durable
+  // queueRank and are upserted immediately; SSE mirrors the same update to other clients.
+  const prioritizeJobs = useCallback(
+    async (jobIds) => {
+      try {
+        const response = await apiFetch("/api/v1/jobs/prioritize", token, {
+          method: "POST",
+          body: JSON.stringify({ jobIds }),
+        });
+        const prioritized = response?.jobs ?? [];
+        if (prioritized.length) {
+          setJobs((items) => prioritized.reduce((acc, job) => upsertJobNewest(acc, job), items));
+        }
+        setError("");
+        return true;
+      } catch (err) {
+        setError(err.message);
+        return false;
       }
     },
     [setError, token],
@@ -3266,9 +3609,11 @@ export function App() {
     isActiveTimelineDirty,
     createTimeline,
     saveTimeline,
+    resolveTimelineTrim,
     exportTimeline,
     extractTimelineFrame,
     queueTimelineVideoJob,
+    refreshTimelines,
     // Assets / library (sc-1651 Phase B batch 1)
     assets,
     assetsReady: Boolean(
@@ -3296,6 +3641,7 @@ export function App() {
     jobAction,
     clearCompletedJobs,
     cancelPendingJobs,
+    prioritizeJobs,
     clearJob,
     createVqaJob,
     createInterleaveJob,
@@ -3308,8 +3654,11 @@ export function App() {
     createVideoJob,
     createVideoUpscaleJob,
     createImageJob,
+    createVectorJob,
+    createVectorPromptWorkflow,
     createAudioJob,
     refinePrompt,
+    qwenRewritePrompt,
     magicPrompt,
     imageCaption,
     imageDescribe,
@@ -3337,8 +3686,13 @@ export function App() {
     videoModels,
     audioModels,
     models,
+    modelCatalogStatus,
     // Mac UI gating (sc-3486)
     macCapabilities,
+    macCapabilitiesAuthoritative,
+    macCapabilitiesError,
+    macCapabilitiesLoading,
+    refreshMacCapabilities,
     loras,
     deleteLora,
     updateLora,
@@ -3380,6 +3734,7 @@ export function App() {
     setTrainingDatasetItemQualityAck,
     createTrainingDataset,
     uploadTrainingDatasetItem,
+    uploadLtxPreparedBundle,
     updateTrainingDataset,
     batchRenameTrainingDataset,
     deleteTrainingDataset,
@@ -3389,6 +3744,9 @@ export function App() {
     createTrainingDatasetUpscaleJob,
     createTrainingDatasetAnalysisJob,
     createTrainingDatasetFaceAnalysisJob,
+    createTrainingDatasetSubjectMaskJob,
+    loadTrainingDatasetSubjectMasks,
+    uploadTrainingDatasetSubjectMask,
     smartCropTrainingDataset,
     stripExifTrainingDataset,
     createTrainingJob,
@@ -3444,24 +3802,26 @@ export function App() {
     navigationHydrated,
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline, isActiveTimelineDirty,
-    createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
+    createTimeline, saveTimeline, resolveTimelineTrim, exportTimeline, extractTimelineFrame, queueTimelineVideoJob, refreshTimelines,
     assets, loadedAssetsProjectId, activeAssetLoadState, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
-    jobAction, clearCompletedJobs, cancelPendingJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
+    jobAction, clearCompletedJobs, cancelPendingJobs, prioritizeJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     projectFilter, setProjectFilter, projects,
-    createVideoJob, createVideoUpscaleJob, createImageJob, createAudioJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
+    createVideoJob, createVideoUpscaleJob, createImageJob, createVectorJob, createVectorPromptWorkflow, createAudioJob, refinePrompt, qwenRewritePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, recentAudioAssets, studioLaunch,
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
     rememberLocalGenerationJob, personTracks, createPersonDetectionJob,
-    createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, audioModels, models, macCapabilities,
+    createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, audioModels, models, modelCatalogStatus, macCapabilities,
+    macCapabilitiesAuthoritative, macCapabilitiesError, macCapabilitiesLoading,
+    refreshMacCapabilities,
     loras, deleteLora, updateLora, fetchLoraEmbeddedTags, deleteModel, deleteModelVariant, createModelDownloadJob, createLoraDownloadJob, createModelConvertJob,
     createLoraImportJob, createModelImportJob, requestedGpu, setRequestedGpu,
     presets, createPreset, updatePreset, deletePreset, duplicatePreset, token, authenticated,
     promptBatches, createPromptBatch, updatePromptBatch, deletePromptBatch, duplicatePromptBatch,
     trainingDatasets, trainingDatasetsProjectId, trainingDatasetsError, loadingTrainingDatasets,
-    refreshTrainingDatasets, loadTrainingDataset, loadTrainingDatasetReadiness, setTrainingDatasetItemQualityAck, createTrainingDataset, uploadTrainingDatasetItem,
+    refreshTrainingDatasets, loadTrainingDataset, loadTrainingDatasetReadiness, setTrainingDatasetItemQualityAck, createTrainingDataset, uploadTrainingDatasetItem, uploadLtxPreparedBundle,
     updateTrainingDataset, batchRenameTrainingDataset, deleteTrainingDataset, writeTrainingDatasetCaptionSidecars,
-    createTrainingDatasetCaptionJob, createTrainingDatasetParquetImportJob, createTrainingDatasetUpscaleJob, createTrainingDatasetAnalysisJob, createTrainingDatasetFaceAnalysisJob, smartCropTrainingDataset, stripExifTrainingDataset, createTrainingJob, trainingPresets, trainingPresetsError,
+    createTrainingDatasetCaptionJob, createTrainingDatasetParquetImportJob, createTrainingDatasetUpscaleJob, createTrainingDatasetAnalysisJob, createTrainingDatasetFaceAnalysisJob, createTrainingDatasetSubjectMaskJob, loadTrainingDatasetSubjectMasks, uploadTrainingDatasetSubjectMask, smartCropTrainingDataset, stripExifTrainingDataset, createTrainingJob, trainingPresets, trainingPresetsError,
     trainingTargets, trainingTargetsError, setActiveView, registerLeaveGuard, registerProjectSwitchGuard,
     trackEditorScratchOp, releaseEditorScratchOp, registerEditorScratchClaim,
     savedVoices, refreshSavedVoices, createSavedVoice, deleteSavedVoice, characters,
@@ -3501,6 +3861,7 @@ export function App() {
       <AppStaticContext.Provider value={appStaticValue}>
         <AppLiveContext.Provider value={appLiveValue}>
           <SimpleShell
+            appVersion={<AppVersion update={appUpdate} />}
             accent={accent}
             embedWorkflow={embedWorkflow}
             lockedToSimple={uiModeLocked}
@@ -3530,6 +3891,7 @@ export function App() {
               too — otherwise a Simple-UI user's drop would be inspected and then answered by
               nothing. It portals to <body>, so it does not disturb this shell's layout. */}
           {workflowDropPanel}
+          {modelLibraryOverlays}
         </AppLiveContext.Provider>
       </AppStaticContext.Provider>
     );
@@ -3540,64 +3902,63 @@ export function App() {
     <AppLiveContext.Provider value={appLiveValue}>
     <main className="app">
       <aside className="sidebar" aria-label="Primary">
-        <div className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            <Logo size={32} />
-          </span>
-          <div>
-            <h1>Scene<span className="light">Works</span></h1>
-            <p>Local creative studio</p>
+        <div className="sidebar-scroll">
+          <div className="brand">
+            <span className="brand-mark" aria-hidden="true">
+              <Logo size={32} />
+            </span>
+            <div>
+              <h1>Scene<span className="light">Works</span></h1>
+              <p>Local creative studio</p>
+            </div>
           </div>
+
+          <ProjectSwitcher
+            activeProject={activeProject}
+            disabled={!authenticated}
+            onCreate={createProject}
+            onSelect={selectProject}
+            projects={projects}
+          />
+
+          {navSections.map((section) => (
+            <div className="sidebar-section" key={section.label}>
+              <div className="sidebar-section-title">{section.label}</div>
+              <nav className="nav-list">
+                {section.items.map((item) => {
+                  const IconComponent = item.icon;
+                  const active = activeIndicators[item.id];
+                  const label = item.label ?? item.id;
+                  return (
+                    <button
+                      className={activeView === item.id ? "nav-item active" : "nav-item"}
+                      key={item.id}
+                      onClick={() => navTo(item.id)}
+                      title={label}
+                      type="button"
+                    >
+                      <IconComponent />
+                      <span className="nav-label">{label}</span>
+                      {active ? <span aria-hidden="true" className="nav-pulse" /> : null}
+                    </button>
+                  );
+                })}
+              </nav>
+            </div>
+          ))}
+
         </div>
-
-        <ProjectSwitcher
-          activeProject={activeProject}
-          disabled={!authenticated}
-          onCreate={createProject}
-          onSelect={selectProject}
-          projects={projects}
-        />
-
-        {navSections.map((section) => (
-          <div className="sidebar-section" key={section.label}>
-            <div className="sidebar-section-title">{section.label}</div>
-            <nav className="nav-list">
-              {section.items.map((item) => {
-                const IconComponent = item.icon;
-                const active = activeIndicators[item.id];
-                const label = item.label ?? item.id;
-                return (
-                  <button
-                    className={activeView === item.id ? "nav-item active" : "nav-item"}
-                    key={item.id}
-                    onClick={() => navTo(item.id)}
-                    title={label}
-                    type="button"
-                  >
-                    <IconComponent />
-                    <span className="nav-label">{label}</span>
-                    {active ? <span aria-hidden="true" className="nav-pulse" /> : null}
-                  </button>
-                );
-              })}
-            </nav>
-          </div>
-        ))}
 
         {/* Simple ⇄ Advanced switch (design handoff). The ONE addition this shell makes for
             the Simple UI; the same component renders in the Simple sidebar footer, so the
             control can never present differently between the two. */}
         <div className="sidebar-footer">
+          <AppVersion update={appUpdate} />
           <SimpleModeSwitch
             locked={uiModeLocked}
             mode={ADVANCED_MODE}
             onChange={setUiModeOverride}
           />
-          {APP_VERSION ? (
-            <span className="app-version" title={`SceneWorks ${APP_VERSION}`}>
-              v{APP_VERSION}
-            </span>
-          ) : null}
         </div>
       </aside>
 
@@ -3709,9 +4070,11 @@ export function App() {
         {activeView === "Settings" ? (
           <SettingsScreen
             accent={accent}
+            appUpdate={appUpdate}
             embedWorkflow={embedWorkflow}
             lockedToSimple={uiModeLocked}
             onAccentChange={changeAccent}
+            onChangeModelLibrary={changeModelLibrary}
             onEmbedWorkflowChange={changeEmbedWorkflow}
             onSimpleDefaultChange={changeSimpleUiDefault}
             sharingFocusRequest={settingsSharingFocusRequest}
@@ -3814,6 +4177,11 @@ export function App() {
             <ImageEditor key={activeProject?.id ?? "default"} />
           </KeepAlivePane>
         ) : null}
+        {keepAliveMounted("VectorStudio") ? (
+          <KeepAlivePane active={activeView === "VectorStudio"}>
+            <VectorStudio key={activeProject?.id ?? "default"} />
+          </KeepAlivePane>
+        ) : null}
           </>
         )}
       </section>
@@ -3841,6 +4209,11 @@ export function App() {
           navTo — resolve through a real React dialog instead of window.confirm (which
           silently no-ops in the Tauri WebView). Renders nothing until a confirm is asked. */}
       <ConfirmHost />
+
+      {/* The unavailable-model-library prompt and its post-relocation restart disclosure
+          (sc-19709), built above and rendered in BOTH shells. Renders nothing while the gate is
+          idle, which is every normal run. */}
+      {modelLibraryOverlays}
 
       {/* "Workflow found" (sc-15951) — opened by a drop no in-app dropzone claimed, and only
           after the file turned out to carry a recipe. Renders nothing otherwise, which is the

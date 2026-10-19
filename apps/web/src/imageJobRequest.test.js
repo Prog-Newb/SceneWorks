@@ -76,6 +76,8 @@ function img2imgPidState(overrides = {}) {
     showPidToggle: true,
     usePid: true,
     pidTarget: "2k",
+    showDecoderPicker: false,
+    decoder: "native",
     hideReferenceStrength: false,
     ipAdapterScale: 0.8,
     identityStructure: false,
@@ -128,6 +130,31 @@ describe("buildImageJobRequest", () => {
     expect(buildImageJobRequest(img2imgPidState()).hiresFix).toBeUndefined();
   });
 
+  it("sends the Iris post-processing pass by scale / input sizing / colour fix — never a factor (sc-25683)", () => {
+    const iris = buildImageJobRequest(
+      img2imgPidState({
+        img2imgReferenceAssetId: "",
+        usePid: false,
+        upscaleEnabled: true,
+        upscaleEngine: "iris",
+        upscaleFactor: 2,
+        upscaleRestore: { scale: 1.5, inputSizing: "original", colorFix: false },
+      }),
+    );
+    expect(iris.upscale).toEqual({ enabled: true, engine: "iris", scale: 1.5, inputSizing: "original", colorFix: false });
+    const esrgan = buildImageJobRequest(
+      img2imgPidState({
+        img2imgReferenceAssetId: "",
+        usePid: false,
+        upscaleEnabled: true,
+        upscaleEngine: "real-esrgan",
+        upscaleFactor: 4,
+        upscaleRestore: { scale: 1.5 },
+      }),
+    );
+    expect(esrgan.upscale).toEqual({ enabled: true, factor: 4, engine: "real-esrgan" });
+  });
+
   it("keeps Mage Edit's required source separate from its ordered optional references", () => {
     const request = buildImageJobRequest(
       img2imgPidState({
@@ -177,6 +204,19 @@ describe("buildImageJobRequest", () => {
     const request = buildImageJobRequest(img2imgPidState());
     expect(request.advanced.usePid).toBe(true);
     expect(request.advanced.pidTarget).toBe("2k");
+  });
+
+  it("forwards the descriptor-derived alternate decoder selection", () => {
+    const request = buildImageJobRequest(
+      img2imgPidState({
+        showPidToggle: true,
+        usePid: false,
+        showDecoderPicker: true,
+        decoder: "wan_2_1_vae",
+      }),
+    );
+    expect(request.advanced.decoder).toBe("wan_2_1_vae");
+    expect(request.advanced.usePid).toBeUndefined();
   });
 
   it("produces an identical img2img + PiD payload for a batch-style call as for single Generate", () => {

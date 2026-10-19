@@ -25,15 +25,15 @@
       "mlx": false
     },
     "boogu_image": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "boogu_image_edit": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "boogu_image_turbo": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "chatterbox_tts": {
@@ -88,6 +88,10 @@
       "mlx": true
     },
     "illustrious_xl_v2": {
+      "candle": true,
+      "mlx": true
+    },
+    "iris_3b": {
       "candle": true,
       "mlx": true
     },
@@ -160,6 +164,14 @@
     "qwen_image": {
       "candle": true,
       "mlx": true
+    },
+    "qwen_image_2_1": {
+      "candle": false,
+      "mlx": false
+    },
+    "qwen_image_2_1_turbo": {
+      "candle": false,
+      "mlx": false
     },
     "qwen_image_edit": {
       "mlx": true
@@ -247,6 +259,27 @@
       "candle": false
     },
     "stable_audio_3_small_sfx_base": {
+      "candle": false
+    },
+    "yue2": {
+      "candle": false
+    },
+    "yue_en_cot": {
+      "candle": false
+    },
+    "yue_en_icl": {
+      "candle": false
+    },
+    "yue_jp_kr_cot": {
+      "candle": false
+    },
+    "yue_jp_kr_icl": {
+      "candle": false
+    },
+    "yue_zh_cot": {
+      "candle": false
+    },
+    "yue_zh_icl": {
       "candle": false
     },
     "z_image": {

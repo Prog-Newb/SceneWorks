@@ -7,6 +7,7 @@
 
 import { terminalStatuses } from "./constants.js";
 import { buildDetailJobBody, buildEditJobBody, buildUpscaleJobBody } from "./imageJobs.js";
+import { buildDepthJobBody, DEPTH_ENDPOINT } from "./depthJobs.js";
 
 // The three batch-capable ops + the endpoint each posts to (mirrors the editor:
 // upscale/detail are generic jobs, edit is the image-jobs route). `needsPrompt`
@@ -15,6 +16,9 @@ export const BATCH_OPS = [
   { key: "upscale", label: "Upscale", endpoint: "/api/v1/jobs", needsPrompt: false },
   { key: "detail", label: "Detail enhance", endpoint: "/api/v1/jobs", needsPrompt: false },
   { key: "edit", label: "AI edit", endpoint: "/api/v1/image/jobs", needsPrompt: true },
+  // Iris-3B monocular depth (sc-25682): one typed depth job per image; each result is a new depth
+  // asset (raw .npy + preview) linked to its source — the source is never modified.
+  { key: "depth", label: "Depth map", endpoint: DEPTH_ENDPOINT, needsPrompt: false },
 ];
 
 export function batchOpByKey(key) {
@@ -48,6 +52,8 @@ export function buildBatchJob({ op, asset, params = {}, project, requestedGpu, d
         engine: params.engine,
         displayName,
         softness: params.softness,
+        // Iris restoration controls (sc-25683); ignored by the factor engines.
+        restore: params.restore,
       }),
     };
   }
@@ -82,6 +88,19 @@ export function buildBatchJob({ op, asset, params = {}, project, requestedGpu, d
         height: dims.height,
         // Same-size edit (no canvas extend) — each image is edited at its native size.
         fitMode: "crop",
+      }),
+    };
+  }
+  if (op === "depth") {
+    return {
+      endpoint: DEPTH_ENDPOINT,
+      body: buildDepthJobBody({
+        project,
+        requestedGpu,
+        sourceAssetId,
+        resolution: params.resolution,
+        displayName,
+        irisModel: params.irisModel,
       }),
     };
   }
@@ -139,23 +158,48 @@ export function summarizeBatchProgress(items, jobs, observedJobs) {
   return summary;
 }
 
-// Progress for a prompt-batch run (sc-9980). Unlike summarizeBatchProgress, this fan-out
-// enqueues incrementally — a structured-caption model auto-expands each resolved prompt
-// before posting, so enqueueing can be slow. An item with no jobId and no `error` is
-// therefore PENDING submission (NOT failed); `error: true` marks a submission that threw.
-// `active` = queued + running (jobs that Cancel can still stop).
-export function summarizeBatchRun(items, jobs, observedJobs) {
-  const summary = { total: items?.length ?? 0, pending: 0, queued: 0, running: 0, completed: 0, failed: 0 };
-  for (const item of items ?? []) {
-    if (item.error) {
-      summary.failed += 1;
-      continue;
+// Move terminal active jobs into the bounded prompt-batch totals. The active-id list is
+// deliberately small (the Studio applies backpressure before it grows without bound), while
+// completed and failed are scalar counters. Returns the original run when nothing settled.
+export function settlePromptBatchRun(run, jobs, observedJobs) {
+  if (!run?.activeJobIds?.length) return run;
+  let completed = run.completed ?? 0;
+  let failed = run.failed ?? 0;
+  const activeJobIds = [];
+  for (const jobId of run.activeJobIds) {
+    const status = batchItemStatus(jobId, jobs, observedJobs);
+    // A native prompt-batch job (sc-25681) settles every prompt it carries.
+    const n = run.sizes?.[jobId] ?? 1;
+    if (status === "completed") {
+      completed += n;
+      observedJobs?.delete(jobId);
+    } else if (status === "failed") {
+      failed += n;
+      observedJobs?.delete(jobId);
+    } else {
+      activeJobIds.push(jobId);
     }
-    if (!item.jobId) {
-      summary.pending += 1;
-      continue;
-    }
-    summary[batchItemStatus(item.jobId, jobs, observedJobs)] += 1;
+  }
+  if (activeJobIds.length === run.activeJobIds.length) return run;
+  return { ...run, completed, failed, activeJobIds };
+}
+
+// Progress for a prompt-batch run (sc-9980). It holds scalar totals plus only the bounded
+// currently-active job ids, never one entry per resolved prompt. `submitted` includes posts
+// that failed before returning a job id; `pending` is the not-yet-submitted suffix.
+export function summarizeBatchRun(run, jobs, observedJobs) {
+  const total = Math.max(run?.total ?? 0, 0);
+  const submitted = Math.min(Math.max(run?.submitted ?? 0, 0), total);
+  const summary = {
+    total,
+    pending: total - submitted,
+    queued: 0,
+    running: 0,
+    completed: run?.completed ?? 0,
+    failed: run?.failed ?? 0,
+  };
+  for (const jobId of run?.activeJobIds ?? []) {
+    summary[batchItemStatus(jobId, jobs, observedJobs)] += run.sizes?.[jobId] ?? 1;
   }
   summary.done = summary.completed + summary.failed;
   summary.active = summary.queued + summary.running;

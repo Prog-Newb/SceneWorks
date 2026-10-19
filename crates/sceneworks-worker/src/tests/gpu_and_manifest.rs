@@ -1,4 +1,6 @@
-/// sc-17774: the live closure digest for the candle Krea control lane, read rather than frozen.
+/// The live closure digest for the candle Krea control lane, read rather than frozen. Since
+/// sc-22738 this is the PROVENANCE string `fit_ladder`/`fit_ladder_for_tier` copy into the evidence
+/// receipt's `inference_revision`; nothing compares it, so it cannot change any fit below.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn krea_control_closure_digest() -> String {
     sceneworks_core::memory_calibration::packaged_closure_digest("candle", "krea_2_turbo_control")
@@ -268,6 +270,14 @@ fn mlx_gpu_advertises_generation_capabilities_only() {
     assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "video_generate"));
+    // The terminal integration wires the native image-to-SVG provider. Text-to-SVG stays
+    // unavailable because neither StarVector model exposes that mode.
+    assert!(capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "vector_image_to_svg"));
+    assert!(!capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "vector_text_to_svg"));
     assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "training_caption"));
@@ -334,6 +344,7 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         WorkerCapability::ImageDetail,
         WorkerCapability::ImageVqa,
         WorkerCapability::ImageInterleave,
+        WorkerCapability::VectorImageToSvg,
         WorkerCapability::VideoExtend,
         WorkerCapability::VideoBridge,
         WorkerCapability::PersonReplace,
@@ -353,6 +364,8 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         // sc-6105: smart-select segmentation uses native-MLX SAM3 box prompts here; the Candle GPU
         // descriptor advertises the sibling route off-Mac.
         WorkerCapability::ImageSegment,
+        // sc-25682: Iris-3B monocular depth (native-MLX `mlx-gen-iris` depth task).
+        WorkerCapability::ImageDepth,
         WorkerCapability::VideoUpscale,
         WorkerCapability::PersonDetect,
         WorkerCapability::PersonTrack,
@@ -396,6 +409,11 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("flux_schnell", false, false),
         ("flux_dev", true, false),
         ("qwen_image", true, true),
+        // Qwen-Image 2.1 (sc-24108): a true-CFG family — the engine takes a real negative branch
+        // and a `true_cfg` scale.
+        ("qwen_image_2_1", true, true),
+        // sc-25907: the distilled Turbo id is the base descriptor under a second id.
+        ("qwen_image_2_1_turbo", true, true),
         ("qwen_image_edit", true, true),
         ("qwen_image_edit_2509", true, true),
         ("qwen_image_edit_2511", true, true),
@@ -504,6 +522,8 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("mage_flow_edit_base", true, true),
         ("mage_flow_edit", true, true),
         ("mage_flow_edit_turbo", false, false),
+        // Iris-3B (sc-25679): CFG against a negative prompt (default ""), cfg_scale = guidance.
+        ("iris_3b", true, true),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());
@@ -527,7 +547,10 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
 /// `models` array. Shared by the manifest-gating catalog-eligibility tests so the ~15-line
 /// load→strip-comments→parse→get-array boilerplate lives in ONE place (sc-8926 dedupe of the
 /// near-verbatim copies that had drifted between the SD3.5 / SANA / SANA-Sprint gate tests).
-fn builtin_models_manifest() -> Vec<Value> {
+// `pub(crate)` so the `image_jobs::tests` module reads the SAME shipped bytes rather than growing a
+// second load→strip→parse copy (sc-20529: its klein guards must be driven off the real builtin
+// entries, not a synthetic stand-in that can pass vacuously).
+pub(crate) fn builtin_models_manifest() -> Vec<Value> {
     use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
     use sceneworks_core::jsonc::strip_jsonc_comments;
 
@@ -548,11 +571,44 @@ fn builtin_models_manifest() -> Vec<Value> {
 /// The builtin-manifest entry for `id`, panicking with a clear hint if the id is absent. Shared by
 /// the manifest-gating tests (sc-8926) so each gate test asserts on the entry directly instead of
 /// re-implementing the manifest lookup.
-fn builtin_model_entry(id: &str) -> Value {
+pub(crate) fn builtin_model_entry(id: &str) -> Value {
     builtin_models_manifest()
         .into_iter()
         .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
         .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
+}
+
+/// sc-20754: the three MiniMax-H3 Candle tiers were measured in separate idle CUDA processes at the
+/// shipped 1344x768 / 124-frame / 50-NFE workload. Pin the evidence as one atomic manifest fact so
+/// dropping a tier, reverting `measured`, or falling back to the old absent gate is immediately red.
+#[test]
+fn minimax_h3_candle_vram_rows_are_the_three_measured_cuda_receipts() {
+    let entry = builtin_model_entry("minimax_h3");
+    let candle = entry
+        .get("candle")
+        .and_then(Value::as_object)
+        .expect("minimax_h3 candle block");
+    assert_eq!(candle.get("measured").and_then(Value::as_bool), Some(true));
+    assert_eq!(candle.get("minMemoryGb").and_then(Value::as_u64), Some(43));
+    assert_eq!(
+        candle
+            .get("vramMeasuredPixels")
+            .and_then(Value::as_u64),
+        Some(1_032_192)
+    );
+
+    let tiers = candle
+        .get("vramGbByTier")
+        .and_then(Value::as_object)
+        .expect("all three measured tier rows");
+    assert_eq!(tiers.len(), 3);
+    for (tier, peak_gb) in [("q4", 40.068), ("q8", 74.696), ("bf16", 67.012)] {
+        let actual = tiers
+            .get(tier)
+            .and_then(Value::as_f64)
+            .unwrap_or_else(|| panic!("minimax_h3 measured {tier} row"));
+        assert!((actual - peak_gb).abs() < f64::EPSILON * 8.0, "{tier}: {actual}");
+    }
 }
 
 /// sc-12155 lint: every `type: "image"` model that carries a candle VRAM budget
@@ -1753,73 +1809,57 @@ fn qwen_edit_candle_blocks_drive_the_fit_gate_and_reject() {
     );
 }
 
-/// sc-16093: every built-in model that a bespoke single-base Candle route can load either carries a
-/// live per-tier peak row or is pinned here as an explicit unmeasured exception. This is the data half
-/// of the source guard in `image_jobs/tests.rs`: deleting a handler call fails there; deleting a row
-/// that makes an evidenced call effective fails here. Adding evidence to an exception also fails so
-/// its call site cannot quietly keep bypassing newly available evidence.
+/// sc-16093, rewritten for sc-22512 (epic 22505, E8): the per-tier Candle VRAM rows that ARE
+/// declared are well-formed, and the Z-Image Edit route still reaches the generic provider path so
+/// the shared memory selector stays live.
+///
+/// What this deliberately no longer does: require any model to carry a `vramGbByTier` row at all,
+/// and maintain the `EXPLICITLY_UNMEASURED` allowlist that paired every unmeasured model with a
+/// prose reason at its call site. Both reddened purely because a MEASUREMENT was absent, and an
+/// absent measurement is never a failure — the route simply prices that request from the
+/// conservative analytic estimate, and runtime catching (E6) is the failure posture. A model with
+/// no measured VRAM row contributes nothing here.
+///
+/// What survives fires on data that IS present: a declared per-tier peak that is not a positive
+/// number is malformed, and an entry whose resolved default tier is not one it advertises is
+/// self-contradictory — it would price a request from a tier the catalog never states.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn bespoke_candle_base_evidence_is_live_or_explicitly_unmeasured() {
-    const EVIDENCED: &[&str] = &[
-        "flux2_klein_9b",
-        "flux2_dev",
-        "z_image_turbo",
-        "krea_2_raw",
-        "krea_2_turbo",
-    ];
-    const EXPLICITLY_UNMEASURED: &[(&str, &str, &str)] = &[
-        (
-            "sdxl",
-            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
-            include_str!("../image_jobs/sdxl_edit_candle.rs"),
-        ),
-        (
-            "realvisxl",
-            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
-            include_str!("../image_jobs/sdxl_edit_candle.rs"),
-        ),
-        (
-            "illustrious_xl_v1",
-            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
-            include_str!("../image_jobs/sdxl_edit_candle.rs"),
-        ),
-        (
-            "illustrious_xl_v2",
-            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
-            include_str!("../image_jobs/sdxl_edit_candle.rs"),
-        ),
-        (
-            "flux2_klein_9b_true_v2",
-            "the local True V2 converted fine-tune has no CUDA calibration row",
-            include_str!("../image_jobs/flux2_edit_candle.rs"),
-        ),
-        (
-            "bernini_image",
-            "Bernini still-image tiers have not been CUDA-calibrated",
-            include_str!("../image_jobs/bernini.rs"),
-        ),
-    ];
-
-    let assert_resident_rows = |id: &str| {
-        let model = builtin_model_entry(id);
-        let tiers = model
+fn declared_candle_vram_rows_are_well_formed() {
+    for model in builtin_models_manifest() {
+        let id = model
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("<no id>")
+            .to_owned();
+        let Some(tiers) = model
             .get("candle")
             .and_then(|candle| candle.get("vramGbByTier"))
             .and_then(Value::as_object)
-            .unwrap_or_else(|| panic!("{id}: bespoke Candle base route requires vramGbByTier"));
-        assert!(!tiers.is_empty(), "{id}: vramGbByTier must not be empty");
+        else {
+            continue;
+        };
+        if tiers.is_empty() {
+            continue;
+        }
+        for (tier, peak) in tiers {
+            let gb = peak
+                .as_f64()
+                .unwrap_or_else(|| panic!("{id}: vramGbByTier.{tier} is not a number: {peak}"));
+            assert!(
+                gb.is_finite() && gb > 0.0,
+                "{id}: vramGbByTier.{tier} must be a positive resident peak, got {gb}"
+            );
+        }
         let default = default_tier_key(&model);
         assert!(
-            tiers.get(default).and_then(Value::as_f64).is_some(),
-            "{id}: resolved/default tier {default} has no numeric resident peak"
+            tiers.contains_key(default),
+            "{id}: declares vramGbByTier {:?} but resolves to tier {default}, which it does not \
+             advertise",
+            tiers.keys().collect::<Vec<_>>()
         );
-        tiers.clone()
-    };
-
-    for id in EVIDENCED {
-        assert_resident_rows(id);
     }
+
     let zimage_edit_arm = include_str!("../image_jobs.rs")
         .split_once("CandleImageRoute::ZimageEdit => {")
         .expect("Z-Image Edit route must remain explicit")
@@ -1831,20 +1871,104 @@ fn bespoke_candle_base_evidence_is_live_or_explicitly_unmeasured() {
         zimage_edit_arm.contains("generate_candle_stream("),
         "Z-Image Edit must use the generic provider path so z_image_turbo catalog evidence and the shared memory selector remain live"
     );
-    for (id, reason, source) in EXPLICITLY_UNMEASURED {
+}
+
+/// The INVERSE half of the row well-formedness check above, restored for sc-22512 after the first
+/// pass over-deleted it with the `EXPLICITLY_UNMEASURED` roster it lived inside.
+///
+/// The roster was the frozen part and is gone for good; the claim was not. This is a
+/// PRESENT-DATA contradiction, not an absence: a model whose live Candle image route hard-codes
+/// "no measurement exists for this entry" while the catalog publishes per-tier `vramGbByTier` rows
+/// for it is two shipped artifacts disagreeing. The route then prices the request from the
+/// conservative floor and silently ignores measurements the catalog already has — a production
+/// defect that no amount of E8 "absence never blocks" makes acceptable. A model with no rows and no
+/// unmeasured call site contributes nothing here, and adding a NEW unmeasured lane never reds.
+///
+/// Derived, with no hardcoded model or file roster: `src/image_jobs/` is enumerated from the
+/// directory itself, and the models are read off the two shapes an unmeasured reason takes at a
+/// live call site —
+///
+/// 1. a `"<id>" => CandleBaseEvidence::Ungateable(..)` dispatch arm, which names its model, and
+/// 2. a module that admits through `admit_candle_base_floor_with_resident_overlay(..)` — the
+///    floor-only helper, i.e. the whole lane is unmeasured — whose model is read from that
+///    module's own `request.model == "<id>"` eligibility guard.
+///
+/// Both rosters are re-derived on every run, so retiring a lane or a reason deletes its obligation
+/// automatically instead of staling a list.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn a_route_that_declares_a_model_unmeasured_contradicts_catalog_vram_rows_for_it() {
+    /// Every `"<literal>"` immediately preceding `marker` in `source`, one per occurrence.
+    fn ids_before(source: &str, marker: &str) -> Vec<String> {
+        source
+            .match_indices(marker)
+            .filter_map(|(at, _)| {
+                let head = &source[..at];
+                let close = head.rfind('"')?;
+                let open = head[..close].rfind('"')?;
+                Some(head[open + 1..close].to_owned())
+            })
+            .collect()
+    }
+
+    // The directory itself is the roster. `image_jobs.rs`'s `mod` lines are NOT enough: several
+    // lanes (bernini among them) are pulled in with `include!("image_jobs/<name>.rs")` instead, so
+    // a `mod`-only sweep silently skips exactly the floor-admitted lanes this check exists for.
+    // `tests.rs` is the one exclusion — it is the module's own test harness, and the call-site
+    // spellings it quotes in fixtures and assertions are not live routes.
+    let module_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/image_jobs");
+    let mut modules = std::fs::read_dir(&module_dir)
+        .unwrap_or_else(|error| panic!("read {}: {error}", module_dir.display()))
+        .map(|entry| entry.expect("image_jobs dir entry").path())
+        .filter(|path| {
+            path.extension().is_some_and(|extension| extension == "rs")
+                && path.file_name().is_some_and(|name| name != "tests.rs")
+        })
+        .collect::<Vec<_>>();
+    modules.sort();
+    let mut unmeasured: Vec<(String, String)> = Vec::new();
+    for path in modules {
+        let module = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("module file name")
+            .to_owned();
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        for id in ids_before(&source, " => CandleBaseEvidence::Ungateable(") {
+            unmeasured.push((id, format!("{module}: Ungateable evidence")));
+        }
+        if source.contains("admit_candle_base_floor_with_resident_overlay(") {
+            for id in source
+                .match_indices("request.model == \"")
+                .filter_map(|(at, marker)| {
+                    source[at + marker.len()..]
+                        .split_once('"')
+                        .map(|(id, _)| id.to_owned())
+                })
+            {
+                unmeasured.push((id, format!("{module}: floor-only admission")));
+            }
+        }
+    }
+    unmeasured.sort();
+    unmeasured.dedup();
+    // Not a population gate: this only proves the two SCANNERS still see the source shapes they
+    // parse. If every unmeasured lane is retired the derivation legitimately yields nothing, and
+    // the loop below is vacuous rather than red.
+    for (id, site) in &unmeasured {
         let model = builtin_model_entry(id);
-        let resident = model
+        let rows = model
             .get("candle")
             .and_then(|candle| candle.get("vramGbByTier"))
             .and_then(Value::as_object);
         assert!(
-            resident.is_none_or(serde_json::Map::is_empty),
-            "{id}: now has catalog rows; remove its explicit unmeasured reason from the route and this guard"
-        );
-        assert!(!reason.trim().is_empty(), "{id}: unmeasured exception needs a recorded reason");
-        assert!(
-            source.contains(reason),
-            "{id}: its unmeasured reason must remain recorded at the live route call site"
+            rows.is_none_or(serde_json::Map::is_empty),
+            "{id}: {site} hard-codes an unmeasured reason, but the catalog publishes \
+             candle.vramGbByTier {:?}. The route would price this request from the floor and \
+             ignore measurements that exist — move the lane onto the evidenced admission path, or \
+             drop the rows.",
+            rows.map(|rows| rows.keys().collect::<Vec<_>>())
         );
     }
 }
@@ -2006,19 +2130,39 @@ fn sana_manifest_entry_gates_correctly() {
         "sana defaults to the packed q4 tier"
     );
     // Per-tier variants present (q4 default + q8 + bf16), each its own installable artifact (sc-8508).
-    let variants: Vec<&str> = entry
+    let downloads = entry
         .get("downloads")
         .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|d| d.get("variant").and_then(Value::as_str))
-                .collect()
+        .expect("sana downloads");
+    let variants: Vec<&str> = downloads
+        .iter()
+        .filter(|download| {
+            download["platforms"]
+                .as_array()
+                .is_some_and(|platforms| platforms.iter().any(|platform| platform == "macos"))
         })
-        .unwrap_or_default();
+        .filter_map(|download| download.get("variant").and_then(Value::as_str))
+        .collect();
     assert_eq!(
         variants,
         vec!["q4", "q8", "bf16"],
         "sana ships the q4/q8/bf16 tier matrix"
+    );
+    let candle_variants = downloads
+        .iter()
+        .filter(|download| {
+            download["platforms"].as_array().is_some_and(|platforms| {
+                platforms
+                    .iter()
+                    .any(|platform| platform == "windows" || platform == "linux")
+            })
+        })
+        .filter_map(|download| download.get("variant").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        candle_variants,
+        vec!["bf16"],
+        "sana Candle ships only the immutable dense physical tier"
     );
     assert!(
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
@@ -2031,15 +2175,18 @@ fn sana_manifest_entry_gates_correctly() {
         entry.get("loraCompatibility").is_none(),
         "sana must not advertise loraCompatibility"
     );
-    // NVIDIA non-commercial notice surfaced in the UI description (the gated-with-notice carrier).
+    // Licence notice surfaced in the UI description: Apache-2.0 for the SANA weights (NVIDIA
+    // relicensed them 2026-07-31) plus the Gemma Terms of Use for the bundled text encoder.
     let desc = entry
         .get("ui")
         .and_then(|u| u.get("description"))
         .and_then(Value::as_str)
         .unwrap_or("");
     assert!(
-        desc.contains("NVIDIA") && desc.to_lowercase().contains("non-commercial"),
-        "sana UI description carries the NVIDIA non-commercial notice"
+        desc.contains("Apache-2.0")
+            && desc.contains("Gemma Terms of Use")
+            && !desc.to_lowercase().contains("non-commercial"),
+        "sana UI description carries the Apache-2.0 + Gemma Terms of Use notice"
     );
 }
 
@@ -2102,19 +2249,39 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         Some(4),
         "sana-sprint defaults to the packed q4 tier"
     );
-    let variants: Vec<&str> = entry
+    let downloads = entry
         .get("downloads")
         .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|d| d.get("variant").and_then(Value::as_str))
-                .collect()
+        .expect("sana-sprint downloads");
+    let variants: Vec<&str> = downloads
+        .iter()
+        .filter(|download| {
+            download["platforms"]
+                .as_array()
+                .is_some_and(|platforms| platforms.iter().any(|platform| platform == "macos"))
         })
-        .unwrap_or_default();
+        .filter_map(|download| download.get("variant").and_then(Value::as_str))
+        .collect();
     assert_eq!(
         variants,
         vec!["q4", "q8", "bf16"],
         "sana-sprint ships the q4/q8/bf16 tier matrix"
+    );
+    let candle_variants = downloads
+        .iter()
+        .filter(|download| {
+            download["platforms"].as_array().is_some_and(|platforms| {
+                platforms
+                    .iter()
+                    .any(|platform| platform == "windows" || platform == "linux")
+            })
+        })
+        .filter_map(|download| download.get("variant").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        candle_variants,
+        vec!["bf16"],
+        "sana-sprint Candle ships only the immutable dense physical tier"
     );
     assert!(
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
@@ -2125,15 +2292,18 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         entry.get("loraCompatibility").is_none(),
         "sana-sprint must not advertise loraCompatibility"
     );
-    // NVIDIA non-commercial notice surfaced in the UI description (the gated-with-notice carrier).
+    // Licence notice surfaced in the UI description: Apache-2.0 for the SANA weights (NVIDIA
+    // relicensed them 2026-07-31) plus the Gemma Terms of Use for the bundled text encoder.
     let desc = entry
         .get("ui")
         .and_then(|u| u.get("description"))
         .and_then(Value::as_str)
         .unwrap_or("");
     assert!(
-        desc.contains("NVIDIA") && desc.to_lowercase().contains("non-commercial"),
-        "sana-sprint UI description carries the NVIDIA non-commercial notice"
+        desc.contains("Apache-2.0")
+            && desc.contains("Gemma Terms of Use")
+            && !desc.to_lowercase().contains("non-commercial"),
+        "sana-sprint UI description carries the Apache-2.0 + Gemma Terms of Use notice"
     );
 }
 
@@ -2424,16 +2594,62 @@ fn wan_ti2v_5b_manifest_ships_the_quant_matrix() {
         .get("downloads")
         .and_then(Value::as_array)
         .expect("wan TI2V-5B downloads");
-    // The macOS tiers, in order, from the SceneWorks quant-matrix repo.
+    // The macOS tiers, in order, from the SceneWorks quant-matrix repo (co-requisite rows ride along).
+    let on_macos = |d: &&Value| {
+        d.get("platforms")
+            .and_then(Value::as_array)
+            .map(|p| p.iter().any(|x| x.as_str() == Some("macos")))
+            .unwrap_or(false)
+    };
+    let co_requisite = |d: &&Value| d.get("coRequisite").and_then(Value::as_bool) == Some(true);
     let macos: Vec<&Value> = downloads
         .iter()
-        .filter(|d| {
-            d.get("platforms")
-                .and_then(Value::as_array)
-                .map(|p| p.iter().any(|x| x.as_str() == Some("macos")))
-                .unwrap_or(false)
+        .filter(on_macos)
+        .filter(|d| !co_requisite(d))
+        .collect();
+    // sc-20686: the macOS `wan_vace` engine (replace_person + the tier-C extend/bridge) needs the
+    // Wan2.1-VACE-1.3B transformer, fetched alongside as a pinned soft co-requisite — only its
+    // `transformer/` (the shared UMT5/VAE/tokenizer come from a base-Wan 14B tier).
+    let vace: Vec<&Value> = downloads
+        .iter()
+        .filter(on_macos)
+        .filter(co_requisite)
+        .collect();
+    // The shared UMT5/z16-VAE/tokenizer it is assembled with come from the T2V-A14B q4 tier — only
+    // those three files, so a TI2V-5B-only install can serve `wan_vace`.
+    let co_requisites: Vec<(&str, &str, &str, Value)> = vace
+        .iter()
+        .map(|d| {
+            (
+                d.get("repo").and_then(Value::as_str).unwrap_or_default(),
+                d.get("revision").and_then(Value::as_str).unwrap_or_default(),
+                d.get("required").and_then(Value::as_str).unwrap_or_default(),
+                d.get("files").cloned().unwrap_or_default(),
+            )
         })
         .collect();
+    assert_eq!(
+        co_requisites,
+        vec![
+            (
+                "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
+                "ec4d2cb062b548996b179d493fdd05340de702a1",
+                "soft",
+                serde_json::json!(["transformer/*"]),
+            ),
+            (
+                "SceneWorks/wan2.2-t2v-a14b-mlx",
+                "991eb255c544bbb2e1f1e07da4355c2f0a5337b7",
+                "soft",
+                serde_json::json!([
+                    "q4/t5_encoder.safetensors",
+                    "q4/vae.safetensors",
+                    "q4/tokenizer.json"
+                ]),
+            ),
+        ],
+        "wan TI2V-5B's macOS co-requisites are exactly the wan_vace transformer + its base components"
+    );
     let variants: Vec<&str> = macos
         .iter()
         .filter_map(|d| d.get("variant").and_then(Value::as_str))
@@ -2779,6 +2995,7 @@ fn an_unusable_gpu_withholds_every_candle_capability() {
         WorkerCapability::PersonReplace,
         WorkerCapability::ImageDetail,
         WorkerCapability::ImageSegment,
+        WorkerCapability::ImageDepth,
         WorkerCapability::DatasetAnalysis,
     ] {
         assert!(
@@ -2897,4 +3114,465 @@ fn only_a_driver_class_probe_failure_makes_the_worker_unhealthy() {
             "a worker that stays usable must report no unhealthy reason"
         );
     }
+}
+
+
+/// sc-24109/sc-24112 — the INPUTS the two fit gates read for `qwen_image_2_1`, pinned on a lane
+/// that can actually RUN (`vram_gate` itself is `cfg(backend-candle)`, so
+/// `qwen_image_2_1_resolves_a_derived_candle_floor_per_tier` first executes on the windows-candle
+/// CI lane; this is the manifest half, which runs everywhere).
+///
+/// The consequence this guards is not a rounding error, it is a product decision. With NO `candle`
+/// block `predicted_peak_gb` returns `None` and the fit gate is skipped entirely; with one, a tier
+/// resolves to a floor and the gate REFUSES the load pre-flight below it. The floors are DERIVED
+/// in GiB — the unit `VramBudget.free_gb` is in — as `ceil(peak GiB x 1.25)`, so on Candle a real
+/// RTX 5090 (31.84 GiB) and A100-40GB (39.5 GiB) admit q8 and a 24 GB card admits q4. Neither may
+/// drift silently in either direction.
+#[test]
+fn qwen_image_2_1_declares_derived_per_tier_memory_floors_and_no_measured_row() {
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog");
+
+    // One rule on both lanes — floor = ceil(max over the presets of (resident + transient) GiB x
+    // 1.25) — but NOT the same transient (inference #1029). MLX's decode is priced at 25 pipelined
+    // maps and runs bounded by default above 512^2; its floors come from the provider's
+    // `default_path_peak_max_bytes` and are pinned to that accessor by
+    // `qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source` (macOS). The candle crate
+    // publishes no derived table (it defers to the MLX crate's, which the candle lane does not
+    // link), so the Candle floors — `binding` — are pinned HERE as literals with their arithmetic.
+    for backend in ["mlx", "candle"] {
+        let block = entry.get(backend).unwrap_or_else(|| {
+            panic!("the {backend} block must exist; without it the {backend} floor is unstated")
+        });
+        let by_tier = block
+            .get("minMemoryGbByTier")
+            .unwrap_or_else(|| panic!("{backend}: sc-24112 declares a per-tier floor"));
+        assert_eq!(
+            by_tier.as_object().map(serde_json::Map::len),
+            Some(3),
+            "{backend}: a row for a tier the catalog does not ship would gate a tier nobody can \
+             select, and a missing row silently falls through to the conservative scalar"
+        );
+        assert_eq!(
+            by_tier["bf16"], block["minMemoryGb"],
+            "{backend}: the SCALAR is the densest tier's floor, the conservative fallback for any \
+             tier with no row (today `nvfp4`). Lowering it to a lighter tier's floor would \
+             under-predict an unlisted tier, and an under-prediction admits a load that OOMs"
+        );
+    }
+    // Candle: CUDA runs synchronously with an untiled default decode, so the peak transient is the
+    // decode tail's 3 structural full-res maps, 3 x 144 x H x W x 4 B, linear in area — the
+    // largest-area preset 2400x1792 binds at 6.92 GiB. Resident (MLX crate's parameter-count
+    // table): bf16 28.61, q8 16.33, q4 9.78 GiB.
+    //   bf16 28.61 + 6.92 = 35.53 x 1.25 = 44.41 -> 45
+    //   q8   16.33 + 6.92 = 23.25 x 1.25 = 29.07 -> 30
+    //   q4    9.78 + 6.92 = 16.70 x 1.25 = 20.88 -> 21
+    let candle = &entry["candle"];
+    assert_eq!(candle["minMemoryGb"], 45);
+    for (tier, floor) in [("bf16", 45), ("q8", 30), ("q4", 21)] {
+        assert_eq!(
+            candle["minMemoryGbByTier"][tier], floor,
+            "candle/{tier}: DERIVED as ceil((resident + 3-map transient at 2400x1792) GiB x 1.25); \
+             changing a number here changes which cards are refused"
+        );
+    }
+
+    assert!(
+        entry["candle"].get("vramGbByTier").is_none(),
+        "a measured per-tier row would WIN over these floors in predicted_peak_gb; nothing has \
+         been measured for 2.1 on CUDA, so declaring one would be an unmeasured claim wearing an \
+         evidence flag. The epic's terminal measurement story adds them"
+    );
+    assert!(
+        entry["candle"].get("measured").is_none() && entry["candle"].get("sequentialPeakGb").is_none(),
+        "the sibling evidence keys must be absent for the same reason"
+    );
+}
+
+/// sc-24112 — the ADMISSION ENVELOPE the catalog mirrors from the provider, pinned beside the
+/// memory floors because the two answer different questions about the same request and are easy to
+/// confuse: the floors say whether the WEIGHTS fit the host, the envelope says whether the REQUEST
+/// fits the engine.
+///
+/// `crate::admission_geometry` owns the behaviour and its own tests; this asserts the shipped
+/// catalog actually carries the block, because the gate is declaration-driven and a missing block
+/// makes it silently inert rather than loud.
+#[test]
+fn qwen_image_2_1_declares_the_admission_envelope_the_gate_needs() {
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog");
+    let geometry = entry
+        .get("admissionGeometry")
+        .expect("sc-24112 declares the envelope; without it the request gate is a no-op");
+    for (key, value) in [
+        ("maxSide", 2752),
+        ("maxPresetArea", 4_300_800),
+        ("maxTargetImageTokens", 16_800),
+        ("maxReferenceImages", 10),
+        ("tokensPerMaxReference", 4_096),
+        ("maxJointTokens", 58_016),
+        ("pixelsPerToken", 16),
+        ("maxBatch", 8),
+    ] {
+        assert_eq!(
+            geometry[key], value,
+            "{key} is mirrored from the provider's own admission_geometry(); a value invented here \
+             would gate requests against a bound the engine does not have"
+        );
+    }
+    // The largest-AREA preset is neither the widest nor the square default. Stated here because it
+    // is the mistake the whole field exists to prevent.
+    assert!(geometry["maxPresetArea"].as_u64().expect("area") > 2752 * 1536);
+    assert!(geometry["maxPresetArea"].as_u64().expect("area") > 2048 * 2048);
+}
+
+/// sc-24114 — the reference cap and the admission envelope, read FROM THE LINKED PROVIDER rather
+/// than restated as literals. `limits.maxReferenceAssets` (the enqueue + worker cap) and every
+/// `admissionGeometry` field must equal the pinned engine's own `MAX_REFERENCE_IMAGES` /
+/// `memory_strategy::admission_geometry()` on the lane that links it, so a pin that moves the
+/// engine's bound reds here instead of leaving the catalog gating a bound the engine no longer has.
+///
+/// *Mutation that reds this:* editing `maxReferenceAssets` or any `admissionGeometry` value in the
+/// manifest (or an engine bump that moves the provider's constant without a catalog edit).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn qwen_image_2_1_reference_cap_and_envelope_come_from_the_linked_provider() {
+    #[cfg(target_os = "macos")]
+    use runtime_macos::providers::qwen_image_2_1 as provider;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    use runtime_cuda::providers::qwen_image_2_1 as provider;
+
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog");
+    let engine = provider::memory_strategy::admission_geometry();
+    assert_eq!(
+        entry["limits"]["maxReferenceAssets"].as_u64(),
+        Some(provider::config::MAX_REFERENCE_IMAGES as u64),
+        "limits.maxReferenceAssets is the engine's MAX_REFERENCE_IMAGES"
+    );
+    let geometry = &entry["admissionGeometry"];
+    for (key, value) in [
+        ("maxSide", u64::from(engine.max_side)),
+        ("maxPresetArea", engine.max_preset_area),
+        ("maxTargetImageTokens", engine.max_target_image_tokens),
+        ("maxReferenceImages", u64::from(engine.max_reference_images)),
+        ("tokensPerMaxReference", engine.tokens_per_max_reference),
+        ("maxJointTokens", engine.max_joint_tokens),
+        ("pixelsPerToken", engine.pixels_per_token),
+        ("maxBatch", u64::from(engine.max_batch)),
+    ] {
+        assert_eq!(
+            geometry[key].as_u64(),
+            Some(value),
+            "admissionGeometry.{key} must mirror the linked provider's admission_geometry()"
+        );
+    }
+}
+
+/// sc-24114 — every memory FLOOR key the UI reads for `qwen_image_2_1` has a worker source, so none
+/// is dead:
+///
+/// * the Candle keys (`binding`) are CONSUMED by the pre-load gate: `vram_gate::predicted_peak_gb`
+///   answers each tier's `candle.minMemoryGbByTier` row and falls back to `candle.minMemoryGb`;
+/// * the MLX keys (`advisory` — no MLX runtime gate reads a manifest floor; the fit gate admits from
+///   the provider's own memory model) are DERIVED FROM that same provider model: `ceil(default-path
+///   peak GiB x 1.25)` maximised over the preset table (`derived::default_path_peak_max_bytes`),
+///   per tier, and the scalar is the densest tier's floor;
+/// * no other floor key exists on either lane — a staged floor no worker path applies (the MLX
+///   contract declares no staged row) was removed rather than kept as UI-only decoration.
+///
+/// *Mutation that reds this:* re-adding `mlx.stagedMinMemoryGbByTier`; editing any floor value;
+/// or `predicted_peak_gb` no longer reading `candle.minMemoryGbByTier`.
+#[test]
+fn qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source() {
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog")
+        .as_object()
+        .expect("entry object")
+        .clone();
+    for backend in ["mlx", "candle"] {
+        let floors: std::collections::BTreeSet<&str> = entry[backend]
+            .as_object()
+            .expect("backend block")
+            .keys()
+            .map(String::as_str)
+            .filter(|key| key.contains("MemoryGb"))
+            .collect();
+        assert_eq!(
+            floors,
+            ["minMemoryGb", "minMemoryGbByTier"].into_iter().collect(),
+            "{backend}: every floor key must have a worker source"
+        );
+    }
+    // Candle: consumed by the gate, row by row, with the scalar as the unlisted-tier fallback.
+    // `vram_gate` compiles on the candle build only, so this half runs on the windows-candle lane.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    for tier in ["bf16", "q8", "q4"] {
+        assert_eq!(
+            crate::vram_gate::predicted_peak_gb(&entry, tier),
+            entry["candle"]["minMemoryGbByTier"][tier].as_f64(),
+            "candle/{tier}"
+        );
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    assert_eq!(
+        crate::vram_gate::predicted_peak_gb(&entry, "nvfp4"),
+        entry["candle"]["minMemoryGb"].as_f64()
+    );
+    // MLX: derived from the linked provider's memory model (the fit gate's own source) — the
+    // default-path peak maximised over the preset table (`derived::default_path_peak_max_bytes`:
+    // resident + bounded-decode activation at the largest-area preset), per tier.
+    #[cfg(target_os = "macos")]
+    {
+        use runtime_macos::providers::qwen_image_2_1 as provider;
+        const GIB: f64 = (1_u64 << 30) as f64;
+        let floor = |bytes: u64| (bytes as f64 / GIB * 1.25).ceil() as u64;
+        for tier in provider::quant::Tier::ALL {
+            let name = match tier {
+                provider::quant::Tier::Bf16 => "bf16",
+                provider::quant::Tier::Q8 => "q8",
+                provider::quant::Tier::Q4 => "q4",
+            };
+            let peak = provider::memory_strategy::derived::default_path_peak_max_bytes(tier);
+            assert_eq!(
+                entry["mlx"]["minMemoryGbByTier"][name].as_u64(),
+                Some(floor(peak)),
+                "mlx.minMemoryGbByTier.{name} is ceil(default-path peak max GiB x 1.25)"
+            );
+            if tier == provider::quant::Tier::Bf16 {
+                assert_eq!(
+                    entry["mlx"]["minMemoryGb"].as_u64(),
+                    Some(floor(peak)),
+                    "the MLX scalar is the densest tier's derived floor"
+                );
+            }
+        }
+        assert_eq!(
+            entry["mlx"]["minMemoryGbByTier"]
+                .as_object()
+                .expect("per-tier map")
+                .len(),
+            provider::quant::Tier::ALL.len(),
+            "one floor per shipped tier"
+        );
+    }
+}
+
+/// sc-24114 — `qwen_image_2_1`'s sampler / scheduler menu is EXACTLY what the linked provider
+/// publishes (`curated_sampler_names()` / `curated_scheduler_names()`), plus the `"default"`
+/// sentinel. The drift guard in `engines.rs` only proves manifest ⊆ engine; this pins the other
+/// direction for this model, because the review finding was a menu that under-declared a solver set
+/// both pipelines honour.
+///
+/// *Mutation that reds this:* restoring `"samplers": ["default"]` (or dropping any curated name).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn qwen_image_2_1_sampler_menu_is_the_providers_curated_menu() {
+    use std::collections::BTreeSet;
+    let registration = crate::inference_runtime::media()
+        .generators()
+        .find(|reg| (reg.descriptor)().id == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is registered on this lane");
+    let capabilities = (registration.descriptor)().capabilities;
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog");
+    for (key, engine) in [
+        ("samplers", &capabilities.samplers),
+        ("schedulers", &capabilities.schedulers),
+    ] {
+        let declared: BTreeSet<String> = entry["limits"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("limits.{key} is declared"))
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|name| *name != "default")
+            .map(str::to_owned)
+            .collect();
+        let published: BTreeSet<String> = engine.iter().map(|name| name.to_string()).collect();
+        assert!(!published.is_empty(), "the provider publishes a curated {key} menu");
+        assert_eq!(declared, published, "limits.{key} must be the provider's curated menu");
+        assert!(
+            entry["limits"][key]
+                .as_array()
+                .is_some_and(|names| names.first() == Some(&Value::from("default"))),
+            "limits.{key} leads with the engine-default sentinel"
+        );
+    }
+}
+
+/// sc-25907 (epic 25899 E10) — every floor key the UI reads for `qwen_image_2_1_turbo` is TURBO's
+/// own derivation from the linked provider, never base's: on MLX the per-tier floor is
+/// `ceil(derived::default_path_peak_max_bytes_for(Variant::Turbo, tier) GiB x 1.25)` (base's rule
+/// over Turbo's bf16-VAE resident set), and it differs from base's at every tier because the VAE
+/// does; the Candle keys are the same `binding` keys the gate consumes, with no measured row.
+///
+/// *Mutation that reds this:* copying base's MLX floors (44/29/21) onto the Turbo entry, or
+/// pinning the MLX side to the base accessor.
+#[test]
+fn qwen_image_2_1_turbo_every_floor_key_the_ui_reads_has_a_worker_source() {
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1_turbo")
+        .expect("qwen_image_2_1_turbo is in the shipped catalog")
+        .as_object()
+        .expect("entry object")
+        .clone();
+    for backend in ["mlx", "candle"] {
+        let floors: std::collections::BTreeSet<&str> = entry[backend]
+            .as_object()
+            .expect("backend block")
+            .keys()
+            .map(String::as_str)
+            .filter(|key| key.contains("MemoryGb"))
+            .collect();
+        assert_eq!(
+            floors,
+            ["minMemoryGb", "minMemoryGbByTier"].into_iter().collect(),
+            "{backend}: every floor key must have a worker source"
+        );
+        for key in ["vramGbByTier", "measured", "sequentialPeakGb", "calibrations"] {
+            assert!(entry[backend].get(key).is_none(), "{backend}.{key} is measured evidence");
+        }
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    for tier in ["bf16", "q8", "q4"] {
+        assert_eq!(
+            crate::vram_gate::predicted_peak_gb(&entry, tier),
+            entry["candle"]["minMemoryGbByTier"][tier].as_f64(),
+            "candle/{tier}"
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use runtime_macos::providers::qwen_image_2_1 as provider;
+        use provider::memory_strategy::derived;
+        const GIB: f64 = (1_u64 << 30) as f64;
+        let floor = |bytes: u64| (bytes as f64 / GIB * 1.25).ceil() as u64;
+        let base = models
+            .iter()
+            .find(|model| model["id"] == "qwen_image_2_1")
+            .expect("base entry");
+        for tier in provider::quant::Tier::ALL {
+            let name = match tier {
+                provider::quant::Tier::Bf16 => "bf16",
+                provider::quant::Tier::Q8 => "q8",
+                provider::quant::Tier::Q4 => "q4",
+            };
+            let turbo_peak = derived::default_path_peak_max_bytes_for(provider::Variant::Turbo, tier);
+            assert_eq!(
+                entry["mlx"]["minMemoryGbByTier"][name].as_u64(),
+                Some(floor(turbo_peak)),
+                "mlx.minMemoryGbByTier.{name} is ceil(Turbo default-path peak max GiB x 1.25)"
+            );
+            assert_ne!(
+                entry["mlx"]["minMemoryGbByTier"][name], base["mlx"]["minMemoryGbByTier"][name],
+                "{name}: Turbo's derived floor is its own, not base's (E10)"
+            );
+        }
+        assert_eq!(
+            entry["mlx"]["minMemoryGb"].as_u64(),
+            Some(floor(derived::default_path_peak_max_bytes_for(
+                provider::Variant::Turbo,
+                provider::quant::Tier::Bf16
+            )))
+        );
+    }
+}
+
+/// sc-25907 — Turbo's request envelope, reference cap, sampler/scheduler menu and admission
+/// geometry are read FROM THE LINKED PROVIDER under the Turbo id, and its pinned upstream revision
+/// is the provider's own `UPSTREAM_TURBO_HF_REVISION`, so a pin that moves any of them reds here.
+///
+/// *Mutation that reds this:* editing Turbo's `maxReferenceAssets`, any `admissionGeometry`
+/// value, a scheduler name, or the bf16 row's revision.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn qwen_image_2_1_turbo_envelope_menu_and_revision_come_from_the_linked_provider() {
+    use std::collections::BTreeSet;
+    #[cfg(target_os = "macos")]
+    use runtime_macos::providers::qwen_image_2_1 as provider;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    use runtime_cuda::providers::qwen_image_2_1 as provider;
+
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1_turbo")
+        .expect("qwen_image_2_1_turbo is in the shipped catalog");
+    assert_eq!(
+        entry["limits"]["maxReferenceAssets"].as_u64(),
+        Some(provider::config::MAX_REFERENCE_IMAGES as u64)
+    );
+    let engine = provider::memory_strategy::admission_geometry();
+    let geometry = &entry["admissionGeometry"];
+    for (key, value) in [
+        ("maxSide", u64::from(engine.max_side)),
+        ("maxPresetArea", engine.max_preset_area),
+        ("maxTargetImageTokens", engine.max_target_image_tokens),
+        ("maxReferenceImages", u64::from(engine.max_reference_images)),
+        ("tokensPerMaxReference", engine.tokens_per_max_reference),
+        ("maxJointTokens", engine.max_joint_tokens),
+        ("pixelsPerToken", engine.pixels_per_token),
+        ("maxBatch", u64::from(engine.max_batch)),
+    ] {
+        assert_eq!(geometry[key].as_u64(), Some(value), "admissionGeometry.{key}");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let bf16 = entry["downloads"]
+            .as_array()
+            .expect("downloads")
+            .iter()
+            .find(|row| row["variant"] == "bf16")
+            .expect("bf16 row");
+        assert_eq!(bf16["repo"], provider::UPSTREAM_TURBO_HF_REPO);
+        assert_eq!(bf16["revision"], provider::UPSTREAM_TURBO_HF_REVISION);
+    }
+    let registration = crate::inference_runtime::media()
+        .generators()
+        .find(|reg| (reg.descriptor)().id == "qwen_image_2_1_turbo")
+        .expect("qwen_image_2_1_turbo is registered on this lane");
+    let capabilities = (registration.descriptor)().capabilities;
+    for (key, engine) in [
+        ("samplers", &capabilities.samplers),
+        ("schedulers", &capabilities.schedulers),
+    ] {
+        let declared: BTreeSet<String> = entry["limits"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("limits.{key} is declared"))
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|name| *name != "default")
+            .map(str::to_owned)
+            .collect();
+        let published: BTreeSet<String> = engine.iter().map(|name| name.to_string()).collect();
+        assert_eq!(declared, published, "limits.{key} must be the Turbo provider's curated menu");
+    }
+    assert!(
+        capabilities.supports_alpha_output,
+        "the Turbo descriptor advertises the RGBA decode the catalog's supportsAlphaOutput claims"
+    );
+    assert!(
+        capabilities
+            .execution
+            .prefix_kv_cache
+            .accepts(gen_core::PrefixKvCacheMode::Cached),
+        "the Turbo descriptor declares the prefix-KV-cache domain the worker prices"
+    );
 }

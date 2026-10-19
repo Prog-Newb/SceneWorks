@@ -13,6 +13,7 @@ use serde_json::json;
 
 use sceneworks_core::catalog_store::CatalogError;
 use sceneworks_core::jobs_store::JobsStoreError;
+use sceneworks_core::model_artifacts::external_library::ExternalLibraryUnavailableContext;
 use sceneworks_core::project_store::ProjectStoreError;
 
 #[derive(Debug)]
@@ -20,6 +21,10 @@ pub(crate) struct ApiError {
     pub(crate) status: StatusCode,
     pub(crate) detail: String,
     pub(crate) code: Option<&'static str>,
+    /// Typed machine-readable context for the codes whose client must ACT on the rejection rather
+    /// than print it (sc-19709). Rendered as a `context` object beside `detail`/`code`, so a client
+    /// drives its recovery UI from named fields instead of parsing the detail sentence.
+    pub(crate) context: Option<serde_json::Value>,
 }
 
 impl ApiError {
@@ -27,6 +32,7 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             detail: detail.into(),
+            context: None,
             code: None,
         }
     }
@@ -35,6 +41,7 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             detail: detail.into(),
+            context: None,
             code: None,
         }
     }
@@ -43,6 +50,7 @@ impl ApiError {
         Self {
             status: StatusCode::FORBIDDEN,
             detail: detail.into(),
+            context: None,
             code: None,
         }
     }
@@ -51,6 +59,7 @@ impl ApiError {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             detail: detail.into(),
+            context: None,
             code: None,
         }
     }
@@ -59,6 +68,7 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             detail: detail.into(),
+            context: None,
             code: None,
         }
     }
@@ -67,7 +77,55 @@ impl ApiError {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             detail: detail.into(),
+            context: None,
             code: Some("catalog_preflight_unavailable"),
+        }
+    }
+
+    /// The typed "Installed — external library unavailable" submission-preflight rejection
+    /// (sc-19708). 503 because the installation is intact and the request is well-formed: the
+    /// operator reconnects the library and retries.
+    ///
+    /// The `context` payload (sc-19709) is what makes the rejection actionable: the desktop prompt
+    /// names the model and the expected library location from those fields, so no client ever
+    /// parses `detail` and no raw filesystem error reaches a user.
+    pub(crate) fn external_model_library_unavailable(
+        detail: impl Into<String>,
+        context: &ExternalLibraryUnavailableContext,
+    ) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            detail: detail.into(),
+            context: serde_json::to_value(context).ok(),
+            code: Some(
+                sceneworks_core::model_artifacts::external_library::EXTERNAL_LIBRARY_UNAVAILABLE_CODE,
+            ),
+        }
+    }
+
+    /// A typed rejection whose client must act on named fields (the model-library relocation
+    /// rejections, sc-19709). Status is the caller's: relocation rejections are 409 because the
+    /// request is well-formed but the named library cannot be adopted.
+    pub(crate) fn typed(
+        status: StatusCode,
+        detail: impl Into<String>,
+        code: &'static str,
+        context: serde_json::Value,
+    ) -> Self {
+        Self {
+            status,
+            detail: detail.into(),
+            context: Some(context),
+            code: Some(code),
+        }
+    }
+
+    pub(crate) fn model_artifact_conflict(detail: impl Into<String>, code: &'static str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            detail: detail.into(),
+            context: None,
+            code: Some(code),
         }
     }
 
@@ -75,6 +133,7 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             detail: detail.into(),
+            context: None,
             code: None,
         }
     }
@@ -83,6 +142,7 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             detail: detail.into(),
+            context: None,
             code: Some("database_locked"),
         }
     }
@@ -97,11 +157,13 @@ impl From<JobsStoreError> for ApiError {
             JobsStoreError::NotFound(_) => Self {
                 status: StatusCode::NOT_FOUND,
                 detail: "Record not found".to_owned(),
+                context: None,
                 code: None,
             },
             JobsStoreError::InvalidStatus(status) => Self {
                 status: StatusCode::BAD_REQUEST,
                 detail: format!("Unsupported job status: {status}"),
+                context: None,
                 code: None,
             },
             JobsStoreError::InvalidNumber(field) => {
@@ -111,6 +173,7 @@ impl From<JobsStoreError> for ApiError {
             JobsStoreError::RetryLimit { max_attempts } => Self {
                 status: StatusCode::BAD_REQUEST,
                 detail: format!("Job retry limit reached after {max_attempts} attempts."),
+                context: None,
                 code: None,
             },
             // 409 tells the worker its report lost a race with cancel/sweep/
@@ -120,6 +183,7 @@ impl From<JobsStoreError> for ApiError {
                 detail: format!(
                     "Job {job_id} is already {status}; terminal jobs cannot be updated."
                 ),
+                context: None,
                 code: None,
             },
             JobsStoreError::NotJobOwner { job_id } => Self {
@@ -127,6 +191,7 @@ impl From<JobsStoreError> for ApiError {
                 detail: format!(
                     "Progress rejected: the reporting worker no longer owns job {job_id}."
                 ),
+                context: None,
                 code: None,
             },
             other => Self::internal(other.to_string()),
@@ -137,10 +202,34 @@ impl From<JobsStoreError> for ApiError {
 impl From<ProjectStoreError> for ApiError {
     fn from(error: ProjectStoreError) -> Self {
         match error {
+            ProjectStoreError::BadRequest(detail)
+                if detail.starts_with("Film draft revision conflict:") =>
+            {
+                Self::conflict(detail)
+            }
             ProjectStoreError::BadRequest(detail) => Self::bad_request(detail),
+            ProjectStoreError::TimelineConflict { code, context } => Self {
+                status: StatusCode::CONFLICT,
+                detail: "The timeline changed. Review and resolve the conflicting edit.".into(),
+                code: Some(code),
+                context: Some(context),
+            },
+            // Field-attributed validation failure (epic 2123 E6): 400 with the stable reason in
+            // `code` and the offending input in `context.field`.
+            ProjectStoreError::FieldInvalid {
+                field,
+                code,
+                detail,
+            } => Self {
+                status: StatusCode::BAD_REQUEST,
+                detail,
+                code: Some(code),
+                context: Some(serde_json::json!({ "field": field })),
+            },
             ProjectStoreError::NotFound(detail) => Self {
                 status: StatusCode::NOT_FOUND,
                 detail,
+                context: None,
                 code: None,
             },
             // A non-writable workspace folder is an environment problem, not a bad
@@ -150,6 +239,7 @@ impl From<ProjectStoreError> for ApiError {
             ProjectStoreError::StorageNotWritable(detail) => Self {
                 status: StatusCode::INSUFFICIENT_STORAGE,
                 detail,
+                context: None,
                 code: None,
             },
             other => Self::internal(other.to_string()),
@@ -163,39 +253,55 @@ impl From<CatalogError> for ApiError {
             CatalogError::InvalidCatalog(_) => Self {
                 status: StatusCode::BAD_REQUEST,
                 detail: "Invalid catalog request".to_owned(),
+                context: None,
                 code: Some("catalog_invalid"),
             },
             CatalogError::NotFound(_) => Self {
                 status: StatusCode::NOT_FOUND,
                 detail: "Attached catalog not found".to_owned(),
+                context: None,
                 code: Some("catalog_not_found"),
             },
             CatalogError::AlreadyExists(_) => Self {
                 status: StatusCode::CONFLICT,
                 detail: "Catalog location is not empty or is already in use".to_owned(),
+                context: None,
                 code: Some("catalog_already_exists"),
             },
             CatalogError::Conflict(_) => Self {
                 status: StatusCode::CONFLICT,
                 detail: "Catalog processing state changed or is active".to_owned(),
+                context: None,
                 code: Some("catalog_processing_conflict"),
             },
             CatalogError::Incompatible { .. } => Self {
                 status: StatusCode::CONFLICT,
                 detail: "Catalog format is newer than this SceneWorks version supports".to_owned(),
+                context: None,
                 code: Some("catalog_incompatible"),
             },
             CatalogError::Corrupt { .. } => Self {
                 status: StatusCode::UNPROCESSABLE_ENTITY,
                 detail: "Catalog files are invalid or corrupt".to_owned(),
+                context: None,
                 code: Some("catalog_corrupt"),
             },
             CatalogError::Io(_) | CatalogError::Sqlite(_) | CatalogError::Json(_) => Self {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 detail: "Catalog operation failed".to_owned(),
+                context: None,
                 code: Some("catalog_operation_failed"),
             },
         }
+    }
+}
+
+/// So a handler whose error type is a raw [`Response`] — one that must also be able to answer with
+/// the body shape the JSON extractor's own rejection uses — can still `?` on an [`ApiError`]
+/// (sc-24029).
+impl From<ApiError> for Response {
+    fn from(error: ApiError) -> Self {
+        error.into_response()
     }
 }
 
@@ -218,10 +324,13 @@ impl IntoResponse for ApiError {
                 detail = %self.detail,
             );
         }
-        let body = match self.code {
+        let mut body = match self.code {
             Some(code) => json!({ "detail": self.detail, "code": code }),
             None => json!({ "detail": self.detail }),
         };
+        if let (Some(object), Some(context)) = (body.as_object_mut(), self.context) {
+            object.insert("context".to_owned(), context);
+        }
         (self.status, Json(body)).into_response()
     }
 }

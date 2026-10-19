@@ -131,6 +131,41 @@ describe("recipeFromWorkflowShare", () => {
     expect(recipe.rawAdapterSettings.sampler).toBe("euler");
   });
 
+  it("drops invalid numeric controls and restores finite values as numbers", () => {
+    const recipe = recipeFromWorkflowShare(
+      share({
+        advanced: {
+          schedulerShift: "2.5",
+          steps: 0,
+          guidanceScale: -1.25,
+          ipAdapterScale: "not a number",
+          controlnetConditioningScale: Infinity,
+          trueCfgScale: "NaN",
+          strength: "",
+          textStyleGain: {},
+          controlScale: [],
+        },
+      }),
+      report(),
+    );
+
+    expect(recipe.rawAdapterSettings).toMatchObject({
+      schedulerShift: 2.5,
+      steps: 0,
+      guidanceScale: -1.25,
+    });
+    for (const key of [
+      "ipAdapterScale",
+      "controlnetConditioningScale",
+      "trueCfgScale",
+      "strength",
+      "textStyleGain",
+      "controlScale",
+    ]) {
+      expect(recipe.rawAdapterSettings).not.toHaveProperty(key);
+    }
+  });
+
   it("always asks for ONE image, whatever batch the shared file came out of", () => {
     // The envelope's seed identifies one image; `count` came from the batch the run requested.
     // Replaying both would reproduce the shared image as the first of a 4-image batch.
@@ -153,6 +188,20 @@ describe("recipeFromWorkflowShare", () => {
 
     const omitted = recipeFromWorkflowShare(share({ advanced: { faceRestore: true } }), report());
     expect(omitted.rawAdapterSettings).not.toHaveProperty("poses");
+  });
+
+  it("restores an explicit alternate decoder and does not invent the native default", () => {
+    const selected = share({ advanced: { decoder: "wan_2_1_vae" } });
+    const recipe = recipeFromWorkflowShare(selected, report());
+    expect(recipe.rawAdapterSettings.decoder).toBe("wan_2_1_vae");
+    expect(workflowSettingRows(selected, report()).find((row) => row.key === "decoder")).toMatchObject({
+      label: "Alternate decoder",
+      restored: true,
+      value: "wan_2_1_vae",
+    });
+
+    const native = recipeFromWorkflowShare(share({ advanced: { steps: 28 } }), report());
+    expect(native.rawAdapterSettings).not.toHaveProperty("decoder");
   });
 
   it("does not prefill a model this install cannot resolve", () => {
@@ -401,9 +450,18 @@ function sampleValueFor(key) {
       return [{ steps: 4, guidance: 3.5, loras: [] }];
     case "structuredPrompt":
       return { intent: "a lighthouse" };
+    case "veda":
+      return {
+        enabled: true,
+        generated: "90%",
+        reference: "90%",
+        fullAttentionLayers: "0",
+        fullAttentionSteps: "0",
+      };
     case "enhancePrompt":
     case "usePid":
     case "faceRestore":
+    case "autoDuration":
       return true;
     case "pidTarget":
       return "2k";
@@ -427,6 +485,18 @@ function sampleValueFor(key) {
       return "three_quarter";
     case "angleSet":
       return "turnaround_4";
+    case "transformerVariant":
+      return "dev";
+    case "vaeDecoder":
+      // The wire contract is "conv" | "diffusion" (crates/sceneworks-core/src/video_request.rs
+      // `requested_ltx25_vae_decoder`); "diffvae" is the calibration-plan spelling, not this one.
+      return "diffusion";
+    case "autoDurationMinSeconds":
+      return 3;
+    case "autoDurationMaxSeconds":
+      return 9;
+    case "temporalUpsampleRounds":
+      return 1;
     default:
       return 0.75;
   }
@@ -460,8 +530,9 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
     const here = report({
       styles: [{ field: "styleId", id: "ghibli", name: "Ghibli", state: "resolved", detail: "ok" }],
     });
-    const recipe = recipeFromWorkflowShare(share({ advanced: everyKey }), here);
-    const rows = workflowSettingRows(share({ advanced: everyKey }), here);
+    const testShare = share({ sceneworksWorkflow: "video", mode: "text_to_video", advanced: everyKey });
+    const recipe = recipeFromWorkflowShare(testShare, here);
+    const rows = workflowSettingRows(testShare, here);
 
     const carried = new Set(Object.keys(recipe.rawAdapterSettings));
     for (const row of rows) {
@@ -475,9 +546,10 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
     // prompt is restored as prose instead, and the row says so). Pose coordinates now hydrate
     // session-only picker records through the ordinary pose-selection path (sc-16132).
     //
-    // The eleven video keys (sc-15956) are here for the first reason, not the second: they travel
-    // intact in a shared MP4 and replay in Video Studio, which is a different panel. A row that
-    // said "restored" here would be claiming this studio had put them somewhere.
+    // The remaining video-only keys (sc-15956) are here for the first reason, not the second: they
+    // travel intact in a shared MP4 and replay in Video Studio, which is a different panel.
+    // `textEncoderModel` is no longer in that set because Image Studio now has the same authored
+    // selector and restores its opaque id.
     expect(
       rows
         .filter((row) => !row.restored)
@@ -485,6 +557,9 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
         .sort(),
     ).toEqual([
       "angleSet",
+      "autoDuration",
+      "autoDurationMaxSeconds",
+      "autoDurationMinSeconds",
       "bridgeRightVideoConditioningStrength",
       "cnScale",
       "distilledVariant",
@@ -494,13 +569,46 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
       "motion",
       "structuredPrompt",
       "systemMessage",
-      "textEncoderModel",
+      "temporalUpsampleRounds",
       "timelineAction",
+      "transformerVariant",
+      "vaeDecoder",
       "videoCfgGuidanceScale",
       "videoConditioningStrength",
       "videoRescaleScale",
       "videoStgGuidanceScale",
     ]);
+  });
+
+  it("routes a video share's complete authored Veda request to Video Studio only", () => {
+    const veda = {
+      enabled: true,
+      generated: "90.5%",
+      reference: "12",
+      fullAttentionLayers: Array.from({ length: 50 }, (_, index) => index).join(","),
+      fullAttentionSteps: Array.from({ length: 200 }, (_, index) => index).join(","),
+    };
+    const video = share({
+      sceneworksWorkflow: "video",
+      mode: "text_to_video",
+      advanced: { veda, vedaExecution: { effective: "dense", fallbackReason: "runtime fact" } },
+    });
+    const recipe = recipeFromWorkflowShare(video, report());
+    expect(recipe.mode).toBe("text_to_video");
+    expect(recipe.rawAdapterSettings.veda).toEqual(veda);
+    expect(recipe.rawAdapterSettings.vedaExecution).toBeUndefined();
+    expect(workflowSettingRows(video, report()).find((row) => row.key === "veda")).toMatchObject({
+      label: "Veda",
+      restored: true,
+      value: "Recorded",
+    });
+
+    const image = share({ advanced: { veda } });
+    expect(recipeFromWorkflowShare(image, report()).rawAdapterSettings.veda).toBeUndefined();
+    expect(workflowSettingRows(image, report()).find((row) => row.key === "veda")).toMatchObject({
+      restored: false,
+      detail: "Video Studio only.",
+    });
   });
 
   // `styleId` is the one CONDITIONAL entry: it is applied, but only when this install has the

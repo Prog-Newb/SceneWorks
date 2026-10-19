@@ -1,6 +1,11 @@
 fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
+            "get_update_status",
+            "check_for_app_update",
+            "download_app_update",
+            "install_app_update",
+            "discard_app_update",
             "start_setup",
             "get_session_logs",
             "get_app_settings",
@@ -11,6 +16,9 @@ fn main() {
             "choose_folder",
             "set_data_dir",
             "choose_data_dir",
+            // Relocating an unavailable model library (sc-19709).
+            "set_model_library",
+            "restart_app",
             "reveal_in_os",
             "resolve_asset_path",
             "save_asset_as",
@@ -22,6 +30,7 @@ fn main() {
             "get_gpu_info",
             // GPU memory cap + live telemetry (epic 7819, sc-7825).
             "set_gpu_memory_limit",
+            "set_resolved_cache_policy",
             "get_gpu_telemetry",
             // LAN remote access (epic 4484, stories 4/5).
             "get_remote_access",

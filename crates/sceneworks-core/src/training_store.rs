@@ -1,9 +1,11 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::contracts::ExtraFields;
 use crate::dataset_quality::{
@@ -17,9 +19,51 @@ use crate::store_util::{
 };
 use crate::time::utc_now;
 use crate::training::{
-    caption_with_trigger_words, Caption, CaptionSource, TrainingDataset, TrainingDatasetItem,
-    TrainingDatasetStatus, TrainingModality, TRAINING_CONTRACT_SCHEMA_VERSION,
+    caption_with_trigger_words, max_training_reference_images, Caption, CaptionMode, CaptionSource,
+    TrainingDataset, TrainingDatasetItem, TrainingDatasetReference, TrainingDatasetStatus,
+    TrainingModality, TRAINING_CONTRACT_SCHEMA_VERSION,
 };
+
+/// Which Iris training sidecar of a dataset item ([`TrainingDatasetStore::set_iris_item_sidecar`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrisSidecarKind {
+    /// The aligned numerical depth map (`.npy` / 8- or 16-bit grayscale `.png`).
+    Depth,
+    /// The depth map's validity mask (`.npy` / `.png`, non-zero = valid).
+    DepthMask,
+    /// The aligned degraded input of a restoration pair.
+    Degraded,
+}
+
+impl IrisSidecarKind {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "depth" => Some(Self::Depth),
+            "mask" => Some(Self::DepthMask),
+            "degraded" => Some(Self::Degraded),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Depth => "depth",
+            Self::DepthMask => "mask",
+            Self::Degraded => "degraded",
+        }
+    }
+}
+
+/// One sidecar write: the staged file + its extension (`None` removes the sidecar), and — for a
+/// depth map — the per-item value conversion (`scale`, `minDepth`, `maxDepth`).
+#[derive(Debug, Clone)]
+pub struct IrisItemSidecar {
+    pub kind: IrisSidecarKind,
+    pub source: Option<(PathBuf, String)>,
+    pub scale: Option<f64>,
+    pub min_depth: Option<f64>,
+    pub max_depth: Option<f64>,
+}
 
 const DATASET_MANIFEST_NAME: &str = "dataset.sceneworks.training-dataset.json";
 // Tier-1 CLIP embeddings sidecar (sc-6535) — kept out of the manifest (768×f32 per item is too big
@@ -109,6 +153,30 @@ pub struct TrainingDatasetItemInput {
     pub width: Option<u32>,
     #[serde(default)]
     pub height: Option<u32>,
+    #[serde(default)]
+    pub control_image_path: Option<String>,
+    /// The ORDERED reference images of an instruction-edit pair (sc-24161): each is a library
+    /// `assetId` or a project-relative `path`, materialized into the dataset like the item image.
+    /// The item image is the edit target and its caption the edit instruction. Order is kept.
+    #[serde(default)]
+    pub references: Vec<TrainingDatasetReferenceInput>,
+    /// Forward-compatible per-item training inputs. LTX-2.5 uses
+    /// `ltxPreparedBundlePath`; ordinary image datasets leave this empty.
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+/// One reference image of an instruction-edit dataset item (sc-24161) — the same source contract as
+/// an item: a library `assetId`, else a project-relative `path`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingDatasetReferenceInput {
+    #[serde(default)]
+    pub asset_id: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 /// A trusted server-side source used to materialize bytes that do not yet live
@@ -134,6 +202,9 @@ pub struct CaptionInput {
     pub source: Option<CaptionSource>,
     #[serde(default)]
     pub trigger_words: Vec<String>,
+    /// The auto-caption mode that produced `text` (sc-24829); carried through unchanged.
+    #[serde(default)]
+    pub mode: Option<CaptionMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +261,10 @@ impl TrainingDatasetStore {
         Self {
             project_path: project_path.into(),
         }
+    }
+
+    pub(crate) fn project_path(&self) -> &Path {
+        &self.project_path
     }
 
     pub fn list_datasets(
@@ -392,6 +467,297 @@ impl TrainingDatasetStore {
         }
         dataset.updated_at = utc_now();
         self.save_dataset(&dataset)?;
+        Ok(dataset)
+    }
+
+    /// Install one LTX-2.5 prepared example beside its owning dataset and stamp the item with a
+    /// dataset-relative path. The upload contract is intentionally narrow: callers cannot choose
+    /// a destination, and neither the dataset id nor item id may escape the dataset root.
+    pub fn install_ltx_prepared_bundle(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_id: &str,
+        source_path: &Path,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        self.install_ltx_prepared_bundle_with_save(
+            project_id,
+            dataset_id,
+            item_id,
+            source_path,
+            |dataset| self.save_dataset(dataset),
+        )
+    }
+
+    fn install_ltx_prepared_bundle_with_save<F>(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_id: &str,
+        source_path: &Path,
+        save: F,
+    ) -> ProjectStoreResult<TrainingDataset>
+    where
+        F: FnOnce(&TrainingDataset) -> ProjectStoreResult<()>,
+    {
+        if !is_safe_id(dataset_id) || !is_safe_id(item_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid training dataset or item ID".to_owned(),
+            ));
+        }
+        let metadata = fs::metadata(source_path)?;
+        if !metadata.is_file() {
+            return Err(ProjectStoreError::BadRequest(
+                "LTX prepared bundle upload must be a regular safetensors file".to_owned(),
+            ));
+        }
+        validate_ltx_prepared_bundle_header(source_path)?;
+
+        let original_dataset = self.read_dataset_by_id(dataset_id)?;
+        let mut dataset = original_dataset.clone();
+        ensure_dataset_project(project_id, &dataset)?;
+        let item = dataset
+            .items
+            .iter_mut()
+            .find(|item| item.id == item_id)
+            .ok_or_else(|| {
+                ProjectStoreError::NotFound("Training dataset item not found".to_owned())
+            })?;
+        let prepared_dir = dataset_root(&self.project_path, dataset_id).join("prepared");
+        fs::create_dir_all(&prepared_dir)?;
+        let relative = format!("prepared/{item_id}.safetensors");
+        let destination = prepared_dir.join(format!("{item_id}.safetensors"));
+        let staged = prepared_dir.join(format!(".{item_id}.{}.tmp", random_hex(8)?));
+        fs::copy(source_path, &staged)?;
+        let receipt = match validate_ltx_prepared_bundle_header(&staged)
+            .and_then(|()| prepared_bundle_receipt(&staged))
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let _ = fs::remove_file(&staged);
+                return Err(error);
+            }
+        };
+        let backup = if destination.exists() {
+            Some(prepared_dir.join(format!(".{item_id}.{}.previous", random_hex(8)?)))
+        } else {
+            None
+        };
+        if let Some(backup) = backup.as_ref() {
+            fs::rename(&destination, backup)?;
+        }
+        if let Err(error) = fs::rename(&staged, &destination) {
+            let _ = fs::remove_file(&staged);
+            if let Some(backup) = backup.as_ref() {
+                let _ = fs::rename(backup, &destination);
+            }
+            return Err(ProjectStoreError::Io(error));
+        }
+        item.extra
+            .insert("ltxPreparedBundlePath".to_owned(), Value::String(relative));
+        item.extra.insert(
+            "ltxPreparedBundleSize".to_owned(),
+            Value::from(receipt.size),
+        );
+        item.extra.insert(
+            "ltxPreparedBundleSha256".to_owned(),
+            Value::String(receipt.sha256),
+        );
+        dataset.version = dataset.version.saturating_add(1);
+        dataset.updated_at = utc_now();
+        if let Err(error) = save(&dataset) {
+            let mut rollback_errors = Vec::new();
+            if let Err(rollback_error) = fs::remove_file(&destination) {
+                if rollback_error.kind() != std::io::ErrorKind::NotFound {
+                    rollback_errors.push(format!("remove replacement: {rollback_error}"));
+                }
+            }
+            if let Some(backup) = backup.as_ref() {
+                if let Err(rollback_error) = fs::rename(backup, &destination) {
+                    rollback_errors.push(format!("restore prior bundle: {rollback_error}"));
+                }
+            }
+            if let Err(rollback_error) = self.save_dataset(&original_dataset) {
+                rollback_errors.push(format!("restore dataset record: {rollback_error}"));
+            }
+            if rollback_errors.is_empty() {
+                return Err(error);
+            }
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Prepared bundle save failed ({error}); rollback also failed: {}",
+                rollback_errors.join("; ")
+            )));
+        }
+        if let Some(backup) = backup {
+            let _ = fs::remove_file(backup);
+        }
+        Ok(dataset)
+    }
+
+    /// Install (or, with `source: None`, remove) one Iris training sidecar of a dataset item
+    /// (sc-25687 depth / sc-25688 restoration): the aligned depth map, its validity mask, or the
+    /// aligned degraded input. The file is copied to `sidecars/<item>.<kind>.<ext>` beside the
+    /// dataset and the item is stamped with its dataset-relative path (`extra.irisDepth` /
+    /// `extra.irisDegradedImage`). Callers cannot choose a destination; the CONTENT (format,
+    /// alignment with the item's image) is checked by the caller with the engine's own readers
+    /// before this runs.
+    pub fn set_iris_item_sidecar(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_id: &str,
+        sidecar: &IrisItemSidecar,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        use crate::training::iris::depth::ITEM_DEPTH_KEY;
+        use crate::training::iris::restore::ITEM_DEGRADED_KEY;
+        if !is_safe_id(dataset_id) || !is_safe_id(item_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid training dataset or item ID".to_owned(),
+            ));
+        }
+        let mut dataset = self.read_dataset_by_id(dataset_id)?;
+        ensure_dataset_project(project_id, &dataset)?;
+        let root = dataset_root(&self.project_path, dataset_id);
+        let item = dataset
+            .items
+            .iter_mut()
+            .find(|item| item.id == item_id)
+            .ok_or_else(|| {
+                ProjectStoreError::NotFound("Training dataset item not found".to_owned())
+            })?;
+        let kind = sidecar.kind.as_str();
+        let installed = match &sidecar.source {
+            None => None,
+            Some((source, extension)) => {
+                let extension = extension.to_ascii_lowercase();
+                let allowed: &[&str] = match sidecar.kind {
+                    IrisSidecarKind::Depth | IrisSidecarKind::DepthMask => &["npy", "png"],
+                    IrisSidecarKind::Degraded => &["png", "jpg", "jpeg", "webp"],
+                };
+                if !allowed.contains(&extension.as_str()) {
+                    return Err(ProjectStoreError::BadRequest(format!(
+                        "A {kind} sidecar must be one of: {}.",
+                        allowed.join(", ")
+                    )));
+                }
+                if !fs::metadata(source)?.is_file() {
+                    return Err(ProjectStoreError::BadRequest(
+                        "The sidecar upload must be a regular file".to_owned(),
+                    ));
+                }
+                let dir = root.join("sidecars");
+                fs::create_dir_all(&dir)?;
+                let relative = format!("sidecars/{item_id}.{kind}.{extension}");
+                let staged = dir.join(format!(".{item_id}.{kind}.{}.tmp", random_hex(8)?));
+                fs::copy(source, &staged)?;
+                Some((relative, staged))
+            }
+        };
+        let previous_files = |value: Option<&Value>, keys: &[&str]| -> Vec<String> {
+            keys.iter()
+                .filter_map(|key| {
+                    value
+                        .and_then(|value| value.get(*key))
+                        .and_then(Value::as_str)
+                })
+                .map(str::to_owned)
+                .collect()
+        };
+        let mut stale: Vec<String> = Vec::new();
+        match sidecar.kind {
+            IrisSidecarKind::Depth => {
+                let previous = item.extra.get(ITEM_DEPTH_KEY).cloned();
+                match &installed {
+                    Some((relative, _)) => {
+                        stale.extend(previous_files(previous.as_ref(), &["path"]));
+                        let mut depth = serde_json::Map::new();
+                        depth.insert("path".to_owned(), Value::String(relative.clone()));
+                        if let Some(mask) = previous
+                            .as_ref()
+                            .and_then(|value| value.get("maskPath"))
+                            .cloned()
+                        {
+                            depth.insert("maskPath".to_owned(), mask);
+                        }
+                        for (key, number) in [
+                            ("scale", sidecar.scale),
+                            ("minDepth", sidecar.min_depth),
+                            ("maxDepth", sidecar.max_depth),
+                        ] {
+                            if let Some(number) = number {
+                                depth.insert(key.to_owned(), Value::from(number));
+                            }
+                        }
+                        item.extra
+                            .insert(ITEM_DEPTH_KEY.to_owned(), Value::Object(depth));
+                    }
+                    None => {
+                        stale.extend(previous_files(previous.as_ref(), &["path", "maskPath"]));
+                        item.extra.remove(ITEM_DEPTH_KEY);
+                    }
+                }
+            }
+            IrisSidecarKind::DepthMask => {
+                let Some(Value::Object(depth)) = item.extra.get_mut(ITEM_DEPTH_KEY) else {
+                    if let Some((_, staged)) = &installed {
+                        let _ = fs::remove_file(staged);
+                    }
+                    return Err(ProjectStoreError::BadRequest(
+                        "Attach the item's depth map before its validity mask.".to_owned(),
+                    ));
+                };
+                if let Some(previous) = depth.get("maskPath").and_then(Value::as_str) {
+                    stale.push(previous.to_owned());
+                }
+                match &installed {
+                    Some((relative, _)) => {
+                        depth.insert("maskPath".to_owned(), Value::String(relative.clone()));
+                    }
+                    None => {
+                        depth.remove("maskPath");
+                    }
+                }
+            }
+            IrisSidecarKind::Degraded => {
+                if let Some(previous) = item.extra.get(ITEM_DEGRADED_KEY).and_then(Value::as_str) {
+                    stale.push(previous.to_owned());
+                }
+                match &installed {
+                    Some((relative, _)) => {
+                        item.extra.insert(
+                            ITEM_DEGRADED_KEY.to_owned(),
+                            Value::String(relative.clone()),
+                        );
+                    }
+                    None => {
+                        item.extra.remove(ITEM_DEGRADED_KEY);
+                    }
+                }
+            }
+        }
+        if let Err(error) = crate::training::iris::validate_item_iris_extras(&item.extra) {
+            if let Some((_, staged)) = &installed {
+                let _ = fs::remove_file(staged);
+            }
+            return Err(ProjectStoreError::BadRequest(error));
+        }
+        if let Some((relative, staged)) = &installed {
+            let destination = root.join(relative);
+            if let Err(error) = fs::rename(staged, &destination) {
+                let _ = fs::remove_file(staged);
+                return Err(ProjectStoreError::Io(error));
+            }
+            stale.retain(|path| path != relative);
+        }
+        dataset.version = dataset.version.saturating_add(1);
+        dataset.updated_at = utc_now();
+        self.save_dataset(&dataset)?;
+        // Only sidecars this method owns are ever removed (never the item's image).
+        for path in stale {
+            if path.starts_with("sidecars/") && is_safe_relative_path(&path) {
+                let _ = fs::remove_file(root.join(&path));
+            }
+        }
         Ok(dataset)
     }
 
@@ -817,7 +1183,10 @@ impl TrainingDatasetStore {
         })
     }
 
-    fn read_dataset_by_id(&self, dataset_id: &str) -> ProjectStoreResult<TrainingDataset> {
+    pub(crate) fn read_dataset_by_id(
+        &self,
+        dataset_id: &str,
+    ) -> ProjectStoreResult<TrainingDataset> {
         if !is_safe_id(dataset_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid training dataset ID".to_owned(),
@@ -832,11 +1201,294 @@ impl TrainingDatasetStore {
         read_dataset(&manifest_path)
     }
 
-    fn save_dataset(&self, dataset: &TrainingDataset) -> ProjectStoreResult<()> {
+    pub(crate) fn save_dataset(&self, dataset: &TrainingDataset) -> ProjectStoreResult<()> {
         let manifest_path = dataset_manifest_path(&self.project_path, &dataset.id);
         write_json(&manifest_path, dataset)?;
         index_dataset(&self.project_path, dataset, &manifest_path)
     }
+}
+
+/// The sanity window a prepared bundle's declared `fps` must sit in.
+///
+/// "Finite and positive" alone is not enough: a subnormal like `5e-324` clears it, and then
+/// `output_frames / fps * 25.0` is `inf`, whose `floor` no longer fits a `u64` — the rounding in
+/// [`python_round`] overflow-panics in debug builds on an *uploaded* header. No real capture
+/// declares a rate outside this window, so the header is refused as invalid rather than trusted
+/// into the arithmetic.
+const PREPARED_MIN_FPS: f64 = 0.01;
+const PREPARED_MAX_FPS: f64 = 1000.0;
+const PREPARED_FPS_ERROR: &str = "metadata fps must be a finite number in 0.01..=1000";
+
+/// Header-only admission check for uploaded prepared examples. Runtime-specific validators still
+/// validate the selected workflow and all referenced condition tensors at dry-run/execute time.
+fn validate_ltx_prepared_bundle_header(path: &Path) -> ProjectStoreResult<()> {
+    let header = crate::lora_family::read_safetensors_header(path).map_err(|error| {
+        ProjectStoreError::BadRequest(format!("Invalid LTX prepared safetensors bundle: {error}"))
+    })?;
+    let object = header.as_object().ok_or_else(|| {
+        ProjectStoreError::BadRequest(
+            "Invalid LTX prepared safetensors bundle: header must be an object".to_owned(),
+        )
+    })?;
+    let metadata = object
+        .get("__metadata__")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            ProjectStoreError::BadRequest(
+                "LTX prepared bundle must declare __metadata__.schemaVersion=ltx-prepared-v1"
+                    .to_owned(),
+            )
+        })?;
+    if metadata.get("schemaVersion").and_then(Value::as_str) != Some("ltx-prepared-v1") {
+        return Err(ProjectStoreError::BadRequest(
+            "LTX prepared bundle must declare __metadata__.schemaVersion=ltx-prepared-v1"
+                .to_owned(),
+        ));
+    }
+    if metadata.values().any(|value| !value.is_string()) {
+        return Err(invalid_prepared_bundle(
+            "all __metadata__ values must be strings",
+        ));
+    }
+    let video_shape = prepared_metadata_shape(metadata, "videoShape", 5)?;
+    let audio_shape = prepared_metadata_shape(metadata, "audioShape", 4)?;
+    if video_shape[0] != 1 || video_shape[1] != 128 {
+        return Err(invalid_prepared_bundle(
+            "videoShape must be [1,128,F,H,W] with positive dimensions",
+        ));
+    }
+    if audio_shape[0] != 1 || audio_shape[1].saturating_mul(audio_shape[3]) != 128 {
+        return Err(invalid_prepared_bundle(
+            "audioShape must be [1,C,T,F] with C*F=128 and positive dimensions",
+        ));
+    }
+    let fps = metadata
+        .get("fps")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_prepared_bundle("metadata fps is required"))?
+        .parse::<f64>()
+        .map_err(|_| invalid_prepared_bundle(PREPARED_FPS_ERROR))?;
+    if !fps.is_finite() || !(PREPARED_MIN_FPS..=PREPARED_MAX_FPS).contains(&fps) {
+        return Err(invalid_prepared_bundle(PREPARED_FPS_ERROR));
+    }
+    let output_frames = video_shape[2]
+        .checked_sub(1)
+        .and_then(|value| value.checked_mul(8))
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| invalid_prepared_bundle("videoShape duration overflows"))?;
+    // `python_round` floors then adds 1, so a non-finite ratio reaches `floor as u64 + 1` and
+    // overflow-panics in debug. Nothing downstream can rescue that, so the ratio is checked here
+    // rather than defended inside the rounding helper.
+    let audio_frame_ratio = output_frames as f64 / fps * 25.0;
+    if !audio_frame_ratio.is_finite() {
+        return Err(invalid_prepared_bundle(
+            "videoShape duration and fps do not describe a representable audio length",
+        ));
+    }
+    let expected_audio_frames = python_round(audio_frame_ratio) as usize;
+    if audio_shape[2] != expected_audio_frames {
+        return Err(invalid_prepared_bundle(&format!(
+            "audioShape duration must contain {expected_audio_frames} latent frames for videoShape/fps"
+        )));
+    }
+
+    let mut ranges = Vec::new();
+    for (name, tensor) in object
+        .iter()
+        .filter(|(name, _)| name.as_str() != "__metadata__")
+    {
+        ranges.push(validate_prepared_tensor_header(name, tensor)?);
+    }
+    ranges.sort_unstable_by_key(|range| range.0);
+    let mut next_offset = 0_u64;
+    for (start, end) in ranges {
+        if start != next_offset {
+            return Err(invalid_prepared_bundle(
+                "tensor data offsets must be contiguous and non-overlapping",
+            ));
+        }
+        next_offset = end;
+    }
+    validate_prepared_payload_length(path, next_offset)?;
+    require_prepared_float_tensor(object, "video_latents", &video_shape)?;
+    require_prepared_float_tensor(object, "audio_latents", &audio_shape)?;
+    Ok(())
+}
+
+fn validate_prepared_payload_length(
+    path: &Path,
+    declared_data_bytes: u64,
+) -> ProjectStoreResult<()> {
+    let physical_bytes = fs::metadata(path)?.len();
+    let mut file = fs::File::open(path)?;
+    let mut header_length_bytes = [0_u8; 8];
+    file.read_exact(&mut header_length_bytes).map_err(|_| {
+        invalid_prepared_bundle("file is missing its safetensors header-length prefix")
+    })?;
+    let header_bytes = u64::from_le_bytes(header_length_bytes);
+    let expected_bytes = 8_u64
+        .checked_add(header_bytes)
+        .and_then(|bytes| bytes.checked_add(declared_data_bytes))
+        .ok_or_else(|| invalid_prepared_bundle("declared payload length overflows"))?;
+    if physical_bytes != expected_bytes {
+        return Err(invalid_prepared_bundle(&format!(
+            "physical file length must exactly match its declared tensor payload ({physical_bytes} bytes present, {expected_bytes} declared)"
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_prepared_bundle(detail: &str) -> ProjectStoreError {
+    ProjectStoreError::BadRequest(format!("Invalid LTX prepared safetensors bundle: {detail}"))
+}
+
+fn prepared_metadata_shape(
+    metadata: &serde_json::Map<String, Value>,
+    key: &str,
+    rank: usize,
+) -> ProjectStoreResult<Vec<usize>> {
+    let raw = metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_prepared_bundle(&format!("metadata {key} is required")))?;
+    let shape: Vec<usize> = serde_json::from_str(raw)
+        .map_err(|_| invalid_prepared_bundle(&format!("metadata {key} must be a JSON shape")))?;
+    if shape.len() != rank || shape.contains(&0) {
+        return Err(invalid_prepared_bundle(&format!(
+            "metadata {key} must be a non-zero {rank}-axis shape"
+        )));
+    }
+    Ok(shape)
+}
+
+fn validate_prepared_tensor_header(name: &str, value: &Value) -> ProjectStoreResult<(u64, u64)> {
+    let tensor = value.as_object().ok_or_else(|| {
+        invalid_prepared_bundle(&format!("tensor {name} header must be an object"))
+    })?;
+    let dtype = tensor
+        .get("dtype")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_prepared_bundle(&format!("tensor {name} dtype is required")))?;
+    let element_bytes = match dtype {
+        "BOOL" | "U8" | "I8" | "F8_E4M3" | "F8_E5M2" => 1_u64,
+        "U16" | "I16" | "F16" | "BF16" => 2,
+        "U32" | "I32" | "F32" => 4,
+        "U64" | "I64" | "F64" => 8,
+        _ => {
+            return Err(invalid_prepared_bundle(&format!(
+                "tensor {name} has unsupported dtype {dtype}"
+            )))
+        }
+    };
+    let shape = tensor
+        .get("shape")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_prepared_bundle(&format!("tensor {name} shape is required")))?;
+    if shape.is_empty()
+        || shape
+            .iter()
+            .any(|axis| axis.as_u64().is_none_or(|axis| axis == 0))
+    {
+        return Err(invalid_prepared_bundle(&format!(
+            "tensor {name} shape must contain positive integer axes"
+        )));
+    }
+    let elements = shape.iter().try_fold(1_u64, |total, axis| {
+        total
+            .checked_mul(axis.as_u64().expect("validated axis"))
+            .ok_or_else(|| invalid_prepared_bundle(&format!("tensor {name} shape overflows")))
+    })?;
+    let offsets = tensor
+        .get("data_offsets")
+        .and_then(Value::as_array)
+        .filter(|offsets| offsets.len() == 2)
+        .ok_or_else(|| {
+            invalid_prepared_bundle(&format!("tensor {name} data_offsets are required"))
+        })?;
+    let start = offsets[0].as_u64().ok_or_else(|| {
+        invalid_prepared_bundle(&format!("tensor {name} start offset is invalid"))
+    })?;
+    let end = offsets[1]
+        .as_u64()
+        .ok_or_else(|| invalid_prepared_bundle(&format!("tensor {name} end offset is invalid")))?;
+    let expected_bytes = elements
+        .checked_mul(element_bytes)
+        .ok_or_else(|| invalid_prepared_bundle(&format!("tensor {name} byte size overflows")))?;
+    if end.checked_sub(start) != Some(expected_bytes) {
+        return Err(invalid_prepared_bundle(&format!(
+            "tensor {name} byte range does not match its shape and dtype"
+        )));
+    }
+    Ok((start, end))
+}
+
+fn require_prepared_float_tensor(
+    object: &serde_json::Map<String, Value>,
+    name: &str,
+    expected_shape: &[usize],
+) -> ProjectStoreResult<()> {
+    let tensor = object
+        .get(name)
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid_prepared_bundle(&format!("bundle is missing {name}")))?;
+    if !matches!(
+        tensor.get("dtype").and_then(Value::as_str),
+        Some("F16" | "BF16" | "F32" | "F64")
+    ) {
+        return Err(invalid_prepared_bundle(&format!(
+            "tensor {name} must use a floating dtype"
+        )));
+    }
+    let shape = tensor
+        .get("shape")
+        .and_then(Value::as_array)
+        .and_then(|axes| axes.iter().map(Value::as_u64).collect::<Option<Vec<_>>>())
+        .ok_or_else(|| invalid_prepared_bundle(&format!("tensor {name} shape is invalid")))?;
+    if shape
+        != expected_shape
+            .iter()
+            .map(|axis| *axis as u64)
+            .collect::<Vec<_>>()
+    {
+        return Err(invalid_prepared_bundle(&format!(
+            "tensor {name} shape disagrees with its metadata"
+        )));
+    }
+    Ok(())
+}
+
+fn python_round(value: f64) -> u64 {
+    let floor = value.floor();
+    let fraction = value - floor;
+    if fraction < 0.5 || (fraction == 0.5 && (floor as u64).is_multiple_of(2)) {
+        floor.max(0.0) as u64
+    } else {
+        floor.max(0.0) as u64 + 1
+    }
+}
+
+struct PreparedBundleReceipt {
+    size: u64,
+    sha256: String,
+}
+
+fn prepared_bundle_receipt(path: &Path) -> ProjectStoreResult<PreparedBundleReceipt> {
+    let mut file = fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut size = 0_u64;
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        size = size.saturating_add(read as u64);
+        hash.update(&chunk[..read]);
+    }
+    Ok(PreparedBundleReceipt {
+        size,
+        sha256: format!("{:x}", hash.finalize()),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -1057,6 +1709,22 @@ fn rollback_file_renames(applied: &[AppliedRename]) {
     }
 }
 
+/// Refuses a caption whose `mode` is not one of the known caption modes (sc-24829, E6): an
+/// unrecognized string deserializes to `CaptionMode::Unknown` and would otherwise be stored
+/// silently on every dataset write path (create/update items, external items, caption sidecars).
+fn validate_caption_input_mode(caption: Option<&CaptionInput>) -> ProjectStoreResult<()> {
+    match caption.and_then(|caption| caption.mode.as_ref()) {
+        Some(CaptionMode::Unknown(mode)) => Err(ProjectStoreError::FieldInvalid {
+            field: "mode",
+            code: "training_field_error",
+            detail: format!(
+                "caption.mode {mode:?} is not supported; use default, subjectOnly, or triggerOnly."
+            ),
+        }),
+        _ => Ok(()),
+    }
+}
+
 fn apply_caption_patches(
     dataset: &mut TrainingDataset,
     inputs: Vec<TrainingDatasetCaptionSidecarItemInput>,
@@ -1064,6 +1732,7 @@ fn apply_caption_patches(
 ) -> ProjectStoreResult<()> {
     let mut seen_inputs = Vec::new();
     for input in inputs {
+        validate_caption_input_mode(Some(&input.caption))?;
         if !is_safe_id(&input.item_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid training dataset item ID".to_owned(),
@@ -1086,6 +1755,7 @@ fn apply_caption_patches(
             text: input.caption.text,
             source: input.caption.source.unwrap_or(CaptionSource::Manual),
             trigger_words: input.caption.trigger_words,
+            mode: input.caption.mode,
             updated_at: Some(now.to_owned()),
             extra: Default::default(),
         };
@@ -1180,6 +1850,11 @@ fn materialize_external_item(
     now: &str,
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
+    crate::training::iris::validate_item_iris_extras(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
+    crate::training::iris::curricula::validate_item_split(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
+    validate_caption_input_mode(input.item.caption.as_ref())?;
     let source_path = fs::canonicalize(&input.source_path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             ProjectStoreError::NotFound("Verified dataset source was unavailable".to_owned())
@@ -1194,6 +1869,11 @@ fn materialize_external_item(
     }
     ensure_supported_item_mime(&source_path, modality)?;
     let item = input.item;
+    if !item.references.is_empty() {
+        return Err(ProjectStoreError::BadRequest(
+            "Catalog-materialized dataset items cannot carry edit reference images".to_owned(),
+        ));
+    }
     let source_kind = crate::media_convert::sniff_image_kind_at(&source_path).ok_or_else(|| {
         ProjectStoreError::BadRequest("Verified dataset source was not an image".to_owned())
     })?;
@@ -1206,6 +1886,7 @@ fn materialize_external_item(
     let relative_path = format!("images/{item_id}{extension}");
     let target_path = media_dir.join(format!("{item_id}{extension}"));
     fs::copy(&source_path, &target_path)?;
+    let control_image_path = validated_control_image_path(item.control_image_path)?;
     let caption = item.caption.unwrap_or_default();
     let dimensions = crate::media_convert::image_dimensions(&target_path).ok_or_else(|| {
         ProjectStoreError::BadRequest(
@@ -1227,7 +1908,8 @@ fn materialize_external_item(
         id: item_id,
         asset_id: None,
         path: relative_path,
-        control_image_path: None,
+        control_image_path,
+        references: Vec::new(),
         display_name: item
             .display_name
             .unwrap_or_else(|| input_display_name(&source_path)),
@@ -1235,6 +1917,7 @@ fn materialize_external_item(
             text: caption.text,
             source: caption.source.unwrap_or(CaptionSource::Imported),
             trigger_words: caption.trigger_words,
+            mode: caption.mode,
             updated_at: Some(now.to_owned()),
             extra: Default::default(),
         },
@@ -1244,7 +1927,7 @@ fn materialize_external_item(
         tier0_scalars: None,
         quality_ack: None,
         added_at: now.to_owned(),
-        extra: input.extra,
+        extra: forward_compatible_item_extra(input.extra),
     })
 }
 
@@ -1268,42 +1951,64 @@ fn materialize_item(
     now: &str,
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
+    // Per-item named captions (`captions: {field: text}`, the Iris trainer's `caption_field(s)`
+    // source) ride in the forward-compatible extra bag; refuse a malformed map at the store
+    // boundary rather than at the trainer mid-epoch.
+    crate::training::iris::validate_item_iris_extras(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
+    crate::training::iris::curricula::validate_item_split(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
+    validate_caption_input_mode(input.caption.as_ref())?;
+    let reference_ceiling = max_training_reference_images() as usize;
+    if input.references.len() > reference_ceiling {
+        return Err(ProjectStoreError::BadRequest(format!(
+            "Dataset item '{item_id}' carries {} reference images, but training accepts at most {reference_ceiling} reference images per edit item",
+            input.references.len()
+        )));
+    }
     let source = resolve_item_source(project_path, project_id, &input, modality)?;
-    // sc-6143: normalize a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to lossless PNG
-    // as it lands in the dataset. Uploads are normalized at import, but a dataset built from a library
-    // asset or a project-relative path copies the bytes verbatim — so without this an AVIF reaches the
-    // dataset's `images/` and breaks BOTH actual training (the trainer reads dataset images straight
-    // through the engine, with no decode backstop) and the Dataset Doctor. Format is sniffed by content,
-    // never the extension; a file we cannot sniff (e.g. SVG) passes through with its original extension.
-    let source_kind = crate::media_convert::sniff_image_kind_at(&source.path);
-    let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
-    let extension = if needs_transcode {
-        ".png".to_owned()
-    } else {
-        source
-            .path
-            .extension()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.is_empty())
-            .map(|value| format!(".{}", value.to_ascii_lowercase()))
-            .unwrap_or_else(|| ".bin".to_owned())
-    };
-    let relative_path = format!("images/{item_id}{extension}");
-    let target_path = media_dir.join(format!("{item_id}{extension}"));
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent)?;
+    let (relative_path, target_path) = store_item_media(&source, media_dir, "", &item_id)?;
+    // Instruction-edit pairs (sc-24161): every ordered reference lands under `images/refs/`, named
+    // by item id + 1-based ordinal, so the stored order is the order given and a later rename of the
+    // item image (`images/<stem>.<ext>`) can never collide with a reference file.
+    let mut references = Vec::with_capacity(input.references.len());
+    for (index, reference) in input.references.iter().enumerate() {
+        let reference_source = resolve_media_source(
+            project_path,
+            project_id,
+            reference.asset_id.as_deref(),
+            reference.path.as_deref(),
+            modality,
+            "Dataset item reference",
+        )?;
+        let (reference_path, reference_target) = store_item_media(
+            &reference_source,
+            media_dir,
+            "refs/",
+            &format!("{item_id}_ref{}", index + 1),
+        )?;
+        let (mut width, mut height) = (reference_source.width, reference_source.height);
+        if width.is_none() || height.is_none() {
+            if let Some((file_w, file_h)) =
+                crate::media_convert::image_dimensions(&reference_target)
+            {
+                width = width.or(Some(file_w));
+                height = height.or(Some(file_h));
+            }
+        }
+        references.push(TrainingDatasetReference {
+            asset_id: reference_source.asset_id,
+            path: reference_path,
+            display_name: reference
+                .display_name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .or(Some(reference_source.display_name)),
+            width,
+            height,
+        });
     }
-    if needs_transcode {
-        let kind = source_kind.expect("needs_transcode implies a sniffed kind");
-        crate::media_convert::transcode_to_png(&source.path, &target_path).map_err(|error| {
-            ProjectStoreError::BadRequest(format!(
-                "Could not convert {} image to a supported format: {error}",
-                kind.label()
-            ))
-        })?;
-    } else {
-        fs::copy(&source.path, &target_path)?;
-    }
+    let control_image_path = validated_control_image_path(input.control_image_path)?;
     let caption = input.caption.unwrap_or_default();
     // sc-6531 (Dataset Doctor): every item must carry real pixel dimensions + a content hash —
     // the foundation Tier-0 checks (min-resolution, crop-loss, exact-dup) rely on. Prefer
@@ -1324,14 +2029,14 @@ fn materialize_item(
         id: item_id,
         asset_id: source.asset_id,
         path: relative_path,
-        // Fresh import → no control condition rendered yet (only a ControlNet-training prep pass
-        // writes one). epic 10159.
-        control_image_path: None,
+        control_image_path,
+        references,
         display_name: input.display_name.unwrap_or(source.display_name),
         caption: Caption {
             text: caption.text,
             source: caption.source.unwrap_or(CaptionSource::Manual),
             trigger_words: caption.trigger_words,
+            mode: caption.mode,
             updated_at: Some(now.to_owned()),
             extra: Default::default(),
         },
@@ -1344,8 +2049,20 @@ fn materialize_item(
         // Fresh file → no dismissed findings yet (sc-6534).
         quality_ack: None,
         added_at: now.to_owned(),
-        extra: Default::default(),
+        extra: forward_compatible_item_extra(input.extra),
     })
+}
+
+/// A dataset item returned by the API is also accepted as an update input. Serde's flattened
+/// forward-compatible map therefore sees the server-owned output fields that are intentionally
+/// absent from [`TrainingDatasetItemInput`]. Do not serialize those stale values beside the freshly
+/// computed typed fields: duplicate `addedAt`/`contentHash` keys make the saved manifest unreadable,
+/// while cached quality data must never survive rematerializing different bytes.
+fn forward_compatible_item_extra(mut extra: ExtraFields) -> ExtraFields {
+    for field in ["contentHash", "tier0Scalars", "qualityAck", "addedAt"] {
+        extra.remove(field);
+    }
+    extra
 }
 
 /// The derived image to re-point a dataset item at (sc-6539 one-tap fixes). Produced by a fix that
@@ -1387,6 +2104,9 @@ pub fn repoint_item(item: &TrainingDatasetItem, source: RepointSource) -> Traini
         // The condition was rendered from the OLD pixels — the new bytes invalidate it exactly
         // like tier0_scalars/quality_ack, so clear it (a re-point should re-render). epic 10159.
         control_image_path: None,
+        // An edit pair's references are the edit's SOURCES, independent of the target's pixels, so
+        // a re-pointed (e.g. upscaled) target keeps them (sc-24161).
+        references: item.references.clone(),
         display_name: item.display_name.clone(),
         caption: item.caption.clone(),
         width: source.width,
@@ -1408,39 +2128,72 @@ struct ItemSource {
     height: Option<u32>,
 }
 
+fn validated_control_image_path(path: Option<String>) -> ProjectStoreResult<Option<String>> {
+    let Some(path) = path.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    if !is_safe_relative_path(&path) {
+        return Err(ProjectStoreError::BadRequest(
+            "Invalid dataset item controlImagePath".to_owned(),
+        ));
+    }
+    Ok(Some(path))
+}
+
 fn resolve_item_source(
     project_path: &Path,
     project_id: &str,
     input: &TrainingDatasetItemInput,
     modality: &TrainingModality,
 ) -> ProjectStoreResult<ItemSource> {
-    if let Some(asset_id) = input.asset_id.as_deref().filter(|value| !value.is_empty()) {
+    resolve_media_source(
+        project_path,
+        project_id,
+        input.asset_id.as_deref(),
+        input.path.as_deref(),
+        modality,
+        "Dataset item",
+    )
+}
+
+/// Resolve one dataset media source — a library `asset_id`, else a project-relative `path` — to a
+/// verified in-project file. Shared by item images and their edit-pair references (sc-24161);
+/// `label` names which one a refusal is about.
+fn resolve_media_source(
+    project_path: &Path,
+    project_id: &str,
+    asset_id: Option<&str>,
+    path: Option<&str>,
+    modality: &TrainingModality,
+    label: &str,
+) -> ProjectStoreResult<ItemSource> {
+    if let Some(asset_id) = asset_id.filter(|value| !value.is_empty()) {
         return resolve_asset_source(project_path, project_id, asset_id, modality);
     }
-    let relative_path = input
-        .path
-        .as_deref()
+    let relative_path = path
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
-            ProjectStoreError::BadRequest("Dataset item assetId or path is required".to_owned())
+            ProjectStoreError::BadRequest(format!("{label} assetId or path is required"))
         })?;
     if !is_safe_relative_path(relative_path) {
-        return Err(ProjectStoreError::BadRequest(
-            "Invalid dataset item path".to_owned(),
-        ));
+        return Err(ProjectStoreError::BadRequest(format!(
+            "Invalid {} path",
+            label.to_ascii_lowercase()
+        )));
     }
     let root = fs::canonicalize(project_path)?;
     let path = fs::canonicalize(project_path.join(relative_path)).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
-            ProjectStoreError::NotFound("Dataset item file not found".to_owned())
+            ProjectStoreError::NotFound(format!("{label} file not found"))
         } else {
             ProjectStoreError::Io(error)
         }
     })?;
     if !path.starts_with(&root) || !path.is_file() {
-        return Err(ProjectStoreError::BadRequest(
-            "Invalid dataset item path".to_owned(),
-        ));
+        return Err(ProjectStoreError::BadRequest(format!(
+            "Invalid {} path",
+            label.to_ascii_lowercase()
+        )));
     }
     ensure_supported_item_mime(&path, modality)?;
     Ok(ItemSource {
@@ -1450,6 +2203,55 @@ fn resolve_item_source(
         width: None,
         height: None,
     })
+}
+
+/// Copy (or, for a valid-but-unsupported format, transcode to PNG) one resolved source into the
+/// dataset media dir as `<media_dir>/<subdir><stem><ext>`, returning its dataset-root-relative path
+/// (`images/<subdir><stem><ext>`) and absolute location.
+///
+/// sc-6143: a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/BMP/GIF) is normalized to lossless
+/// PNG as it lands in the dataset. Uploads are normalized at import, but a dataset built from a
+/// library asset or a project-relative path copies the bytes verbatim — so without this an AVIF
+/// reaches the dataset's `images/` and breaks BOTH actual training (the trainer reads dataset
+/// images straight through the engine, with no decode backstop) and the Dataset Doctor. Format is
+/// sniffed by content, never the extension; a file we cannot sniff (e.g. SVG) passes through with
+/// its original extension.
+fn store_item_media(
+    source: &ItemSource,
+    media_dir: &Path,
+    subdir: &str,
+    stem: &str,
+) -> ProjectStoreResult<(String, PathBuf)> {
+    let source_kind = crate::media_convert::sniff_image_kind_at(&source.path);
+    let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
+    let extension = if needs_transcode {
+        ".png".to_owned()
+    } else {
+        source
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(".{}", value.to_ascii_lowercase()))
+            .unwrap_or_else(|| ".bin".to_owned())
+    };
+    let relative_path = format!("images/{subdir}{stem}{extension}");
+    let target_path = media_dir.join(format!("{subdir}{stem}{extension}"));
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if needs_transcode {
+        let kind = source_kind.expect("needs_transcode implies a sniffed kind");
+        crate::media_convert::transcode_to_png(&source.path, &target_path).map_err(|error| {
+            ProjectStoreError::BadRequest(format!(
+                "Could not convert {} image to a supported format: {error}",
+                kind.label()
+            ))
+        })?;
+    } else {
+        fs::copy(&source.path, &target_path)?;
+    }
+    Ok((relative_path, target_path))
 }
 
 fn resolve_asset_source(
@@ -1556,7 +2358,10 @@ fn ensure_supported_item_mime(path: &Path, modality: &TrainingModality) -> Proje
     Ok(())
 }
 
-fn ensure_dataset_project(project_id: &str, dataset: &TrainingDataset) -> ProjectStoreResult<()> {
+pub(crate) fn ensure_dataset_project(
+    project_id: &str,
+    dataset: &TrainingDataset,
+) -> ProjectStoreResult<()> {
     if dataset.project_id.as_deref() != Some(project_id) {
         return Err(ProjectStoreError::NotFound(
             "Training dataset not found".to_owned(),
@@ -1813,7 +2618,7 @@ fn write_text(path: &Path, payload: &str) -> ProjectStoreResult<()> {
     atomic_write(path, payload.as_bytes())
 }
 
-fn dataset_item_path(
+pub(crate) fn dataset_item_path(
     project_path: &Path,
     dataset: &TrainingDataset,
     item: &TrainingDatasetItem,
@@ -1880,6 +2685,7 @@ fn optional_u32(value: Option<&Value>) -> Option<u32> {
 mod tests {
     use super::*;
     use crate::dataset_quality::Tier0Scalars;
+    use serde_json::json;
 
     fn item(id: &str, content_hash: &str) -> TrainingDatasetItem {
         TrainingDatasetItem {
@@ -1887,11 +2693,13 @@ mod tests {
             asset_id: None,
             path: format!("images/{id}.png"),
             control_image_path: None,
+            references: Vec::new(),
             display_name: id.to_owned(),
             caption: Caption {
                 text: String::new(),
                 source: CaptionSource::Manual,
                 trigger_words: Vec::new(),
+                mode: None,
                 updated_at: None,
                 extra: Default::default(),
             },
@@ -1940,6 +2748,56 @@ mod tests {
         }
     }
 
+    // sc-24829 (E6): an unknown caption mode on the external-item path is a field error, refused
+    // before the source is even opened (the bogus source path would otherwise be NotFound).
+    #[test]
+    fn external_item_with_an_unknown_caption_mode_is_a_mode_field_error() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let input = ExternalTrainingDatasetItemInput {
+            item: TrainingDatasetItemInput {
+                id: Some("item_0001".to_owned()),
+                asset_id: None,
+                path: None,
+                display_name: None,
+                caption: Some(CaptionInput {
+                    text: "a caption".to_owned(),
+                    source: Some(CaptionSource::Auto),
+                    trigger_words: Vec::new(),
+                    mode: Some(CaptionMode::Unknown("faceOnly".to_owned())),
+                }),
+                width: None,
+                height: None,
+                control_image_path: None,
+                references: Vec::new(),
+                extra: Default::default(),
+            },
+            source_path: temp.path().join("missing.png"),
+            expected_content_hash: String::new(),
+            expected_width: 1,
+            expected_height: 1,
+            extra: Default::default(),
+        };
+        let error = materialize_external_item(
+            temp.path(),
+            &TrainingModality::Image,
+            input,
+            "item_0001".to_owned(),
+            "now",
+        )
+        .expect_err("unknown caption mode is refused");
+        match error {
+            ProjectStoreError::FieldInvalid {
+                field,
+                code,
+                detail,
+            } => {
+                assert_eq!((field, code), ("mode", "training_field_error"));
+                assert!(detail.contains("caption.mode \"faceOnly\""), "{detail}")
+            }
+            other => panic!("expected a mode field error, got {other:?}"),
+        }
+    }
+
     /// sc-6143: building a dataset from a path-based item normalizes a valid-but-unsupported source
     /// (here BMP — the same decode gap AVIF hits) to PNG as it lands in `images/`, so neither the
     /// trainer (which reads dataset images straight through the engine, no decode backstop) nor the
@@ -1976,6 +2834,9 @@ mod tests {
                         caption: None,
                         width: None,
                         height: None,
+                        control_image_path: None,
+                        references: Vec::new(),
+                        extra: Default::default(),
                     }],
                 },
             )
@@ -2034,6 +2895,7 @@ mod tests {
             text: "a photo of Mira".to_owned(),
             source: CaptionSource::Auto,
             trigger_words: vec!["mira".to_owned()],
+            mode: None,
             updated_at: Some("then".to_owned()),
             extra: Default::default(),
         };
@@ -2458,6 +3320,225 @@ mod tests {
 
         // Metadata write: the dataset version is untouched (the pixels didn't change).
         assert_eq!(store.get_dataset("proj", "ds_test").unwrap().version, 1);
+    }
+
+    fn write_prepared_bundle(path: &Path, schema: &str) {
+        let mut header = serde_json::to_vec(&json!({
+            "__metadata__": {
+                "schemaVersion": schema,
+                "videoShape": "[1,128,1,1,1]",
+                "audioShape": "[1,8,1,16]",
+                "fps": "25"
+            },
+            "video_latents": {
+                "dtype": "F32",
+                "shape": [1,128,1,1,1],
+                "data_offsets": [0,512]
+            },
+            "audio_latents": {
+                "dtype": "F32",
+                "shape": [1,8,1,16],
+                "data_offsets": [512,1024]
+            }
+        }))
+        .unwrap();
+        while !header.len().is_multiple_of(8) {
+            header.push(b' ');
+        }
+        let mut bytes = Vec::with_capacity(8 + header.len() + 1024);
+        bytes.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&header);
+        bytes.resize(bytes.len() + 1024, 0);
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn prepared_bundle_upload_is_confined_stamped_and_round_trips() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+        let upload = dir.path().join("upload.safetensors");
+        write_prepared_bundle(&upload, "ltx-prepared-v1");
+
+        let updated = store
+            .install_ltx_prepared_bundle("proj", "ds_test", "item_1", &upload)
+            .expect("install prepared bundle");
+        assert_eq!(updated.version, 2);
+        assert_eq!(
+            updated.items[0]
+                .extra
+                .get("ltxPreparedBundlePath")
+                .and_then(Value::as_str),
+            Some("prepared/item_1.safetensors")
+        );
+        assert!(updated.items[0]
+            .extra
+            .get("ltxPreparedBundleSize")
+            .and_then(Value::as_u64)
+            .is_some_and(|size| size > 1024));
+        assert_eq!(
+            updated.items[0]
+                .extra
+                .get("ltxPreparedBundleSha256")
+                .and_then(Value::as_str)
+                .map(str::len),
+            Some(64)
+        );
+        assert!(dataset_root(dir.path(), "ds_test")
+            .join("prepared/item_1.safetensors")
+            .is_file());
+        assert_eq!(
+            store.get_dataset("proj", "ds_test").unwrap().items[0]
+                .extra
+                .get("ltxPreparedBundlePath")
+                .and_then(Value::as_str),
+            Some("prepared/item_1.safetensors")
+        );
+
+        write_prepared_bundle(&upload, "wrong-schema");
+        let error = store
+            .install_ltx_prepared_bundle("proj", "ds_test", "item_2", &upload)
+            .unwrap_err();
+        assert!(error.to_string().contains("schemaVersion=ltx-prepared-v1"));
+        assert!(!dataset_root(dir.path(), "ds_test")
+            .join("prepared/item_2.safetensors")
+            .exists());
+    }
+
+    #[test]
+    fn prepared_bundle_replacement_rolls_back_file_and_record_when_save_fails() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+        let upload = dir.path().join("upload.safetensors");
+        write_prepared_bundle(&upload, "ltx-prepared-v1");
+        let first = store
+            .install_ltx_prepared_bundle("proj", "ds_test", "item_1", &upload)
+            .expect("initial install");
+        let destination = dataset_root(dir.path(), "ds_test").join("prepared/item_1.safetensors");
+        let prior_bytes = fs::read(&destination).unwrap();
+        let prior_digest = first.items[0].extra["ltxPreparedBundleSha256"].clone();
+
+        let mut replacement = fs::read(&upload).unwrap();
+        *replacement.last_mut().unwrap() = 7;
+        fs::write(&upload, replacement).unwrap();
+        let manifest_path = dataset_manifest_path(dir.path(), "ds_test");
+        let error = store
+            .install_ltx_prepared_bundle_with_save(
+                "proj",
+                "ds_test",
+                "item_1",
+                &upload,
+                |dataset| {
+                    write_json(&manifest_path, dataset)?;
+                    Err(ProjectStoreError::BadRequest(
+                        "injected index failure".to_owned(),
+                    ))
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("injected index failure"));
+        assert_eq!(fs::read(&destination).unwrap(), prior_bytes);
+        let reopened = store.get_dataset("proj", "ds_test").unwrap();
+        assert_eq!(
+            reopened.items[0].extra["ltxPreparedBundleSha256"],
+            prior_digest
+        );
+        assert_eq!(reopened.version, first.version);
+    }
+
+    #[test]
+    fn prepared_bundle_rejects_missing_modalities_shape_mismatch_and_bad_dtype() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("bad.safetensors");
+        fs::write(&path, b"not-a-safetensors-header").unwrap();
+        assert!(validate_ltx_prepared_bundle_header(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid LTX prepared safetensors bundle"));
+        write_prepared_bundle(&path, "ltx-prepared-v1");
+        let mut appended = fs::read(&path).unwrap();
+        appended.push(0x7f);
+        fs::write(&path, appended).unwrap();
+        assert!(validate_ltx_prepared_bundle_header(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("physical file length must exactly match"));
+        let cases = [
+            json!({
+                "__metadata__": {"schemaVersion":"ltx-prepared-v1","videoShape":"[1,128,1,1,1]","audioShape":"[1,8,1,16]","fps":"25"},
+                "video_latents":{"dtype":"F32","shape":[1,128,1,1,1],"data_offsets":[0,512]}
+            }),
+            json!({
+                "__metadata__": {"schemaVersion":"ltx-prepared-v1","videoShape":"[1,128,1,1,1]","audioShape":"[1,8,1,16]","fps":"25"},
+                "video_latents":{"dtype":"F32","shape":[1,64,1,1,1],"data_offsets":[0,256]},
+                "audio_latents":{"dtype":"F32","shape":[1,8,1,16],"data_offsets":[256,768]}
+            }),
+            json!({
+                "__metadata__": {"schemaVersion":"ltx-prepared-v1","videoShape":"[1,128,1,1,1]","audioShape":"[1,8,1,16]","fps":"25"},
+                "video_latents":{"dtype":"U8","shape":[1,128,1,1,1],"data_offsets":[0,128]},
+                "audio_latents":{"dtype":"F32","shape":[1,8,1,16],"data_offsets":[128,640]}
+            }),
+        ];
+        for header in cases {
+            let mut encoded = serde_json::to_vec(&header).unwrap();
+            while encoded.len() % 8 != 0 {
+                encoded.push(b' ');
+            }
+            let data_end = header
+                .as_object()
+                .unwrap()
+                .values()
+                .filter_map(|value| value.get("data_offsets")?.as_array()?.get(1)?.as_u64())
+                .max()
+                .unwrap_or(0) as usize;
+            let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(&encoded);
+            bytes.resize(bytes.len() + data_end, 0);
+            fs::write(&path, bytes).unwrap();
+            assert!(validate_ltx_prepared_bundle_header(&path).is_err());
+        }
+    }
+
+    /// A "finite and positive" fps is not a *usable* fps. `5e-324` is a subnormal that clears both
+    /// checks, and then `output_frames / fps * 25.0` is `inf` — `python_round` floors it and adds
+    /// 1, which overflow-panics in debug on an uploaded, attacker-shaped header. The window fails
+    /// the header closed instead, and a plain 25 still admits.
+    #[test]
+    fn prepared_bundle_rejects_a_degenerate_fps_instead_of_panicking() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("fps.safetensors");
+        for degenerate in ["5e-324", "0.001", "1e9", "0", "-25", "NaN", "inf"] {
+            write_prepared_bundle_with_fps(&path, degenerate);
+            let error = validate_ltx_prepared_bundle_header(&path)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("metadata fps must be a finite number in 0.01..=1000"),
+                "fps {degenerate} produced {error}"
+            );
+        }
+        write_prepared_bundle_with_fps(&path, "25");
+        validate_ltx_prepared_bundle_header(&path).expect("a real fps still admits");
+    }
+
+    fn write_prepared_bundle_with_fps(path: &Path, fps: &str) {
+        let mut header = serde_json::to_vec(&json!({
+            "__metadata__": {
+                "schemaVersion": "ltx-prepared-v1",
+                "videoShape": "[1,128,1,1,1]",
+                "audioShape": "[1,8,1,16]",
+                "fps": fps
+            },
+            "video_latents": {"dtype":"F32","shape":[1,128,1,1,1],"data_offsets":[0,512]},
+            "audio_latents": {"dtype":"F32","shape":[1,8,1,16],"data_offsets":[512,1024]}
+        }))
+        .unwrap();
+        while !header.len().is_multiple_of(8) {
+            header.push(b' ');
+        }
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&header);
+        bytes.resize(bytes.len() + 1024, 0);
+        fs::write(path, bytes).unwrap();
     }
 
     /// sc-11202 / F-026: the training path's project.db openers were raw

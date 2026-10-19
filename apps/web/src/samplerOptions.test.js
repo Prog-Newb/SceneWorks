@@ -6,13 +6,19 @@ import {
   guidanceDefaultFromModel,
   guidanceMethodDefaultFromModel,
   guidanceMethodOptionsFromModel,
+  maxStepsForModel,
+  negativePromptInertAtGuidance,
   samplerDefaultFromModel,
   samplerOptionsFromModel,
   schedulerDefaultFromModel,
   schedulerOptionsFromModel,
   schedulerShiftDefaultFromModel,
   stepsDefaultFromModel,
+  stepsMenuFromModel,
+  guidanceIsOff,
+  patchGridHint,
 } from "./samplerOptions.js";
+import { fallbackModels } from "./constants.js";
 
 describe("samplerOptions", () => {
   it("falls back to default-only when limits are missing", () => {
@@ -88,6 +94,54 @@ describe("samplerOptions", () => {
     expect(guidanceDefaultFromModel({ defaults: { guidanceScale: "n/a" } })).toBeNull();
   });
 
+  // sc-19502 — `limits.steps` is the EXACT set of renderable step counts. The studio pins the Steps
+  // control when there is exactly one, so this reader must agree with the backend gate
+  // (`allowed_steps` in crates/sceneworks-core/src/video_request.rs) about what counts as a menu.
+  it("reads limits.steps as an exact menu and treats an unusable one as no menu", () => {
+    expect(stepsMenuFromModel({ limits: { steps: [8] } })).toEqual([8]);
+    expect(stepsMenuFromModel({ limits: { steps: [4, 8] } })).toEqual([4, 8]);
+
+    // No menu declared — the overwhelmingly common case, and it must stay unpinned.
+    expect(stepsMenuFromModel(undefined)).toBeNull();
+    expect(stepsMenuFromModel({})).toBeNull();
+    expect(stepsMenuFromModel({ limits: {} })).toBeNull();
+
+    // Unusable declarations fall back to NO menu rather than pinning the control to nothing — the
+    // same tolerance the Rust reader has, because a stricter UI would block legal requests.
+    expect(stepsMenuFromModel({ limits: { steps: [] } })).toBeNull();
+    expect(stepsMenuFromModel({ limits: { steps: [0] } })).toBeNull();
+    expect(stepsMenuFromModel({ limits: { steps: [8.5] } })).toBeNull();
+    expect(stepsMenuFromModel({ limits: { steps: ["8"] } })).toBeNull();
+    expect(stepsMenuFromModel({ limits: { steps: [null] } })).toBeNull();
+    expect(stepsMenuFromModel({ limits: { steps: 8 } })).toBeNull();
+
+    // A partially-unusable menu keeps its usable entries, matching the Rust reader.
+    expect(stepsMenuFromModel({ limits: { steps: [8, 0, "12"] } })).toEqual([8]);
+  });
+
+  // sc-19502 — the fallback catalog is a MIRROR of builtin.models.jsonc, and the Steps control reads
+  // it when the live catalog is unavailable. If the mirror drifted, the offline studio would offer a
+  // free-text Steps box for a model whose backend refuses every value but 8.
+  it("the fallback catalog pins LTX to its single baked step count", () => {
+    for (const id of ["ltx_2_3", "ltx_2_3_eros"]) {
+      const model = fallbackModels.find((entry) => entry.id === id);
+      expect(model, `${id} present in the fallback catalog`).toBeTruthy();
+      expect(stepsMenuFromModel(model), `${id} step menu`).toEqual([8]);
+      // …and the studio's own default is that one legal value, so the common path never trips the
+      // enqueue gate.
+      expect(stepsDefaultFromModel(model), `${id} default steps`).toBe(8);
+    }
+
+    // The other video models must stay UNPINNED — a blanket pin would remove a working control.
+    const unpinned = fallbackModels.filter(
+      (model) => model.type === "video" && !String(model.id).startsWith("ltx_2_3"),
+    );
+    expect(unpinned.length).toBeGreaterThan(0);
+    for (const model of unpinned) {
+      expect(stepsMenuFromModel(model), `${model.id} must keep a free Steps control`).toBeNull();
+    }
+  });
+
   it("guidance methods fall back to cfg-only and order canonically (epic 7434)", () => {
     // No advertisement → cfg-only, so the studio hides the picker (length 1).
     expect(guidanceMethodOptionsFromModel(undefined)).toEqual(["cfg"]);
@@ -150,5 +204,70 @@ describe("samplerOptions", () => {
     ]) {
       expect(SCHEDULER_LABELS[key]).toBeTruthy();
     }
+  });
+  it("exposes Qwen Image 2.1's curated solver menu on both lanes (sc-24114)", () => {
+    // Both providers publish curated_sampler_names()/curated_scheduler_names() and honour
+    // req.sampler/req.scheduler, so the studio dropdown must appear (length > 1) with that menu.
+    const qwen = fallbackModels.find((model) => model.id === "qwen_image_2_1");
+    for (const backend of ["mlx", "candle", null]) {
+      expect(samplerOptionsFromModel(qwen, backend)).toEqual([
+        "default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc",
+        "lcm", "ddim", "dpmpp_2m_sde", "er_sde",
+      ]);
+      expect(schedulerOptionsFromModel(qwen, backend)).toEqual([
+        "default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta",
+        "ddim_uniform", "beta57",
+      ]);
+    }
+  });
+
+  // sc-25679 — Iris-3B ships a 100-step default above the historical 80 ceiling.
+  it("raises the Steps ceiling to the model's own default", () => {
+    expect(maxStepsForModel({ defaults: { steps: 100 } })).toBe(100);
+    expect(maxStepsForModel({ defaults: { steps: 40 } })).toBe(80);
+    expect(maxStepsForModel(null)).toBe(80);
+  });
+
+  // sc-25679 — the negative prompt is the CFG unconditional for a declaring model.
+  it("marks the negative prompt inert only at guidance 1.0 for a declaring model", () => {
+    const iris = { image: { negativePromptRequiresGuidance: true }, defaults: { guidanceScale: 3.0 } };
+    expect(negativePromptInertAtGuidance(iris, "")).toBe(false);
+    expect(negativePromptInertAtGuidance(iris, "1")).toBe(true);
+    expect(negativePromptInertAtGuidance(iris, 1)).toBe(true);
+    expect(negativePromptInertAtGuidance(iris, "2.5")).toBe(false);
+    expect(
+      negativePromptInertAtGuidance({ ...iris, defaults: { guidanceScale: 1.0 } }, ""),
+    ).toBe(true);
+    const undeclared = { defaults: { guidanceScale: 1.0 } };
+    expect(negativePromptInertAtGuidance(undeclared, "")).toBe(false);
+  });
+});
+
+describe("sc-25681 image sampling-control declarations", () => {
+  const iris = {
+    id: "iris_3b",
+    name: "Iris 3B",
+    defaults: { guidanceScale: 3.0, schedulerShift: 4.0, sampler: "dpmpp_2m" },
+    limits: { samplers: ["dpmpp_2m", "euler"], requiresDimensionsMultipleOf: 16 },
+    image: { patchGridVisibleBelow: 1024 },
+  };
+  const plain = { id: "plain", defaults: { guidanceScale: 3.0 } };
+
+  it("reads the sampler menu and shift default", () => {
+    expect(samplerOptionsFromModel(iris)).toEqual(["euler", "dpmpp_2m"]);
+    expect(samplerDefaultFromModel(iris)).toBe("dpmpp_2m");
+    expect(schedulerShiftDefaultFromModel(iris)).toBe(4.0);
+  });
+
+  it("guidance is off exactly at 1.0, override or default", () => {
+    expect(guidanceIsOff(iris, "1")).toBe(true);
+    expect(guidanceIsOff(iris, "")).toBe(false);
+    expect(guidanceIsOff({ defaults: { guidanceScale: 1 } }, "")).toBe(true);
+  });
+
+  it("hints at the patch grid below the declared side and never otherwise", () => {
+    expect(patchGridHint(iris, 1024, 1024)).toBeNull();
+    expect(patchGridHint(iris, 1216, 832)).toBe("Below 1024px a side, Iris 3B shows a visible patch grid.");
+    expect(patchGridHint(plain, 512, 512)).toBeNull();
   });
 });

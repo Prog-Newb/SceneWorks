@@ -1,7 +1,13 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import {
   AUDIO_MODES,
+  VIDEO_MODES,
+  VECTOR_MODES,
   angleModelUsable,
   audioModelServesMode,
   audioModelUsable,
@@ -15,14 +21,75 @@ import {
   missingRequiredModels,
   poseModelUsable,
   supportedControlModes,
+  videoModelServesMode,
   videoModelUsable,
   visionCaptionModelUsable,
+  vectorModelAvailability,
+  vectorModelServesMode,
+  vectorModelUsable,
 } from "./modelEligibility.js";
 import { VISION_CAPTION_MODEL_ID, fallbackModels } from "./constants.js";
 
 const caps = DEFAULT_MAC_CAPABILITIES; // gating off → Mac blocks are no-ops
 
 describe("modelEligibility predicates", () => {
+  it("routes StarVector image_to_svg by backend and offers missing installs", () => {
+    const model = {
+      id: "starvector_1b",
+      type: "vector",
+      capabilities: ["image_to_svg"],
+      vector: { providers: {
+        mlx: { id: "mlx-starvector-1b", available: true },
+        candle: { id: "candle-starvector-1b", available: true },
+      } },
+      installState: "installed",
+      cacheState: "complete",
+    };
+    expect(VECTOR_MODES).toEqual(["image_to_svg", "text_to_svg"]);
+    expect(vectorModelServesMode(model, "image_to_svg", { platform: "macos" })).toBe(true);
+    expect(vectorModelServesMode(model, "text_to_svg", { platform: "macos" })).toBe(false);
+    expect(vectorModelAvailability(model, "image_to_svg", { platform: "macos" })).toMatchObject({
+      available: true,
+      backend: "mlx",
+      providerId: "mlx-starvector-1b",
+    });
+    const missing = { ...model, installState: "missing", cacheState: "missing", downloadable: true };
+    expect(vectorModelAvailability(missing, "image_to_svg", { platform: "win32" })).toMatchObject({
+      available: false,
+      reason: "model_missing",
+      backend: "candle",
+    });
+    expect(downloadOffersFor([missing], vectorModelUsable, { platform: "win32" })).toEqual([missing]);
+    const unavailable = {
+      ...model,
+      vector: { providers: { ...model.vector.providers, candle: {
+        id: "candle-starvector-1b",
+        available: false,
+        reason: "pending_terminal_inference_pin",
+      } } },
+    };
+    expect(vectorModelAvailability(unavailable, "image_to_svg", { platform: "win32" })).toMatchObject({
+      available: false,
+      reason: "pending_terminal_inference_pin",
+      backend: "candle",
+    });
+
+    const eightB = {
+      ...model,
+      id: "starvector_8b",
+      vector: { providers: {
+        mlx: { id: "mlx-starvector-8b", available: false, reason: "pending_terminal_candidate" },
+        candle: { id: "candle-starvector-8b", available: false, reason: "pending_terminal_candidate" },
+      } },
+    };
+    expect(vectorModelAvailability(eightB, "image_to_svg", { platform: "win32" })).toMatchObject({
+      available: false,
+      backend: "candle",
+      reason: "pending_terminal_candidate",
+    });
+    expect(vectorModelServesMode(eightB, "text_to_svg", { platform: "win32" })).toBe(false);
+  });
+
   it("imageModelUsable matches image models serving a mode, rejects other types", () => {
     expect(imageModelUsable({ type: "image", capabilities: ["text_to_image"] }, caps)).toBe(true);
     expect(imageModelUsable({ type: "image", capabilities: ["edit_image"] }, caps)).toBe(true);
@@ -54,6 +121,46 @@ describe("modelEligibility predicates", () => {
     expect(videoModelUsable({ type: "video", capabilities: ["animate_character"] }, caps)).toBe(true);
     expect(videoModelUsable({ type: "video", capabilities: [] }, caps)).toBe(false);
     expect(videoModelUsable({ type: "image", capabilities: ["text_to_video"] }, caps)).toBe(false);
+    const eros = { type: "video", macOnly: true, capabilities: ["text_to_video"] };
+    expect(videoModelUsable(eros, { ...caps, platform: "macos" })).toBe(true);
+    expect(videoModelUsable(eros, { ...caps, platform: "windows" })).toBe(false);
+    expect(videoModelUsable(eros, { ...caps, platform: "linux" })).toBe(false);
+    expect(videoModelUsable(eros, { ...caps, platform: "" })).toBe(false);
+  });
+
+  it("SC-18902 withdraws Eros from off-Mac pickers and offers without hiding base LTX", () => {
+    const windows = { ...caps, platform: "windows" };
+    const base = {
+      id: "ltx_2_3",
+      type: "video",
+      capabilities: ["text_to_video"],
+      installState: "installed",
+      downloadable: true,
+    };
+    const eros = {
+      id: "ltx_2_3_eros",
+      type: "video",
+      macOnly: true,
+      capabilities: ["text_to_video"],
+      installState: "missing",
+      downloadable: false,
+      usable: false,
+      recommended: true,
+    };
+    expect(generationModelsForType([base, eros], "video").map((model) => model.id)).toEqual(["ltx_2_3"]);
+    expect(downloadOffersFor([eros], videoModelUsable, windows)).toEqual([]);
+    expect(videoModelUsable(base, windows)).toBe(true);
+
+    const unknownFallback = fallbackModels.filter((model) =>
+      videoModelUsable(model, { ...caps, platform: "" }),
+    );
+    expect(unknownFallback.some((model) => model.id === "ltx_2_3_eros")).toBe(false);
+    expect(unknownFallback.some((model) => model.id === "ltx_2_3")).toBe(true);
+
+    const macEros = { ...eros, installState: "missing", downloadable: true, usable: true };
+    expect(downloadOffersFor([macEros], videoModelUsable, { ...caps, platform: "macos" }).map((model) => model.id)).toEqual([
+      "ltx_2_3_eros",
+    ]);
   });
 
   it("documentModelUsable requires an interleave-capable image model", () => {
@@ -69,6 +176,25 @@ describe("modelEligibility predicates", () => {
     expect(characterModelUsable({ ui: { poseLibrary: true } }, caps)).toBe(true);
     expect(characterModelUsable({ ui: { viewAngles: [{ id: "front" }] } }, caps)).toBe(true);
     expect(characterModelUsable({ ui: {} }, caps)).toBe(false);
+  });
+
+  it("re-lights an imported pose picker when any active MLX provider route serves pose", () => {
+    const activeMac = { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: true, platform: "macos" };
+    const importedKrea = {
+      id: "user_kreamania",
+      type: "image",
+      family: "krea_2",
+      ui: { poseLibrary: true, poseControlScale: true, controlModes: ["pose"] },
+      macSupport: { supported: true, features: { pose: true } },
+    };
+    expect(poseModelUsable(importedKrea, activeMac)).toBe(true);
+
+    expect(
+      poseModelUsable(
+        { ...importedKrea, macSupport: { supported: true, features: { pose: false } } },
+        activeMac,
+      ),
+    ).toBe(false);
   });
 
   it("hasUsableModelFor counts complete models, not missing or torn ones", () => {
@@ -198,11 +324,13 @@ describe("modelEligibility predicates", () => {
     expect(supportedControlModes(null)).toEqual([]);
   });
 
-  it("downloadOffersFor prefers recommended, falls back to any eligible, skips installed", () => {
+  it("downloadOffersFor prefers recommended and skips installed or unavailable entries", () => {
     const models = [
       { id: "rec", type: "image", capabilities: ["text_to_image"], installState: "missing", recommended: true },
       { id: "plain", type: "image", capabilities: ["text_to_image"], installState: "missing" },
       { id: "done", type: "image", capabilities: ["text_to_image"], installState: "installed", recommended: true },
+      { id: "unusable", type: "image", capabilities: ["text_to_image"], installState: "missing", usable: false, recommended: true },
+      { id: "unavailable", type: "image", capabilities: ["text_to_image"], installState: "missing", downloadable: false, recommended: true },
     ];
     expect(downloadOffersFor(models, imageModelUsable, caps).map((m) => m.id)).toEqual(["rec"]);
     // No recommended among eligible → fall back to all eligible (not installed).
@@ -269,7 +397,32 @@ describe("audio model eligibility (sc-13403)", () => {
     audio: { languages: ["zh", "en"], sampleRates: [24000], maxDurationSecs: 300, supportsMultiSpeaker: true, maxSpeakers: 2 },
   };
 
+  // YuE lyrics2song (sc-19383): no editModes, so `supportsSegmentedLyrics` is its music signal. The
+  // CoT checkpoint would otherwise fall into the residual sfx bucket (it advertises sampleRates), and
+  // the ICL checkpoint into voiceclone (its ReferenceAudio is a song prompt, not a voice to clone).
+  const yueCot = {
+    id: "yue_en_cot",
+    type: "audio",
+    audio: { languages: ["en"], sampleRates: [44100], supportsGuidance: true, supportsSegmentedLyrics: true, supportsRepetitionPenalty: true, supportsOutputLimiter: true },
+  };
+  const yueIcl = {
+    id: "yue_en_icl",
+    type: "audio",
+    audio: {
+      languages: ["en"],
+      sampleRates: [44100],
+      conditioning: ["ReferenceAudio"],
+      supportsGuidance: true,
+      supportsSegmentedLyrics: true,
+      supportsRepetitionPenalty: true,
+      supportsReferenceRegion: true,
+      supportsOutputLimiter: true,
+    },
+  };
+
   const seeded = [
+    ["YuE CoT (lyrics2song)", yueCot, "music"],
+    ["YuE ICL (lyrics2song, reference song prompt)", yueIcl, "music"],
     ["Kokoro-82M", kokoro, "speech"],
     ["MOSS-TTS-Realtime (streaming)", mossTtsRealtime, "speech"],
     ["MOSS-TTSD (multi-speaker)", mossTtsd, "speech"],
@@ -369,6 +522,12 @@ describe("audio model eligibility (sc-13403)", () => {
         "moss_tts_realtime",
         "moss_ttsd_v05",
         "openvoice_v2",
+        "yue_en_cot",
+        "yue_en_icl",
+        "yue_zh_cot",
+        "yue_zh_icl",
+        "yue_jp_kr_cot",
+        "yue_jp_kr_icl",
       ].sort(),
     );
     const expectedMode = {
@@ -380,6 +539,12 @@ describe("audio model eligibility (sc-13403)", () => {
       openvoice_v2: "voiceclone",
       chatterbox_ve: "voiceclone",
       chatterbox_tts: "voiceclone",
+      yue_en_cot: "music",
+      yue_en_icl: "music",
+      yue_zh_cot: "music",
+      yue_zh_icl: "music",
+      yue_jp_kr_cot: "music",
+      yue_jp_kr_icl: "music",
     };
     for (const model of fallbackAudio) {
       expect(audioModelServesMode(model, expectedMode[model.id]), `fallback ${model.id}`).toBe(true);
@@ -425,5 +590,235 @@ describe("missingRequiredModels", () => {
   it("tolerates missing arguments", () => {
     expect(missingRequiredModels(undefined, undefined)).toEqual([]);
     expect(missingRequiredModels(catalog, undefined)).toEqual([]);
+  });
+});
+
+// THE CLASS GUARD, web half (sc-17159, GH #2074). `VIDEO_MODES` is a reachability gate, not a
+// display list: `videoModelUsable` requires a model to serve at least one mode IN THIS ARRAY, and
+// `VideoStudio.jsx` falls a recipe back to `text_to_video` for any mode it does not contain. So a
+// capability the shipped manifest advertises but this array omits makes the model unusable in the
+// Video Studio however completely the server is wired.
+//
+// Read off BOTH real sources, like its Rust siblings — the advertisement from the shipped
+// `builtin.models.jsonc` bytes, the admission from the real exported `VIDEO_MODES`:
+//   * `every_declared_video_capability_is_submittable` (apps/rust-api) — the API allow-list;
+//   * `every_declared_video_capability_is_claimable_by_some_lane` (sceneworks-core) — the lanes.
+// The `fallbackModels` mirror is checked too, because App.jsx serves it to the real picker before
+// the catalog loads, and a mirror that drops a capability hides a mode for that whole window.
+describe("declared video capabilities are all offerable", () => {
+  const HERE = dirname(fileURLToPath(import.meta.url));
+  const manifestPath = resolve(HERE, "../../../config/manifests/builtin.models.jsonc");
+  const manifest = JSON5.parse(readFileSync(manifestPath, "utf8"));
+  const shipped = (Array.isArray(manifest) ? manifest : manifest.models).filter(
+    (entry) => entry.type === "video",
+  );
+
+  it("reads a real video catalog, so the assertions below are not vacuous", () => {
+    expect(shipped.length).toBeGreaterThanOrEqual(12);
+    expect(shipped.flatMap((entry) => entry.capabilities ?? []).length).toBeGreaterThanOrEqual(30);
+  });
+
+  it("VIDEO_MODES admits every capability the shipped manifest advertises", () => {
+    for (const entry of shipped) {
+      expect(Array.isArray(entry.capabilities), `${entry.id} declares capabilities`).toBe(true);
+      for (const mode of entry.capabilities) {
+        expect(
+          VIDEO_MODES,
+          `${entry.id} advertises "${mode}" but VIDEO_MODES omits it, so videoModelServesMode can ` +
+            `never return true for it and the model is dropped from the Video Studio entirely`,
+        ).toContain(mode);
+      }
+    }
+  });
+
+  it("the fallbackModels mirror declares the same capabilities as the manifest", () => {
+    for (const entry of shipped) {
+      const mirrored = fallbackModels.find((model) => model.id === entry.id);
+      if (!mirrored) continue; // the mirror is deliberately partial; only drift is the defect.
+      expect(
+        [...(mirrored.capabilities ?? [])].sort(),
+        `${entry.id}: the constants.js mirror the picker uses before the catalog loads must not ` +
+          `drop or invent a capability`,
+      ).toEqual([...entry.capabilities].sort());
+    }
+  });
+
+  // sc-19504. The withdrawal, asserted where it is actually LOAD-BEARING.
+  //
+  // On a Mac the First/Last tab was already hidden for this model — `macSupport.features.videoModes`
+  // is built by mapping the real `video_mode_is_mlx_eligible`, which says false. OFF-Mac
+  // `macGatingActive` is false, `macVideoModeBlock` is inert, and `videoModelServesMode` collapses
+  // to `capabilities.includes(mode)` alone. So `capabilities` was the ONLY thing between a
+  // Windows/Linux user and a tab whose every submission queued forever — which is why the fix is
+  // the manifest array and not a gating flag.
+  it("the 14B I2V no longer offers First/Last Frame — on any platform", () => {
+    const entry = shipped.find((model) => model.id === "wan_2_2_i2v_14b");
+    expect(entry, "wan_2_2_i2v_14b is a shipped video model").toBeTruthy();
+    expect(entry.capabilities).not.toContain("first_last_frame");
+    expect(entry.ui?.recommendedFor ?? []).not.toContain("first_last_frame");
+
+    // Off-Mac: gating inactive, so this is `capabilities` speaking for itself.
+    const offMac = { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: false, platform: "win32" };
+    expect(videoModelServesMode(entry, "first_last_frame", offMac)).toBe(false);
+    // …and the modes a lane really does serve are untouched, so the withdrawal narrowed one
+    // capability rather than the model. Without this the assertion above would pass on an entry
+    // that had lost every capability.
+    for (const mode of ["image_to_video", "extend_clip", "video_bridge"]) {
+      expect(videoModelServesMode(entry, mode, offMac), `still serves ${mode}`).toBe(true);
+    }
+    expect(videoModelUsable({ ...entry, macSupport: undefined }, offMac)).toBe(true);
+  });
+
+  // sc-19570. THE OFF-MAC GATE, asserted with a FOREIGN-platform fixture.
+  //
+  // This is the same shape as the sc-19504 guard above, generalised: `capabilities` was the only
+  // thing between a Windows/Linux user and a tab whose every submission queued forever, for
+  // THIRTEEN advertised pairs rather than one. sc-19504 fixed its pair by withdrawing the
+  // capability, which is not available here — every pair below renders correctly on a Mac, so the
+  // manifest is right and the missing piece was a per-platform gate.
+  //
+  // The fixture is what makes this a real check. On the host these tests run on there is no
+  // off-Mac anything: `candleGatingActive` arrives from `GET /api/v1/capabilities/mac` and is
+  // false on a Mac, so every helper in candleGating.js is inert. Tagging the caps object with the
+  // foreign platform is what runs the branch.
+  it("an MLX-only video mode is not offered off-Mac, and is still offered on a Mac", () => {
+    // The per-model block the API now emits, in the shape `model_candle_support` serializes.
+    const candleSupport = (served) => ({
+      supported: served.length > 0,
+      features: { videoModes: Object.fromEntries(VIDEO_MODES.map((m) => [m, served.includes(m)])) },
+    });
+    const offMac = { ...DEFAULT_MAC_CAPABILITIES, candleGatingActive: true, platform: "linux" };
+    const onMac = { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: true, platform: "darwin" };
+
+    // LTX-2.3: candle serves `text_to_video` and nothing else, and the Mac serves all six.
+    const ltx = shipped.find((model) => model.id === "ltx_2_3");
+    expect(ltx, "ltx_2_3 is a shipped video model").toBeTruthy();
+    const ltxOffMac = { ...ltx, candleSupport: candleSupport(["text_to_video"]) };
+    const ltxOnMac = {
+      ...ltx,
+      macSupport: { supported: true, features: { videoModes: Object.fromEntries(VIDEO_MODES.map((m) => [m, ltx.capabilities.includes(m)])) } },
+      candleSupport: candleSupport(["text_to_video"]),
+    };
+    for (const mode of [
+      "image_to_video",
+      "first_last_frame",
+      "extend_clip",
+      "video_bridge",
+      "replace_person",
+    ]) {
+      expect(
+        videoModelServesMode(ltxOffMac, mode, offMac),
+        `ltx_2_3 + ${mode} has no off-Mac lane and must not be offered there`,
+      ).toBe(false);
+      // …and is STILL offered on a Mac. Breaking the platform where it works, to fix the one where
+      // it does not, is the failure this leg exists to catch.
+      expect(
+        videoModelServesMode(ltxOnMac, mode, onMac),
+        `ltx_2_3 + ${mode} renders on a Mac and must stay offered there`,
+      ).toBe(true);
+    }
+    // The mode candle DOES serve is untouched, so the gate narrowed the tab list rather than the
+    // model — without this the assertions above would pass on a block that hid everything.
+    expect(videoModelServesMode(ltxOffMac, "text_to_video", offMac)).toBe(true);
+    expect(videoModelUsable(ltxOffMac, offMac)).toBe(true);
+
+    // A model with NO off-Mac lane at all disappears from the picker rather than showing every tab
+    // disabled: `wan_2_2_vace_fun_14b` advertises `replace_person` alone and candle does not route
+    // it, so `candleSupport.supported` is false.
+    const vaceFun = shipped.find((model) => model.id === "wan_2_2_vace_fun_14b");
+    const vaceOffMac = { ...vaceFun, candleSupport: candleSupport([]) };
+    expect(videoModelServesMode(vaceOffMac, "replace_person", offMac)).toBe(false);
+    expect(videoModelUsable(vaceOffMac, offMac)).toBe(false);
+    expect(downloadOffersFor([{ ...vaceOffMac, installState: "missing" }], videoModelUsable, offMac))
+      .toEqual([]);
+
+    // …and on a Mac, that same model is offered. Two platforms, two answers, one model.
+    const vaceOnMac = {
+      ...vaceFun,
+      macSupport: { supported: true, features: { videoModes: { replace_person: true } } },
+      candleSupport: candleSupport([]),
+    };
+    expect(videoModelServesMode(vaceOnMac, "replace_person", onMac)).toBe(true);
+    expect(videoModelUsable(vaceOnMac, onMac)).toBe(true);
+  });
+
+  // The switch itself: with `candleGatingActive` false — a Mac, or any client before the
+  // capabilities endpoint has answered — the block is inert even when it says `false`. A gate that
+  // read `candleSupport` unconditionally would hide Mac-served tabs on the Mac.
+  it("the candle block is inert until off-Mac gating is active", () => {
+    const model = {
+      type: "video",
+      capabilities: ["image_to_video"],
+      candleSupport: { supported: false, features: { videoModes: { image_to_video: false } } },
+    };
+    for (const inert of [
+      DEFAULT_MAC_CAPABILITIES,
+      { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: true, platform: "darwin" },
+    ]) {
+      expect(videoModelServesMode(model, "image_to_video", inert)).toBe(true);
+      expect(videoModelUsable(model, inert)).toBe(true);
+    }
+    const offMac = { ...DEFAULT_MAC_CAPABILITIES, candleGatingActive: true, platform: "win32" };
+    expect(videoModelServesMode(model, "image_to_video", offMac)).toBe(false);
+    expect(videoModelUsable(model, offMac)).toBe(false);
+  });
+
+  it("both MiniMax-H3 partitions are usable in the Video Studio, each on its own modes", () => {
+    // The regression this pins: the family installs on macOS ONLY, so if the server ever answers
+    // `macSupport.supported: false` for it again (it did until sc-17159 added the VIDEO_MODEL_CAPS
+    // rows), `macModelBlock` drops it from the picker on the only platform it runs on.
+    const gating = { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: true, platform: "darwin" };
+    for (const [id, served] of [
+      ["minimax_h3", ["text_to_video", "image_to_video", "first_last_frame"]],
+      ["minimax_h3_ref", ["reference_to_video"]],
+    ]) {
+      const entry = shipped.find((model) => model.id === id);
+      const model = {
+        ...entry,
+        macSupport: {
+          supported: true,
+          features: {
+            videoModes: Object.fromEntries(VIDEO_MODES.map((m) => [m, served.includes(m)])),
+          },
+        },
+      };
+      expect(videoModelUsable(model, gating), `${id} must be usable on a Mac`).toBe(true);
+      for (const mode of VIDEO_MODES) {
+        expect(videoModelServesMode(model, mode, gating), `${id} serves ${mode}?`).toBe(
+          served.includes(mode),
+        );
+      }
+      // …and blocked outright the moment the server says the Mac lane does not serve it, which is
+      // what makes the assertion above about routing rather than about the manifest alone.
+      expect(
+        videoModelUsable({ ...model, macSupport: { supported: false, reason: null } }, gating),
+      ).toBe(false);
+    }
+  });
+});
+
+// sc-22998: YuE2 plans a SYMBOLIC SONG (audio.supportsSymbolicSong). Its request — style, lyrics, a
+// score plan and a decoder choice — is none of the four Audio Studio modes, and on its sample rate
+// alone it would otherwise fall into the residual sfx bucket and be offered as a sound-effect model.
+// Read off the shipped catalog bytes, so the entry the picker would actually receive is judged.
+describe("a symbolic-song model serves no existing Audio Studio mode (sc-22998)", () => {
+  const HERE = dirname(fileURLToPath(import.meta.url));
+  const manifest = JSON5.parse(
+    readFileSync(resolve(HERE, "../../../config/manifests/builtin.models.jsonc"), "utf8"),
+  );
+  const yue2 = manifest.models.find((entry) => entry.id === "yue2");
+
+  it("the shipped yue2 entry advertises the symbolic-song capability", () => {
+    expect(yue2?.audio?.supportsSymbolicSong).toBe(true);
+    expect(yue2.audio.sampleRates).toEqual([48000]);
+  });
+
+  it.each(AUDIO_MODES)("yue2 does not serve %s", (mode) => {
+    expect(audioModelServesMode(yue2, mode)).toBe(false);
+  });
+
+  it("the same block without the flag is picked up as sfx, so the flag is what keeps it out", () => {
+    const { supportsSymbolicSong: _flag, ...withoutFlag } = yue2.audio;
+    expect(audioModelServesMode({ ...yue2, audio: withoutFlag }, "sfx")).toBe(true);
   });
 });

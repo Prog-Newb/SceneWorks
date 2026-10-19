@@ -665,6 +665,437 @@ fn generation_metrics_upsert_get_list_and_merge() {
         .is_empty());
 }
 
+/// Telemetry keeps the source codec and the execution representation as two separate columns
+/// beside the request tier, and carries both through the retention sweep into the history mirror
+/// (sc-21484, epic 11037).
+///
+/// The three are correlated but independent: `quantLabel` is the tier that was *requested*,
+/// `sourceCodec` is what the file *stores*, and `executionRepresentation` is what this host
+/// *materialized* it as. The failure this pins is a stats row that says `nvfp4` and leaves a reader
+/// to assume the run executed NVFP4 natively when it took the dense BF16 fallback.
+#[test]
+fn veda_metrics_survive_partial_updates_retention_and_later_job_isolation() {
+    let db = temp_db("veda-metrics");
+    let path = db.path();
+    let store = JobsStore::new(path.clone());
+    store.initialize().unwrap();
+    let connection = Connection::open(&path).unwrap();
+    for id in ["sparse-run", "dense-run", "later-run"] {
+        connection.execute("insert into jobs (id,type,status,payload_json,created_at,updated_at,completed_at)
+            values (?1,'video_generate','completed','{}','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')", [id]).unwrap();
+    }
+    let sparse = json!({"effective":"sparse","kernel":"actual-native-kernel","plan":"trained",
+        "planMatch":"nearest","totalAttentionFraction":0.4375});
+    let dense = json!({"effective":"dense","totalAttentionFraction":1.0,"fallbackReason":"missing predictor"});
+    for (id, outcome) in [("sparse-run", sparse.clone()), ("dense-run", dense.clone())] {
+        store
+            .upsert_generation_metrics(
+                id,
+                &GenerationMetrics {
+                    veda_execution: Some(outcome.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .upsert_generation_metrics(
+                id,
+                &GenerationMetrics {
+                    total_ms: Some(1234),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get_generation_metrics(id)
+                .unwrap()
+                .unwrap()
+                .veda_execution,
+            Some(outcome)
+        );
+    }
+    store
+        .upsert_generation_metrics("later-run", &GenerationMetrics::default())
+        .unwrap();
+    assert!(store
+        .get_generation_metrics("later-run")
+        .unwrap()
+        .unwrap()
+        .veda_execution
+        .is_none());
+    store
+        .purge_terminal_jobs_completed_before("2021-01-01T00:00:00Z")
+        .unwrap();
+    let rows = store
+        .list_generation_metrics(None, None, None, 100)
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.job_id == "sparse-run")
+            .unwrap()
+            .metrics
+            .veda_execution,
+        Some(sparse)
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.job_id == "dense-run")
+            .unwrap()
+            .metrics
+            .veda_execution,
+        Some(dense)
+    );
+    assert!(rows
+        .iter()
+        .find(|r| r.job_id == "later-run")
+        .unwrap()
+        .metrics
+        .veda_execution
+        .is_none());
+}
+
+#[test]
+fn generation_metrics_separate_source_codec_from_execution_representation() {
+    let db = temp_db("gen-metrics-facts");
+    let path = db.path();
+    let store = JobsStore::new(path.clone());
+    store.initialize().expect("store initializes");
+
+    let connection = Connection::open(&path).expect("db opens");
+    connection
+        .execute(
+            "insert into jobs (
+               id,type,status,payload_json,result_json,requested_gpu,progress,stage,message,
+               attempts,cancel_requested,created_at,updated_at,completed_at
+             ) values ('dense-run','image_generate','completed','{}','{}','auto',1,'completed','',
+                       1,0,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("terminal job seeds");
+    drop(connection);
+
+    // A pre-Blackwell / sm_100 / CPU host running an NVFP4-stored checkpoint: the tier the user
+    // picked and the codec the file stores both say NVFP4, and the run was still dense.
+    let dense = GenerationMetrics {
+        model: Some("kreamania-v7".to_owned()),
+        quant_label: Some("nvfp4".to_owned()),
+        veda_execution: Some(
+            json!({"effective":"dense","fallbackReason":"forced self-test failure","totalAttentionFraction":1.0}),
+        ),
+        source_codec: Some("nvfp4-v1".to_owned()),
+        execution_representation: Some("dense-fallback".to_owned()),
+        backend: Some("cuda".to_owned()),
+        ..Default::default()
+    };
+    store
+        .upsert_generation_metrics("dense-run", &dense)
+        .expect("metrics upsert");
+
+    let read = store
+        .get_generation_metrics("dense-run")
+        .expect("metrics read")
+        .expect("metrics present");
+    assert_eq!(read.quant_label.as_deref(), Some("nvfp4"));
+    assert_eq!(read.source_codec.as_deref(), Some("nvfp4-v1"));
+    assert_eq!(
+        read.execution_representation.as_deref(),
+        Some("dense-fallback"),
+        "the source tier must not stand in for what actually ran"
+    );
+    assert_ne!(
+        read.source_codec.as_deref(),
+        read.quant_label.as_deref(),
+        "the codec id and the tier are different vocabularies"
+    );
+
+    // The wire shape the web stats screen reads.
+    let wire = serde_json::to_value(&read).expect("metrics serialize");
+    assert_eq!(wire["sourceCodec"], json!("nvfp4-v1"));
+    assert_eq!(wire["executionRepresentation"], json!("dense-fallback"));
+
+    // A partial re-report must not wipe either fact.
+    store
+        .upsert_generation_metrics(
+            "dense-run",
+            &GenerationMetrics {
+                total_ms: Some(1234),
+                ..Default::default()
+            },
+        )
+        .expect("partial upsert");
+    let merged = store
+        .get_generation_metrics("dense-run")
+        .expect("metrics reread")
+        .expect("still present");
+    assert_eq!(merged.source_codec.as_deref(), Some("nvfp4-v1"));
+    assert_eq!(
+        merged.execution_representation.as_deref(),
+        Some("dense-fallback")
+    );
+
+    // Retention materializes the row into the history mirror. The insert names every column on
+    // both sides; a positional `select m.*` would have the same arity here and would silently
+    // write the job's type into `source_codec`.
+    store
+        .purge_terminal_jobs_completed_before("2021-01-01T00:00:00Z")
+        .expect("retention sweep");
+    let historical = store
+        .list_generation_metrics(None, None, None, 100)
+        .expect("history queryable");
+    let row = historical
+        .iter()
+        .find(|row| row.job_id == "dense-run")
+        .expect("the purged run survives in Generation Stats");
+    assert_eq!(row.job_type, JobType::ImageGenerate);
+    assert_eq!(row.metrics.source_codec.as_deref(), Some("nvfp4-v1"));
+    assert_eq!(
+        row.metrics.execution_representation.as_deref(),
+        Some("dense-fallback"),
+        "the history mirror must carry the representation, not a shifted column"
+    );
+    assert_eq!(row.metrics.model.as_deref(), Some("kreamania-v7"));
+    assert_eq!(row.metrics.total_ms, Some(1234));
+    assert_eq!(
+        row.metrics.veda_execution.as_ref().unwrap()["effective"],
+        "dense"
+    );
+}
+
+/// The same separation, on a database that EXISTED before the two columns did — the only shape in
+/// which the physical column order of `generation_metrics_history` differs from the order the
+/// history query produces (sc-21484 review).
+///
+/// The fresh-database test above cannot see this. `create table … as select` gives a fresh mirror
+/// the same column order as `generation_metrics`, so a positional `select *` in
+/// `list_generation_metrics` is accidentally correct there. On an upgraded database `ensure_column`
+/// APPENDS `source_codec` and `execution_representation` after the `j_*` identity columns, while
+/// the query's left branch produces them before `j_type`. Same arity, so nothing errors: every
+/// history row would read back with `source_codec` holding `j_type`, `execution_representation`
+/// holding `j_status`, and `j_type` holding whatever landed there — unparseable, so Generation
+/// Stats breaks for every install that predates this change. Naming both branches' columns is what
+/// this pins.
+///
+/// Driven at TWO ages of database (sc-11045 review). The older one predates `image_count` as well:
+/// that column was back-filled onto `generation_metrics` by epic 10402 but never onto the history
+/// mirror, while both pieces of named SQL reference it on that table BY NAME — so on an install
+/// old enough to have a history table without it, every retention sweep and every Generation Stats
+/// read failed outright with "no such column". A test that always seeds `image_count` cannot see
+/// that; this one seeds a schema without it.
+#[test]
+fn generation_metrics_history_survives_a_pre_migration_schema() {
+    for (label, with_image_count) in [
+        ("gen-metrics-upgrade", true),
+        ("gen-metrics-upgrade-pre-image-count", false),
+    ] {
+        generation_metrics_history_upgrade_case(label, with_image_count);
+    }
+}
+
+/// One age of pre-migration database. `with_image_count: false` is the epic-10402-era shape.
+///
+/// Failing mutation (run): delete the `ensure_column(…, "generation_metrics_history",
+/// "image_count", …)` call in `initialize`. The second case then fails on the retention sweep with
+/// `no such column: image_count`.
+fn generation_metrics_history_upgrade_case(label: &str, with_image_count: bool) {
+    let db = temp_db(label);
+    let path = db.path();
+
+    // Build the schema as it shipped BEFORE sc-21484: `generation_metrics` without the two
+    // columns, and a history mirror materialized from that older shape. Written by hand rather
+    // than by an older `initialize()` because the point is the physical column ORDER, and only a
+    // literal `create table` fixes it.
+    let image_count_column = if with_image_count {
+        "image_count integer,"
+    } else {
+        ""
+    };
+    let connection = Connection::open(&path).expect("db opens");
+    connection
+        .execute_batch(&format!(
+            "
+            create table generation_metrics (
+              job_id text primary key,
+              model text,
+              quant_label text,
+              quant_bits integer,
+              sampler text,
+              scheduler text,
+              scheduler_shift real,
+              steps integer,
+              {image_count_column}
+              guidance_scale real,
+              true_cfg_scale real,
+              guidance_method text,
+              use_pid integer,
+              pid_target text,
+              width integer,
+              height integer,
+              seed integer,
+              loras_json text,
+              load_ms integer,
+              sample_ms integer,
+              decode_ms integer,
+              total_ms integer,
+              peak_memory_bytes integer,
+              peak_memory_pct real,
+              peak_gpu_load_pct real,
+              backend text,
+              updated_at text not null
+            );
+            create table generation_metrics_history as
+              select m.*, 'x' as j_type, 'x' as j_status, 'x' as j_project_id, 'x' as j_created_at
+                from generation_metrics m where 0;
+            "
+        ))
+        .expect("pre-migration schema seeds");
+    drop(connection);
+
+    let store = JobsStore::new(path.clone());
+    store.initialize().expect("store upgrades in place");
+
+    // The upgrade must have put the two new columns AFTER the `j_*` ones — otherwise this test is
+    // not exercising the shape it claims to.
+    let connection = Connection::open(&path).expect("db reopens");
+    let statement = connection
+        .prepare("select * from generation_metrics_history")
+        .expect("history is queryable");
+    let columns: Vec<String> = statement
+        .column_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    drop(statement);
+    let index = |name: &str| {
+        columns
+            .iter()
+            .position(|column| column == name)
+            .unwrap_or_else(|| panic!("history is missing {name}: {columns:?}"))
+    };
+    assert!(
+        index("source_codec") > index("j_created_at"),
+        "an upgraded history mirror must have the new columns appended after the identity \
+         columns, or this test proves nothing: {columns:?}"
+    );
+    // The older shape's `image_count` is back-filled too, and it lands in the appended block — the
+    // exact position the named SQL is indifferent to and a positional one would not be.
+    if !with_image_count {
+        assert!(
+            index("image_count") > index("j_created_at"),
+            "{label}: an epic-10402-era mirror gets image_count appended: {columns:?}"
+        );
+    }
+
+    connection
+        .execute(
+            "insert into jobs (
+               id,type,status,payload_json,result_json,requested_gpu,progress,stage,message,
+               attempts,cancel_requested,created_at,updated_at,completed_at
+             ) values ('upgraded-run','image_generate','completed','{}','{}','auto',1,'completed',
+                       '',1,0,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("terminal job seeds");
+    drop(connection);
+
+    store
+        .upsert_generation_metrics(
+            "upgraded-run",
+            &GenerationMetrics {
+                model: Some("kreamania-v7".to_owned()),
+                quant_label: Some("nvfp4".to_owned()),
+                veda_execution: Some(json!({"effective":"dense","fallbackReason":"forced self-test failure","totalAttentionFraction":1.0})),
+                source_codec: Some("nvfp4-v1".to_owned()),
+                execution_representation: Some("dense-fallback".to_owned()),
+                image_count: Some(3),
+                total_ms: Some(4321),
+                ..Default::default()
+            },
+        )
+        .expect("metrics upsert");
+    store
+        .purge_terminal_jobs_completed_before("2021-01-01T00:00:00Z")
+        .expect("retention sweep");
+
+    let historical = store
+        .list_generation_metrics(None, None, None, 100)
+        .expect("history queryable through the union");
+    let row = historical
+        .iter()
+        .find(|row| row.job_id == "upgraded-run")
+        .expect("the purged run survives in Generation Stats");
+    assert_eq!(
+        row.metrics.source_codec.as_deref(),
+        Some("nvfp4-v1"),
+        "a positional union reads j_type here instead of the codec"
+    );
+    assert_eq!(
+        row.metrics.execution_representation.as_deref(),
+        Some("dense-fallback")
+    );
+    assert_eq!(
+        row.job_type,
+        JobType::ImageGenerate,
+        "a positional union shifts j_type off the end and it stops parsing"
+    );
+    assert_eq!(row.metrics.model.as_deref(), Some("kreamania-v7"));
+    assert_eq!(row.metrics.quant_label.as_deref(), Some("nvfp4"));
+    assert_eq!(row.metrics.total_ms, Some(4321));
+    assert_eq!(
+        row.metrics.veda_execution.as_ref().unwrap()["effective"],
+        "dense"
+    );
+    assert_eq!(
+        row.metrics.veda_execution.as_ref().unwrap()["fallbackReason"],
+        "forced self-test failure"
+    );
+    assert_eq!(
+        row.metrics.image_count,
+        Some(3),
+        "{label}: the back-filled image_count carries through the sweep and the union"
+    );
+
+    // And the type filter — which reads `stats.j_type` — still finds it.
+    assert_eq!(
+        store
+            .list_generation_metrics(Some("image_generate"), None, None, 100)
+            .expect("filtered list")
+            .len(),
+        1
+    );
+}
+
+/// A historical row records neither fact, and absence must stay absence — an unmeasured run is not
+/// a dense run (sc-21484).
+#[test]
+fn generation_metrics_omit_both_facts_when_nothing_classified_or_measured() {
+    let store = store("gen-metrics-absent");
+    let job = store
+        .create_job(image_job(object(json!({ "prompt": "p" }))))
+        .expect("job creates");
+    store
+        .upsert_generation_metrics(
+            &job.id,
+            &GenerationMetrics {
+                quant_label: Some("q8".to_owned()),
+                ..Default::default()
+            },
+        )
+        .expect("metrics upsert");
+
+    let read = store
+        .get_generation_metrics(&job.id)
+        .expect("metrics read")
+        .expect("present");
+    assert_eq!(read.source_codec, None);
+    assert_eq!(read.execution_representation, None);
+    let wire = serde_json::to_value(&read).expect("serializes");
+    assert!(
+        wire.get("sourceCodec").is_none() && wire.get("executionRepresentation").is_none(),
+        "an unclassified, unmeasured run omits both facts rather than defaulting them: {wire}"
+    );
+}
+
 #[test]
 fn job_lifecycle_create_claim_complete() {
     let store = store("lifecycle");
@@ -1235,7 +1666,7 @@ fn promote_pending_caption_does_not_resurrect_a_canceled_job() {
 
 /// sc-9120: a mid-flight API restart loses the caption watcher, so the startup recovery must flip any
 /// stranded `pending_caption` row to `queued` (degraded to the original prompt) rather than stranding
-/// it un-claimable. Active jobs still go to `interrupted`; a `queued` job is left alone.
+/// it un-claimable. Unowned active jobs still go to `interrupted`; a `queued` job is left alone.
 #[test]
 fn startup_recovers_stranded_pending_caption_to_queued() {
     let store = store("startup-recover-pending");
@@ -1245,16 +1676,18 @@ fn startup_recovers_stranded_pending_caption_to_queued() {
             json!({ "prompt": "a fox", "model": "ideogram_4" }),
         ))
         .expect("pending job creates");
-    // A separate job taken into an ACTIVE status: it must be INTERRUPTED, not degraded — proving the
-    // pending_caption recovery is distinct from (and runs alongside) the active-job interrupt sweep.
+    // A separate API-owned job taken into an ACTIVE status: it must be INTERRUPTED, not degraded —
+    // proving pending-caption recovery remains distinct from the active-job interrupt sweep.
     let active = store
         .create_job(image_job(object(json!({ "prompt": "active" }))))
         .expect("active job creates");
-    let claimed = store
-        .claim_next_job("worker-1")
-        .expect("claim runs")
-        .expect("the queued job is claimed");
-    assert_eq!(claimed.id, active.id);
+    Connection::open(store.db_path())
+        .expect("db opens")
+        .execute(
+            "update jobs set status = 'preparing', stage = 'preparing' where id = ?1",
+            params![active.id],
+        )
+        .expect("API-owned active fixture updates");
 
     store
         .mark_interrupted_on_startup()
@@ -1789,6 +2222,238 @@ fn claim_finds_compatible_job_behind_large_incompatible_prefix() {
         .expect("claim succeeds")
         .expect("compatible job claimed despite the incompatible prefix");
     assert_eq!(claimed.id, download_job.id);
+    let hydration = store.last_claim_hydration();
+    assert_eq!(
+        hydration.candidate_rows_scanned, 61,
+        "every durable header is scanned so the compatible tail cannot starve"
+    );
+    assert_eq!(
+        hydration.routing_snapshots_hydrated, 1,
+        "the 60 incompatible image rows must not hydrate payload/result JSON"
+    );
+    assert_eq!(
+        hydration.claimed_snapshot_hydrated, 1,
+        "only the selected row is reloaded after assignment"
+    );
+}
+
+#[test]
+fn claim_hydrates_one_snapshot_behind_same_type_dynamic_incompatibilities() {
+    let store = store("same-type-routing-prefix");
+    register_candle_worker(&store, "worker-candle");
+
+    // Every prefix row advertises the same ImageGenerate type/capability as the
+    // tail. Only payload policy distinguishes them: unsupported model, reserved
+    // mode, unpublished packed tier, and unsupported adapter composition.
+    for index in 0..80 {
+        let payload = match index % 4 {
+            0 => json!({ "model": "pulid_flux_dev", "prompt": "unsupported model" }),
+            1 => json!({
+                "model": "flux2_dev",
+                "mode": "style_variations",
+                "prompt": "unsupported mode"
+            }),
+            2 => json!({
+                "model": "flux_schnell",
+                "prompt": "unsupported tier",
+                "advanced": { "mlxQuantize": 6 }
+            }),
+            _ => json!({
+                "model": "boogu_image",
+                "prompt": "unsupported adapter",
+                "loras": [{ "id": "style", "scale": 0.8 }]
+            }),
+        };
+        store
+            .create_job(image_job(object(payload)))
+            .expect("same-type incompatible job creates");
+    }
+    let compatible = store
+        .create_job(image_job(object(json!({
+            "model": "z_image_turbo",
+            "prompt": "compatible tail"
+        }))))
+        .expect("compatible job creates");
+
+    let claimed = store
+        .claim_next_job("worker-candle")
+        .expect("claim succeeds")
+        .expect("compatible tail claims");
+    assert_eq!(claimed.id, compatible.id);
+    assert_eq!(
+        store.last_claim_hydration(),
+        sceneworks_core::jobs_store::ClaimHydrationStats {
+            candidate_rows_scanned: 81,
+            routing_snapshots_hydrated: 1,
+            claimed_snapshot_hydrated: 1,
+        },
+        "same-type model/mode/tier/adapter rejections stay header-only"
+    );
+}
+
+#[test]
+fn same_rank_warm_model_selection_hydrates_only_the_winner() {
+    let store = store("same-rank-warm-model-headers");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-1".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: None,
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: vec!["warm-model".to_owned()],
+            utilization: None,
+        })
+        .expect("worker registers");
+
+    for index in 0..80 {
+        store
+            .create_job(image_job(object(json!({
+                "model": format!("cold-model-{index}"),
+                "prompt": "cold peer"
+            }))))
+            .expect("cold compatible peer creates");
+    }
+    let warm = store
+        .create_job(image_job(object(json!({
+            "model": "warm-model",
+            "prompt": "warm compatible tail"
+        }))))
+        .expect("warm job creates");
+
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("warm job claims");
+    assert_eq!(claimed.id, warm.id);
+    let hydration = store.last_claim_hydration();
+    assert_eq!(hydration.candidate_rows_scanned, 81);
+    assert_eq!(hydration.routing_snapshots_hydrated, 1);
+    assert_eq!(hydration.claimed_snapshot_hydrated, 1);
+}
+
+#[test]
+fn direct_payload_sql_fails_closed_until_initialize_backfills_facts() {
+    let store = store("direct-payload-stales-claim-facts");
+    register_candle_worker(&store, "worker-candle");
+    let job = store
+        .create_job(image_job(object(json!({
+            "model": "z_image_turbo",
+            "prompt": "original"
+        }))))
+        .expect("job creates");
+
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .execute(
+            "update jobs set payload_json = ?1 where id = ?2",
+            params![
+                json!({ "model": "z_image_turbo", "prompt": "out-of-band" }).to_string(),
+                job.id
+            ],
+        )
+        .expect("direct payload edit writes");
+    drop(connection);
+
+    assert!(matches!(
+        store.claim_next_job("worker-candle"),
+        Err(JobsStoreError::StaleClaimRoutingFacts { ref job_id, .. }) if job_id == &job.id
+    ));
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued,
+        "stale facts must never claim or skip the row silently"
+    );
+
+    store
+        .initialize()
+        .expect("initialize backfills current facts");
+    assert_eq!(
+        store
+            .claim_next_job("worker-candle")
+            .expect("claim succeeds after backfill")
+            .expect("job claims")
+            .id,
+        job.id
+    );
+}
+
+#[test]
+fn selected_snapshot_rejects_corrupt_current_version_projection() {
+    let store = store("corrupt-current-claim-facts");
+    register_candle_worker(&store, "worker-candle");
+    let job = store
+        .create_job(image_job(object(json!({
+            "model": "pulid_flux_dev",
+            "prompt": "not candle compatible"
+        }))))
+        .expect("job creates");
+
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .execute(
+            "update jobs set claim_candle_eligible = 1 where id = ?1",
+            params![job.id],
+        )
+        .expect("projection corruption writes");
+    drop(connection);
+
+    assert!(matches!(
+        store.claim_next_job("worker-candle"),
+        Err(JobsStoreError::ClaimRoutingFactsMismatch { ref job_id, .. }) if job_id == &job.id
+    ));
+    assert_eq!(store.last_claim_hydration().routing_snapshots_hydrated, 1);
+    assert_eq!(store.last_claim_hydration().claimed_snapshot_hydrated, 0);
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
+fn pending_caption_payload_rewrite_refreshes_claim_facts_atomically() {
+    let store = store("caption-payload-refreshes-claim-facts");
+    register_candle_worker(&store, "worker-candle");
+    let job = store
+        .create_job(CreateJob {
+            initial_status: Some(JobStatus::PendingCaption),
+            ..image_job(object(json!({
+                "model": "pulid_flux_dev",
+                "prompt": "before caption"
+            })))
+        })
+        .expect("pending job creates");
+
+    let promotion = store
+        .promote_pending_caption_job(
+            &job.id,
+            Some(object(json!({
+                "model": "z_image_turbo",
+                "prompt": "after caption"
+            }))),
+        )
+        .expect("promotion succeeds");
+    assert!(promotion.promoted);
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    let (eligible, payload_revision, facts_payload_revision): (i64, i64, i64) = connection
+        .query_row(
+            "select claim_candle_eligible, payload_revision, claim_payload_revision
+               from jobs where id = ?1",
+            params![job.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("facts read");
+    assert_eq!(eligible, 1);
+    assert_eq!(payload_revision, facts_payload_revision);
+    drop(connection);
+
+    assert_eq!(
+        store
+            .claim_next_job("worker-candle")
+            .expect("claim succeeds")
+            .expect("rewritten job claims")
+            .id,
+        job.id
+    );
 }
 
 #[test]
@@ -2075,6 +2740,113 @@ fn auto_claim_prefers_job_matching_loaded_model() {
 }
 
 #[test]
+fn prompt_refinement_automatically_jumps_a_compatible_worker_queue() {
+    let store = store("prompt-refine-priority");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-1".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: None,
+            capabilities: vec![
+                WorkerCapability::Gpu,
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::PromptRefine,
+            ],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("worker registers");
+    let ordinary = store
+        .create_job(image_job(object(json!({ "prompt": "ordinary render" }))))
+        .expect("ordinary job creates");
+    let refinement = store
+        .create_job(magic_prompt_job("refine me", "1:1"))
+        .expect("refinement creates");
+
+    assert_eq!(ordinary.extra["queueRank"], json!(0));
+    assert!(
+        refinement.extra["queueRank"].as_i64().unwrap_or_default() > 0,
+        "prompt refinement receives a durable priority rank at enqueue"
+    );
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    assert_eq!(claimed.id, refinement.id);
+    assert_eq!(
+        store
+            .get_job(&ordinary.id)
+            .expect("ordinary job loads")
+            .status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
+fn manual_priority_moves_only_pending_jobs_and_beats_gpu_affinity() {
+    let store = store("manual-queue-priority");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-1".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: None,
+            capabilities: vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate],
+            loaded_models: vec!["warm-model".to_owned()],
+            utilization: None,
+        })
+        .expect("worker registers");
+
+    let active = store
+        .create_job(image_job(object(json!({ "model": "first-model" }))))
+        .expect("active job creates");
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("first claim succeeds")
+        .expect("first job claimed");
+    assert_eq!(claimed.id, active.id);
+
+    let selected = store
+        .create_job(image_job(object(json!({ "model": "cold-model" }))))
+        .expect("selected job creates");
+    let affinity_favorite = store
+        .create_job(CreateJob {
+            requested_gpu: "gpu-0".to_owned(),
+            ..image_job(object(json!({ "model": "warm-model" })))
+        })
+        .expect("affinity-favored job creates");
+
+    let prioritized = store
+        .prioritize_jobs(&[active.id.clone(), selected.id.clone()])
+        .expect("priority update succeeds");
+    assert_eq!(
+        prioritized.iter().map(|job| &job.id).collect::<Vec<_>>(),
+        vec![&selected.id],
+        "the already worker-owned job is ignored rather than preempted"
+    );
+    assert_eq!(
+        store.get_job(&active.id).expect("active job loads").status,
+        JobStatus::Preparing
+    );
+
+    complete_job(&store, &active.id);
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("next claim succeeds")
+        .expect("next job claimed");
+    assert_eq!(
+        claimed.id, selected.id,
+        "manual queue priority must outrank explicit-GPU and warm-model affinity"
+    );
+    assert_eq!(
+        store
+            .get_job(&affinity_favorite.id)
+            .expect("affinity job loads")
+            .status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
 fn loaded_model_preference_does_not_skip_explicit_gpu_job() {
     let store = store("loaded-model-explicit-gpu");
     store
@@ -2301,12 +3073,13 @@ fn startup_interrupt_returns_post_update_job_snapshots() {
     let created = store
         .create_job(image_job(Map::new()))
         .expect("job creates");
-    let claimed = store
-        .claim_next_job("worker-1")
-        .expect("claim succeeds")
-        .expect("job claimed");
-    assert_eq!(claimed.id, created.id);
-    assert_eq!(claimed.status, JobStatus::Preparing);
+    Connection::open(store.db_path())
+        .expect("db opens")
+        .execute(
+            "update jobs set status = 'preparing', stage = 'preparing' where id = ?1",
+            params![created.id],
+        )
+        .expect("API-owned active fixture updates");
 
     let interrupted = store
         .mark_interrupted_on_startup()
@@ -2333,63 +3106,26 @@ fn startup_interrupt_collects_every_active_status() {
     // still gathers jobs sitting in DIFFERENT active statuses (running vs saving),
     // not just one, and leaves a queued (non-active) job alone.
     let store = store("startup-interrupt-all-statuses");
-    register_image_worker(&store);
-    store
-        .register_worker(RegisterWorker {
-            worker_id: "worker-2".to_owned(),
-            gpu_id: "gpu-1".to_owned(),
-            gpu_name: Some("GPU 1".to_owned()),
-            capabilities: vec![WorkerCapability::ImageGenerate],
-            loaded_models: Vec::new(),
-            utilization: None,
-        })
-        .expect("second worker registers");
 
-    // Job A -> running (worker-1); Job B -> saving (worker-2). Both are active but
-    // in distinct statuses, so a per-status miss would drop one.
+    // These simulate API-owned tasks: active status, deliberately no worker owner. Job A is
+    // running and job B saving, so a per-status miss would drop one.
     let running = store
         .create_job(image_job(Map::new()))
         .expect("job A creates");
-    store.claim_next_job("worker-1").expect("worker-1 claims A");
-    store
-        .update_job_progress(
-            &running.id,
-            ProgressUpdate {
-                status: JobStatus::Running,
-                stage: ProgressStage::Running,
-                progress: 0.4,
-                message: "running".to_owned(),
-                error: None,
-                result: None,
-                eta_seconds: None,
-                peak_gpu_memory_pct: None,
-                peak_gpu_load_pct: None,
-                backend: None,
-                worker_id: Some("worker-1".to_owned()),
-            },
-        )
-        .expect("A -> running");
-
     let saving = store
         .create_job(image_job(Map::new()))
         .expect("job B creates");
-    store.claim_next_job("worker-2").expect("worker-2 claims B");
-    store
-        .update_job_progress(
-            &saving.id,
-            ProgressUpdate {
-                status: JobStatus::Saving,
-                stage: ProgressStage::Saving,
-                progress: 0.9,
-                message: "saving".to_owned(),
-                error: None,
-                result: None,
-                eta_seconds: None,
-                peak_gpu_memory_pct: None,
-                peak_gpu_load_pct: None,
-                backend: None,
-                worker_id: Some("worker-2".to_owned()),
-            },
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .execute(
+            "update jobs set status = 'running', stage = 'running' where id = ?1",
+            params![running.id],
+        )
+        .expect("A -> running");
+    connection
+        .execute(
+            "update jobs set status = 'saving', stage = 'saving' where id = ?1",
+            params![saving.id],
         )
         .expect("B -> saving");
 
@@ -2419,6 +3155,172 @@ fn startup_interrupt_collects_every_active_status() {
     // The queued job is untouched — not active, so not swept.
     let queued = store.get_job(&queued.id).expect("queued job loads");
     assert_eq!(queued.status, JobStatus::Queued);
+}
+
+#[test]
+fn startup_preserves_exact_worker_owner_until_same_id_worker_reports_idle() {
+    let store = store("startup-preserves-worker-owner");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    store
+        .update_job_progress(
+            &created.id,
+            ProgressUpdate {
+                status: JobStatus::Running,
+                stage: ProgressStage::Running,
+                progress: 0.4,
+                message: "rendering".to_owned(),
+                error: None,
+                result: None,
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: Some("mlx".to_owned()),
+                worker_id: Some("worker-1".to_owned()),
+            },
+        )
+        .expect("job starts");
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Busy,
+            current_job_id: Some(created.id.clone()),
+            loaded_models: Vec::new(),
+            utilization: None,
+            status_reason: None,
+        })
+        .expect("active worker heartbeat succeeds");
+
+    let interrupted = store
+        .mark_interrupted_on_startup()
+        .expect("API startup recovery succeeds");
+    assert!(interrupted.is_empty(), "live worker-owned job is preserved");
+    let job = store.get_job(&created.id).expect("job loads");
+    let worker = store.get_worker("worker-1").expect("worker loads");
+    assert_eq!(job.status, JobStatus::Running);
+    assert_eq!(job.worker_id.as_deref(), Some("worker-1"));
+    assert_eq!(worker.status, WorkerStatus::Busy);
+    assert_eq!(worker.current_job_id.as_deref(), Some(created.id.as_str()));
+
+    // A surviving external worker may re-register after the API socket comes back. The same order
+    // applies to the API's newly spawned in-process utility worker: register first, then its
+    // immediately-due idle heartbeat. Registration must not erase ownership before that heartbeat
+    // tells us whether this is the same process.
+    let registered = store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-1".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: Some("GPU 0".to_owned()),
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("same-ID worker re-registers");
+    assert_eq!(registered.status, WorkerStatus::Busy);
+    assert_eq!(
+        registered.current_job_id.as_deref(),
+        Some(created.id.as_str())
+    );
+
+    // A restarted worker with the same ID reports idle. That is the deterministic ownership
+    // boundary: the old active job is interrupted rather than becoming immortal.
+    let heartbeat = store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Idle,
+            current_job_id: None,
+            loaded_models: Vec::new(),
+            utilization: None,
+            status_reason: None,
+        })
+        .expect("idle heartbeat succeeds");
+    assert_eq!(
+        heartbeat.interrupted_job.as_ref().map(|job| &job.id),
+        Some(&created.id)
+    );
+    assert_eq!(
+        store.get_job(&created.id).expect("job reloads").status,
+        JobStatus::Interrupted
+    );
+}
+
+#[test]
+fn startup_preserved_worker_job_is_bounded_by_the_stale_sweep() {
+    let store = store("startup-preserved-worker-goes-stale");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Busy,
+            current_job_id: Some(created.id.clone()),
+            loaded_models: Vec::new(),
+            utilization: None,
+            status_reason: None,
+        })
+        .expect("worker heartbeat succeeds");
+    assert!(store
+        .mark_interrupted_on_startup()
+        .expect("startup recovery succeeds")
+        .is_empty());
+
+    Connection::open(store.db_path())
+        .expect("db opens")
+        .execute(
+            "update workers set last_seen_at = '2000-01-01T00:00:00Z' where id = ?1",
+            params!["worker-1"],
+        )
+        .expect("worker timestamp ages");
+    let sweep = store
+        .mark_stale_workers_interrupted(1)
+        .expect("stale sweep succeeds");
+    assert_eq!(sweep.jobs.len(), 1);
+    assert_eq!(sweep.jobs[0].id, created.id);
+    assert_eq!(sweep.jobs[0].status, JobStatus::Interrupted);
+    assert_eq!(sweep.workers[0].status, WorkerStatus::Offline);
+}
+
+#[test]
+fn startup_interrupts_an_active_job_with_inconsistent_worker_ownership() {
+    let store = store("startup-inconsistent-worker-owner");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    Connection::open(store.db_path())
+        .expect("db opens")
+        .execute(
+            "update workers set status = 'idle', current_job_id = null where id = ?1",
+            params!["worker-1"],
+        )
+        .expect("inconsistent worker fixture updates");
+
+    let interrupted = store
+        .mark_interrupted_on_startup()
+        .expect("startup recovery succeeds");
+    assert_eq!(interrupted.len(), 1);
+    assert_eq!(interrupted[0].id, created.id);
+    assert_eq!(interrupted[0].status, JobStatus::Interrupted);
+    assert_eq!(
+        store.get_worker("worker-1").expect("worker loads").status,
+        WorkerStatus::Offline
+    );
 }
 
 #[test]
@@ -3596,22 +4498,25 @@ fn candle_supported_accepts_eligible_and_in_process_jobs() {
 
 #[test]
 fn candle_supported_rejects_unsupported_strict_pose() {
-    // The sc-5968 case generalized: sdxl + poses has no candle strict-pose lane, so the candle/CUDA
-    // flow can't serve it — it must fail loudly off-Mac, not silently render an unconditioned T2I.
+    // The sc-5968 case generalized: Chroma + poses has no candle strict-pose lane, so the
+    // candle/CUDA flow can't serve it — it must fail loudly off-Mac, not silently render an
+    // unconditioned T2I. SDXL is no longer a valid unsupported sentinel: sc-20747 added its native
+    // OpenPose lane on both MLX and Candle.
     let store = store("candle-oracle-pose");
     let job = job_of(
         &store,
         JobType::ImageGenerate,
-        json!({ "model": "sdxl", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
+        json!({ "model": "chroma1_base", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
     );
     let reason = candle_supported(&job).unwrap_err();
-    assert_eq!(reason.model.as_deref(), Some("sdxl"));
+    assert_eq!(reason.model.as_deref(), Some("chroma1_base"));
     assert!(reason.feature.contains("strict-pose"));
     assert!(reason
         .candle_error_message()
         .starts_with("candle_unsupported:"));
     let message = reason.candle_error_message();
     for model in [
+        "sdxl",
         "qwen_image",
         "kolors",
         "z_image_turbo",
@@ -3678,13 +4583,66 @@ fn candle_supported_flags_a_torch_only_image_model() {
         .starts_with("candle_unsupported:"));
 }
 
+/// sc-24109 retires sc-24108's "macOS-only model" refusal for `qwen_image_2_1`: the native
+/// Candle/CUDA port serves the id off-Mac, so a candle worker CLAIMS a plain 2.1 text-to-image job
+/// through the same oracle that used to refuse it.
+///
+/// This is the one assertion that cannot be made from the routing tables alone — `candle_supported`
+/// is the gate an off-Mac worker actually consults, and a refusal here is what would leave the job
+/// terminal-failed on a Windows/Linux host no matter what the catalog said. The negative half is
+/// the discriminator: not only is the job claimed, none of the retired refusal's wording can still
+/// reach a user.
+#[test]
+fn candle_claims_qwen_image_2_1_text_to_image_off_mac() {
+    let store = store("candle-oracle-qwen-2-1");
+    let job = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "qwen_image_2_1", "prompt": "a lighthouse" }),
+    );
+    assert!(
+        candle_supported(&job).is_ok(),
+        "an off-Mac worker must claim a plain Qwen Image 2.1 txt2img job (sc-24109)"
+    );
+
+    // A reference-conditioned request is claimed too (sc-24110): the Candle port declares the same
+    // `Reference` / `ReferenceRgba` / `MultiReference` conditioning as MLX, and the lane is keyed
+    // on the ordered reference list, never the mode — so the manifest's `image_to_image` shape (a
+    // plain request carrying a `referenceAssetId`) is claimed off-Mac exactly as on a Mac.
+    let conditioned = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "qwen_image_2_1", "prompt": "p", "referenceAssetId": "ref_1" }),
+    );
+    assert!(
+        candle_supported(&conditioned).is_ok(),
+        "an off-Mac worker must claim a reference-conditioned Qwen Image 2.1 job"
+    );
+
+    // A carrier 2.1 does not declare (a pose set) is still refused — for the CARRIER, not for a
+    // platform boundary that no longer exists, so the reason names something the user can act on.
+    let posed = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "qwen_image_2_1", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
+    );
+    let reason = candle_supported(&posed).unwrap_err();
+    assert_eq!(reason.model.as_deref(), Some("qwen_image_2_1"));
+    let message = reason.candle_error_message();
+    assert!(message.starts_with("candle_unsupported:"));
+    assert!(
+        !message.contains("only on the native MLX backend"),
+        "the retired macOS-only refusal must be unreachable: {message}"
+    );
+}
+
 #[test]
 fn candle_required_enforce_fails_unsupported_job() {
     let store = store("candle-enforce");
     let job = job_of(
         &store,
         JobType::ImageGenerate,
-        json!({ "model": "sdxl", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
+        json!({ "model": "chroma1_base", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
     );
     // Warn mode (enforce = false): no-op; the unsupported job stays queued.
     let warn = store
@@ -3867,12 +4825,12 @@ fn an_unhealthy_candle_worker_keeps_stranded_jobs_queued() {
 #[test]
 fn candle_stranded_sweep_partitions_and_is_noop_when_off() {
     let store = store("candle-strand-partition");
-    // No candle worker. An UNSUPPORTED job (sdxl+poses) is not candle-eligible, so the stranded
+    // No candle worker. An UNSUPPORTED job (Chroma + poses) is not candle-eligible, so the stranded
     // sweep leaves it for the enforce sweep — the two partition the queue.
     let unsupported = job_of(
         &store,
         JobType::ImageGenerate,
-        json!({ "model": "sdxl", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
+        json!({ "model": "chroma1_base", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
     );
     backdate_job_created_at(&store, &unsupported.id);
     let failed = store.fail_stranded_candle_jobs(true, 90).expect("sweep ok");
@@ -3899,6 +4857,273 @@ fn candle_stranded_sweep_partitions_and_is_noop_when_off() {
         store.get_job(&eligible.id).expect("loads").status,
         JobStatus::Queued
     );
+}
+
+// sc-19570 — the PLATFORM-reachability sweep. The store-level twin of the API guards in
+// `apps/rust-api/src/tests/jobs.rs`: those prove the HTTP contract is platform-independent and the
+// job terminates; these pin the mechanism's exact reach.
+
+/// The sweep fails an MLX-only video job off-Mac, IMMEDIATELY and with a named reason, and leaves
+/// it alone on a Mac.
+///
+/// No `backdate_job_created_at` anywhere in this test, unlike every `fail_stranded_*` sibling
+/// above, and that is the point: those sweeps hold a grace window because their gap is transient (a
+/// worker that has not checked in yet). This gap is structural — no worker that could claim the job
+/// can register on this OS at all — so waiting would only extend the hang. A future edit that adds
+/// a grace window here turns this red.
+#[test]
+fn platform_sweep_fails_an_mlx_only_video_job_off_mac_immediately() {
+    let store = store("platform-unreachable-offmac");
+    // `krea_realtime_14b`, not `ltx_2_3`. This test needs a pair that is MLX-claimable and
+    // candle-unclaimable, and sc-19570 originally used LTX because that held on the epic branch.
+    // Syncing `main` gave the LTX pair a real candle lane (`candle_video_engine_id` resolves it to
+    // `ltx_2_3_distilled`), so the old pair is now candle-SERVED and the sweep is correctly inert on
+    // it — the assertion below would fail for the right reason. Krea Realtime has no
+    // `candle-gen-krea-realtime` at all, so it is still MLX-only; it is one of the seven pairs left
+    // in `MLX_ONLY_ADVERTISED_PAIRS` after that same sync.
+    let job = job_of(
+        &store,
+        JobType::VideoGenerate,
+        json!({ "model": "krea_realtime_14b", "mode": "image_to_video", "sourceAssetId": "img-1", "prompt": "p" }),
+    );
+
+    // macOS FIRST, on the very same job: the MLX engine renders this pair, so the sweep must be
+    // inert there. Asserting it before the off-Mac arm means a sweep that failed everything cannot
+    // reach the interesting assertion at all.
+    assert!(store
+        .fail_platform_unreachable_jobs("macos")
+        .expect("sweep ok")
+        .is_empty());
+    assert!(store
+        .fail_platform_unreachable_jobs("darwin")
+        .expect("sweep ok")
+        .is_empty());
+    assert_eq!(
+        store.get_job(&job.id).expect("loads").status,
+        JobStatus::Queued
+    );
+
+    let failed = store
+        .fail_platform_unreachable_jobs("windows")
+        .expect("sweep ok");
+    assert_eq!(failed.len(), 1, "the unreachable job is failed");
+    assert_eq!(failed[0].id, job.id);
+    assert_eq!(failed[0].status, JobStatus::Failed);
+    // WHICH error. `is_err()`-shaped assertions are satisfied by the wrong failure, and the three
+    // neighbouring causes describe situations with different remedies — `candle_unavailable` and
+    // `mlx_unavailable` say "start the worker", `*_unsupported` says "port the surface". This one
+    // says "there is nothing to start and nothing to enable".
+    let error = failed[0].error.as_deref().unwrap_or_default();
+    assert!(
+        error.starts_with("platform_unreachable: "),
+        "error names its own cause: {error:?}"
+    );
+    for foreign in [
+        "candle_unavailable",
+        "mlx_unavailable",
+        "candle_unsupported",
+        "mlx_unsupported",
+    ] {
+        assert!(
+            !error.contains(foreign),
+            "the platform reason must not be confusable with {foreign}: {error}"
+        );
+    }
+    assert!(
+        error.contains("krea_realtime_14b")
+            && error.contains("image_to_video")
+            && error.contains("windows"),
+        "the reason names the model, the mode and the host: {error}"
+    );
+    assert_eq!(
+        store.get_job(&job.id).expect("loads").status,
+        JobStatus::Failed,
+        "the transition is persisted, not just reported"
+    );
+    // Idempotent: a second pass finds nothing, because the row is no longer `queued`.
+    assert!(store
+        .fail_platform_unreachable_jobs("linux")
+        .expect("sweep ok")
+        .is_empty());
+}
+
+/// **THE SCOPING GUARD.** The sweep must touch ONLY the four video job types.
+///
+/// `video_request_is_candle_eligible` answers `false` for every other job type — its match arm is
+/// literally `_ => false` — so a sweep that skipped the job-type filter would read "unreachable"
+/// for an image, training or upscale job and fail the entire off-Mac queue on the first claim.
+/// That is a far worse defect than the one sc-19570 fixes, and nothing about the reachability
+/// predicate's own signature prevents it.
+///
+/// Every job below is created queued, swept on `windows`, and must survive.
+#[test]
+fn platform_sweep_never_touches_a_non_video_or_candle_served_job() {
+    let store = store("platform-unreachable-scope");
+    let survivors = [
+        // Non-video: the candle lane runs all of these off-Mac.
+        job_of(
+            &store,
+            JobType::ImageGenerate,
+            json!({ "model": "z_image_turbo", "prompt": "p" }),
+        ),
+        job_of(
+            &store,
+            JobType::ImageUpscale,
+            json!({ "model": "z_image_turbo", "prompt": "p" }),
+        ),
+        job_of(
+            &store,
+            JobType::LoraTrain,
+            json!({ "model": "z_image_turbo", "prompt": "p" }),
+        ),
+        // Video, but candle-SERVED off-Mac — the half a too-broad sweep would break.
+        job_of(
+            &store,
+            JobType::VideoGenerate,
+            json!({ "model": "wan_2_2", "mode": "text_to_video", "prompt": "p" }),
+        ),
+        job_of(
+            &store,
+            JobType::VideoExtend,
+            json!({ "model": "wan_2_2", "mode": "extend_clip", "sourceClipAssetId": "clip-1", "prompt": "p" }),
+        ),
+        job_of(
+            &store,
+            JobType::PersonReplace,
+            json!({ "model": "wan_2_2", "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "t-1", "characterId": "c-1", "prompt": "p" }),
+        ),
+    ];
+
+    let failed = store
+        .fail_platform_unreachable_jobs("windows")
+        .expect("sweep ok");
+    assert!(
+        failed.is_empty(),
+        "the sweep reached outside the four video job types or refused a candle-served pair: {:?}",
+        failed
+            .iter()
+            .map(|job| (job.job_type.as_str(), job.error.clone()))
+            .collect::<Vec<_>>()
+    );
+    for job in &survivors {
+        assert_eq!(
+            store.get_job(&job.id).expect("loads").status,
+            JobStatus::Queued,
+            "{} must stay claimable off-Mac",
+            job.job_type.as_str()
+        );
+    }
+
+    // …and the sweep is not simply inert: an unreachable job in the SAME store, on the same pass,
+    // is still failed. Without this arm every assertion above would pass on a no-op.
+    // Krea Realtime rather than LTX, for the reason spelled out in
+    // `platform_sweep_fails_an_mlx_only_video_job_off_mac_immediately`: syncing `main` gave the LTX
+    // pair a candle lane, so an LTX job is no longer stranded off-Mac and this arm would assert a
+    // no-op — the precise failure it exists to prevent.
+    let stranded = job_of(
+        &store,
+        JobType::VideoGenerate,
+        json!({ "model": "krea_realtime_14b", "mode": "image_to_video", "sourceAssetId": "img-1", "prompt": "p" }),
+    );
+    let failed = store
+        .fail_platform_unreachable_jobs("windows")
+        .expect("sweep ok");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].id, stranded.id);
+}
+
+/// A claim-time sweep must read payload JSON only for rows its durable routing
+/// headers have already proven unreachable. In particular, a large queued
+/// prefix of reachable video and non-video work cannot turn each worker poll
+/// into an unbounded payload-hydration pass.
+#[test]
+fn platform_sweep_hydrates_only_platform_unreachable_video_candidates() {
+    let store = store("platform-unreachable-bounded-hydration");
+    let mut survivors = Vec::new();
+    for index in 0..80 {
+        survivors.push(job_of(
+            &store,
+            JobType::ImageGenerate,
+            json!({ "model": "z_image_turbo", "prompt": format!("image {index}") }),
+        ));
+        survivors.push(job_of(
+            &store,
+            JobType::VideoGenerate,
+            json!({ "model": "wan_2_2", "mode": "text_to_video", "prompt": format!("video {index}") }),
+        ));
+    }
+    let unreachable = job_of(
+        &store,
+        JobType::VideoGenerate,
+        json!({ "model": "krea_realtime_14b", "mode": "image_to_video", "sourceAssetId": "img-1", "prompt": "p" }),
+    );
+
+    let failed = store
+        .fail_platform_unreachable_jobs("windows")
+        .expect("sweep ok");
+    assert_eq!(failed.len(), 1, "only the unreachable video row fails");
+    assert_eq!(failed[0].id, unreachable.id);
+    assert_eq!(
+        store.last_platform_reachability_sweep(),
+        sceneworks_core::jobs_store::PlatformReachabilitySweepStats {
+            candidate_rows_scanned: 1,
+            snapshots_hydrated: 1,
+        },
+        "reachable/non-video queued rows stay header-only regardless of prefix size"
+    );
+    for job in survivors {
+        assert_eq!(
+            store.get_job(&job.id).expect("loads").status,
+            JobStatus::Queued,
+            "reachable/non-video rows remain untouched"
+        );
+    }
+}
+
+/// The sweep fires **regardless of worker presence**, which is what separates it from
+/// `fail_stranded_candle_jobs` and is the reason that sweep could never have covered this case.
+///
+/// A live, healthy candle worker is registered here. `fail_stranded_candle_jobs` returns early the
+/// moment it sees one — correctly: the job is not unserved, it is unclaimable — and that early
+/// return is exactly why the twenty measured pairs hung on real Windows deployments, which do run
+/// a candle worker. Asserting both sweeps against the same store makes the division explicit.
+#[test]
+fn platform_sweep_fires_even_with_a_live_candle_worker_that_will_never_claim() {
+    let store = store("platform-unreachable-live-worker");
+    register_candle_worker(&store, "worker-candle");
+    let job = job_of(
+        &store,
+        JobType::VideoGenerate,
+        // Krea Realtime remains macOS-only, so a live generic Candle worker cannot rescue it.
+        json!({
+            "model": "krea_realtime_14b",
+            "mode": "image_to_video",
+            "sourceAssetId": "img-1",
+            "prompt": "p"
+        }),
+    );
+    backdate_job_created_at(&store, &job.id);
+
+    // The pre-existing sweep declines — a live candle worker exists, so as far as it is concerned
+    // the job is simply waiting. This is the false-negative sc-19570 had to work around.
+    assert!(
+        store
+            .fail_stranded_candle_jobs(true, 90)
+            .expect("sweep ok")
+            .is_empty(),
+        "fail_stranded_candle_jobs cannot see this class — that is why a second sweep exists"
+    );
+    assert_eq!(
+        store.get_job(&job.id).expect("loads").status,
+        JobStatus::Queued
+    );
+
+    let failed = store
+        .fail_platform_unreachable_jobs("windows")
+        .expect("sweep ok");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].id, job.id);
+    assert_eq!(failed[0].status, JobStatus::Failed);
 }
 
 // epic 3482 / sc-3484 — mac_rust_supported oracle (the inverse of the eligibility predicates)
@@ -4359,6 +5584,150 @@ fn native_converters_registry_contents_are_pinned() {
     );
 }
 
+/// sc-20529: `CANDLE_NATIVE_CONVERTERS` names the converters with a REAL off-macOS implementation,
+/// and it drives two user-visible behaviours — the worker's unconverted-model preflight and the
+/// API's off-Mac MLX status surfacing. Adding an id here claims an off-Mac convert lane exists;
+/// getting that wrong flips installed models to `missing` on Windows/Linux and refuses renders that
+/// work today (the Anima trap). Pin the set so every edit is deliberate.
+#[test]
+fn candle_native_converters_registry_contents_are_pinned() {
+    use std::collections::BTreeSet;
+    let expected: BTreeSet<&str> = ["flux2_klein_diffusers"].into_iter().collect();
+    let actual: BTreeSet<&str> = sceneworks_core::jobs_store::CANDLE_NATIVE_CONVERTERS
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "CANDLE_NATIVE_CONVERTERS drifted from its pinned set — an id here asserts the worker has a \
+         non-macOS `convert_*` arm that is NOT the 'requires macOS' stub. Adding one without that \
+         arm makes the API report needs_conversion off-Mac for a model that can never be converted \
+         there; removing one silently reverts flux2_klein_9b_true_v2 to the sc-20529 failure"
+    );
+}
+
+/// Every off-Mac converter must also be a native converter: `CANDLE_NATIVE_CONVERTERS` is a
+/// SUBSET of `NATIVE_CONVERTERS`, never a parallel universe. An id in the former but not the latter
+/// would be rejected by `resolve_convert_plan`'s "Unknown MLX converter." fallback, so the API would
+/// advertise a convert affordance whose job fails on submit.
+#[test]
+fn candle_native_converters_are_a_subset_of_native_converters() {
+    for converter in sceneworks_core::jobs_store::CANDLE_NATIVE_CONVERTERS {
+        assert!(
+            sceneworks_core::jobs_store::NATIVE_CONVERTERS.contains(converter),
+            "'{converter}' is in CANDLE_NATIVE_CONVERTERS but not NATIVE_CONVERTERS — \
+             resolve_convert_plan has no arm for it, so the convert job would fail on submit"
+        );
+    }
+}
+
+/// sc-20529 derive-don't-duplicate guard. A convert-at-install model names its source checkpoint
+/// TWICE: once as `mlx.convertSourceFile` (what the converter reads) and once as the download
+/// entry's `files` allow-list (what gets fetched). These are the same file by construction — the
+/// single-file declaration exists precisely BECAUSE only the convert source is wanted out of a repo
+/// that also hosts unused GGUF/fp8/fp4 quants (`wikeeyang/Flux2-Klein-9B-True-V2` is ~73 GB whole,
+/// 18 GB for the one file). It is therefore NOT the pinned-allow-list antipattern the whole-repo
+/// download rule forbids.
+///
+/// What it IS exposed to is drift: editing one spelling and not the other yields a download that
+/// fetches a file the converter never reads, and a conversion that fails on a file that was never
+/// fetched — with no compile error and no test failure. This pins them together so the manifest
+/// cannot express the mismatch.
+///
+/// Two strengths, chosen by the manifest contract rather than by model id:
+///
+/// * **Every** convert-at-install entry: `files[0]` IS the convert source. Position matters — the
+///   allow-list's first entry is the primary artifact the converter reads; the rest (where present)
+///   are the companions it reads alongside. A `contains` check alone accepts a list that fetches
+///   the source as an afterthought behind unrelated files.
+/// * An entry that declares **`convertBaseRepo`** borrows its text encoder / VAE / tokenizer from a
+///   separately-installed base, so it has nothing else to fetch: its source-repo download must be
+///   EXACTLY the one convert source, which is what `flux2_klein_9b_true_v2`'s manifest comment
+///   claims ("it must name exactly one file") and what keeps the ~73 GB whole-repo pull off the
+///   wire. Entries with NO `convertBaseRepo` (Anima) are exempt by construction: their download IS
+///   the component bundle the converter reads (DiT + Qwen3 TE + VAE), so a longer list is correct
+///   there and asserting exactness would fail three shipped models.
+#[test]
+fn convert_source_file_matches_its_download_allow_list() {
+    let manifest = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc is embedded in BUILTIN_MANIFESTS");
+    let parsed: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(manifest))
+            .expect("builtin.models.jsonc parses after comment stripping");
+    let models = parsed
+        .get("models")
+        .and_then(Value::as_array)
+        .expect("manifest has a models array");
+    let mut checked = 0_usize;
+    for model in models {
+        let id = model.get("id").and_then(Value::as_str).unwrap_or_default();
+        let Some(mlx) = model.get("mlx").and_then(Value::as_object) else {
+            continue;
+        };
+        if mlx.get("requiresConversion").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let (Some(source_repo), Some(source_file)) = (
+            mlx.get("convertSourceRepo").and_then(Value::as_str),
+            mlx.get("convertSourceFile").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        // Only the download entries that target the CONVERT SOURCE repo are constrained. A model may
+        // legitimately declare sibling downloads from other repos (ltx_2_3_eros pulls its Gemma
+        // bundle and a distill LoRA), and those carry their own unrelated file lists.
+        for download in model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|download| download.get("repo").and_then(Value::as_str) == Some(source_repo))
+        {
+            let files: Vec<&str> = download
+                .get("files")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            // An EMPTY/absent list is the whole-repo download — the convert source is included by
+            // definition, so there is nothing to drift.
+            if files.is_empty() {
+                continue;
+            }
+            assert_eq!(
+                files.first().copied(),
+                Some(source_file),
+                "{id}: mlx.convertSourceFile '{source_file}' is not the FIRST entry of the \
+                 {source_repo} download files list {files:?} — the primary artifact the converter \
+                 reads must lead the allow-list, and it must be fetched at all. Keep the two \
+                 spellings identical (sc-20529)"
+            );
+            // A base-borrowing entry fetches its convert source and NOTHING else: the text
+            // encoder / VAE / tokenizer come from the separately-installed `convertBaseRepo`.
+            if mlx.contains_key("convertBaseRepo") {
+                assert_eq!(
+                    files,
+                    vec![source_file],
+                    "{id}: declares convertBaseRepo, so its {source_repo} download must be exactly \
+                     the one convert source — every other component is borrowed from the base. A \
+                     longer list silently widens the pull (the wikeeyang repo is ~73 GB whole) and \
+                     contradicts the manifest comment on this entry (sc-20529)"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 0,
+        "expected at least one convert-at-install model with a pinned source-repo download list; \
+         if none remains, this guard has rotted into a no-op and should be removed deliberately"
+    );
+}
+
 #[test]
 fn mac_rust_supported_feature_gaps_point_at_their_spikes() {
     let store = store("oracle-feature-spikes");
@@ -4667,6 +6036,9 @@ fn mac_capabilities_master_switch_and_infra_features() {
     // Smart-select segmentation is native SAM3 on MLX and Candle (sc-6105 / sc-18480).
     assert_eq!(epic("imageSegment"), None);
     assert!(mac.features["imageSegment"].supported);
+    // Iris-3B depth runs on native MLX on Mac and Candle off-Mac (sc-25682).
+    assert_eq!(epic("imageDepth"), None);
+    assert!(mac.features["imageDepth"].supported);
     assert_eq!(epic("datasetCaptioning"), None);
     // LyCORIS is ported to MLX (epic 3641) → no longer a capability gap entry at all.
     assert!(!mac.features.contains_key("lycoris"));
@@ -4689,9 +6061,11 @@ fn mac_capabilities_master_switch_and_infra_features() {
             !matches!(
                 key.as_str(),
                 "datasetCaptioning"
+                    | "imageDepth"
                     | "imageSegment"
                     | "imageUpscale"
                     | "imageUpscaleSeedvr2"
+                    | "imageUpscaleIris"
                     | "personDetect"
                     | "poseFromPhoto"
                     | "videoUpscale"
@@ -4708,10 +6082,26 @@ fn mac_capabilities_master_switch_and_infra_features() {
     let windows = mac_capabilities("windows", false);
     assert!(windows.features["imageUpscaleSeedvr2"].supported);
     assert!(windows.features["imageUpscaleSeedvr2"].reason.is_none());
+    // Iris restoration (sc-25683) has a backend on the same three platforms (MLX + Candle).
+    assert!(mac.features["imageUpscaleIris"].supported);
+    assert!(windows.features["imageUpscaleIris"].supported);
+    assert!(inert.features["imageUpscaleIris"].supported);
+    assert!(!mac_capabilities("freebsd", false).features["imageUpscaleIris"].supported);
     assert!(windows.features["imageSegment"].supported);
     assert!(windows.features["imageSegment"].reason.is_none());
     assert!(inert.features["imageSegment"].supported);
     assert!(inert.features["imageSegment"].reason.is_none());
+    assert!(windows.features["imageDepth"].supported);
+    assert!(inert.features["imageDepth"].supported);
+    let other = mac_capabilities("freebsd", false);
+    assert!(!other.features["imageDepth"].supported);
+    assert_eq!(
+        other.features["imageDepth"]
+            .reason
+            .as_ref()
+            .and_then(|r| r.suggested_epic.clone()),
+        Some("sc-25682".to_owned())
+    );
     // AuraSR is dropped as an offered engine off-Mac too (sc-5499): unsupported on Windows (and Linux),
     // not just under active Mac gating — so the web picker hides it on every platform.
     assert!(!windows.features["imageUpscaleAuraSr"].supported);
@@ -5543,9 +6933,14 @@ fn candle_worker_claims_candle_native_training_kernels() {
         ("mage_flow_lora", "mage_flow_base", "lora"),
         ("mage_flow_lora", "mage_flow_base", "lokr"),
         ("mage_flow_lora", "mage_flow_base", "full"),
+        // sc-24160: the Qwen Image 2.1 Candle trainer, both adapter kinds.
+        ("qwen_image_2_1_lora", "qwen_image_2_1", "lora"),
+        ("qwen_image_2_1_lora", "qwen_image_2_1", "lokr"),
     ];
     for (kernel, base_model, network_type) in cases {
-        let store = store(&format!("candle-training-{kernel}-{base_model}"));
+        let store = store(&format!(
+            "candle-training-{kernel}-{base_model}-{network_type}"
+        ));
         register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
         let job = store
             .create_job(mlx_training_job(
@@ -5576,6 +6971,10 @@ fn candle_worker_rejects_invalid_training_base_and_network_cross_product() {
         ("anima_lora", "anima_turbo", "lora"),
         ("mage_flow_lora", "mage_flow_edit_base", "lora"),
         ("mage_flow_lora", "mage_flow_base", "mystery"),
+        // sc-24160: the 2.1 trainer never takes the distinct 2512 bases nor a non-adapter run.
+        ("qwen_image_2_1_lora", "qwen_image", "lora"),
+        ("qwen_image_2_1_lora", "qwen_image_edit", "lokr"),
+        ("qwen_image_2_1_lora", "qwen_image_2_1", "full"),
     ];
     for (kernel, base_model, network_type) in cases {
         let store = store(&format!(
@@ -5661,6 +7060,109 @@ fn mage_flow_training_is_claimable_by_the_mlx_worker_for_lora_and_full() {
             });
         assert_eq!(claimed.id, job.id, "{base_model}/{network_type}");
     }
+}
+
+/// sc-24159/sc-24160 (epic 24107 S11/S12): a Qwen Image 2.1 T2I training job is native-only — MLX
+/// on a Mac, Candle off-Mac — for both adapter kinds. A generic descriptor still refuses it (there is
+/// no generic 2.1 trainer), while BOTH the mlx and the candle worker claim it.
+#[test]
+fn qwen_image_2_1_training_is_claimable_by_the_native_mlx_and_candle_workers() {
+    for (native_worker, gpu_id) in [("worker-mlx", "mlx"), ("worker-candle", "0")] {
+        for network_type in ["lora", "lokr"] {
+            let store = store(&format!("qwen-2-1-training-{native_worker}-{network_type}"));
+            register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+            let job = store
+                .create_job(mlx_training_job(
+                    "qwen_image_2_1_lora",
+                    "qwen_image_2_1",
+                    network_type,
+                    false,
+                    "auto",
+                ))
+                .expect("job creates");
+            assert!(
+                store
+                    .claim_next_job("worker-torch")
+                    .expect("torch claim ok")
+                    .is_none(),
+                "a generic worker must refuse qwen_image_2_1_lora/{network_type} — no 2.1 trainer"
+            );
+            let caps = if gpu_id == "mlx" {
+                training_caps()
+            } else {
+                candle_training_caps()
+            };
+            register_gpu_worker(&store, native_worker, gpu_id, caps);
+            let claimed = store
+                .claim_next_job(native_worker)
+                .unwrap_or_else(|error| panic!("{native_worker} claim ok: {error:?}"))
+                .unwrap_or_else(|| {
+                    panic!("{native_worker} must claim qwen_image_2_1_lora/{network_type}")
+                });
+            assert_eq!(claimed.id, job.id, "{native_worker}/{network_type}");
+        }
+    }
+}
+
+/// sc-24161/sc-24162 (epic 24107 S13/S14): a Qwen Image 2.1 instruction-EDIT training job is
+/// claimed by BOTH native workers (the MLX and the Candle 2.1 trainers train edit pairs), for both
+/// network types, and never by a generic worker; a forged plan naming another base is refused by
+/// the candle exception.
+#[test]
+fn qwen_image_2_1_edit_training_is_claimable_by_the_native_mlx_and_candle_workers() {
+    for (native_worker, gpu_id) in [("worker-mlx", "mlx"), ("worker-candle", "0")] {
+        for network_type in ["lora", "lokr"] {
+            let store = store(&format!(
+                "qwen-2-1-edit-training-{native_worker}-{network_type}"
+            ));
+            register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+            let job = store
+                .create_job(mlx_training_job(
+                    "qwen_image_2_1_edit_lora",
+                    "qwen_image_2_1",
+                    network_type,
+                    false,
+                    "auto",
+                ))
+                .expect("job creates");
+            assert!(
+                store
+                    .claim_next_job("worker-torch")
+                    .expect("torch claim ok")
+                    .is_none(),
+                "a generic worker must refuse qwen_image_2_1_edit_lora/{network_type}"
+            );
+            let caps = if gpu_id == "mlx" {
+                training_caps()
+            } else {
+                candle_training_caps()
+            };
+            register_gpu_worker(&store, native_worker, gpu_id, caps);
+            let claimed = store
+                .claim_next_job(native_worker)
+                .unwrap_or_else(|error| panic!("{native_worker} claim ok: {error:?}"))
+                .unwrap_or_else(|| {
+                    panic!("{native_worker} must claim qwen_image_2_1_edit_lora/{network_type}")
+                });
+            assert_eq!(claimed.id, job.id, "{native_worker}/{network_type}");
+        }
+    }
+    // Base gate: the edit kernel over the 2512 base never reaches the candle 2.1 trainer.
+    let store = store("qwen-2-1-edit-training-forged-base");
+    register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
+    store
+        .create_job(mlx_training_job(
+            "qwen_image_2_1_edit_lora",
+            "qwen_image",
+            "lora",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+    assert!(store
+        .claim_next_job("worker-candle")
+        .expect("candle claim ok")
+        .is_none());
 }
 
 #[test]
@@ -6757,6 +8259,7 @@ fn native_candle_utility_capabilities_dispatch_supported_shapes_only() {
             WorkerCapability::Gpu,
             WorkerCapability::ImageDetail,
             WorkerCapability::ImageSegment,
+            WorkerCapability::ImageDepth,
             WorkerCapability::DatasetAnalysis,
             WorkerCapability::Unknown("candle".to_owned()),
         ],
@@ -6784,6 +8287,11 @@ fn native_candle_utility_capabilities_dispatch_supported_shapes_only() {
             "SAM3 box segment",
             JobType::ImageSegment,
             json!({ "sourceAssetId": "asset_src", "box": [8, 12, 64, 80] }),
+        ),
+        (
+            "Iris depth",
+            JobType::ImageDepth,
+            json!({ "sourceAssetId": "asset_src", "resolution": { "mode": "capped", "maxSide": 1024 } }),
         ),
         (
             "CLIP dataset analysis",
@@ -6955,7 +8463,7 @@ fn mlx_worker_claims_eligible_job_with_idle_mps_worker_present() {
 fn concurrent_claims_never_lock_and_stay_exactly_once() {
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::sync::{Arc, Barrier, Mutex as StdMutex};
     use std::thread;
     use std::time::Duration;
 
@@ -6988,6 +8496,7 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
     let claimed: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
     let errors: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
     let remaining = Arc::new(AtomicUsize::new(JOBS));
+    let first_claim_start = Arc::new(Barrier::new(WORKERS));
 
     let mut handles = Vec::new();
     for w in 0..WORKERS {
@@ -6995,14 +8504,29 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
         let claimed = Arc::clone(&claimed);
         let errors = Arc::clone(&errors);
         let remaining = Arc::clone(&remaining);
+        let first_claim_start = Arc::clone(&first_claim_start);
         handles.push(thread::spawn(move || {
             let store = JobsStore::new(path);
             let worker_id = format!("worker-{w}");
+            // Make the first claim a real SQLite race. Without this rendezvous a
+            // fast first thread can drain enough rows that the test only exercises
+            // sequential claims and falsely appears to prove contention safety.
+            first_claim_start.wait();
             while remaining.load(Ordering::SeqCst) > 0 {
                 match store.claim_next_job(&worker_id) {
                     Ok(Some(job)) => {
                         claimed.lock().unwrap().push(job.id.clone());
                         remaining.fetch_sub(1, Ordering::SeqCst);
+                        if let Err(error) = store.heartbeat_worker(WorkerHeartbeat {
+                            worker_id: worker_id.clone(),
+                            status: WorkerStatus::Busy,
+                            current_job_id: Some(job.id.clone()),
+                            loaded_models: Vec::new(),
+                            utilization: None,
+                            status_reason: None,
+                        }) {
+                            errors.lock().unwrap().push(error.to_string());
+                        }
                         // Free the worker so it keeps claiming and the queue drains.
                         if let Err(error) = store.update_job_progress(
                             &job.id,
@@ -7042,6 +8566,20 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
     let unique: HashSet<&String> = claimed.iter().collect();
     assert_eq!(claimed.len(), JOBS, "every job claimed (count)");
     assert_eq!(unique.len(), JOBS, "no job claimed twice");
+    for job_id in claimed.iter() {
+        assert_eq!(
+            primary.get_job(job_id).expect("claimed job reloads").status,
+            JobStatus::Completed,
+            "the overlapping heartbeat must not overwrite terminal progress"
+        );
+    }
+    for worker in 0..WORKERS {
+        let snapshot = primary
+            .get_worker(&format!("worker-{worker}"))
+            .expect("worker reloads");
+        assert_eq!(snapshot.status, WorkerStatus::Idle);
+        assert_eq!(snapshot.current_job_id, None);
+    }
 }
 
 /// sc-8950 / F-148 — read-only methods (list_jobs/get_job/list_workers/
@@ -7876,4 +9414,96 @@ fn registering_retires_a_previous_unhealthy_reason() {
         worker.status_reason, None,
         "re-registering re-advertises what the worker can serve, so the old remedy must be retired"
     );
+}
+
+/// sc-25785: a worker reports `resumeCheckpointStep` only when it changes, so the latest value
+/// must survive later results that omit it and a store-side interrupt (backend restart) that never
+/// goes through a progress report — the Queue's Resume offer reads it from the interrupted row.
+#[test]
+fn resume_checkpoint_step_survives_later_results_and_an_interrupt() {
+    let store = store("resume-checkpoint-carry-forward");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(object(json!({ "prompt": "p" }))))
+        .expect("job creates");
+    store.claim_next_job("worker-1").expect("claim ok");
+    let report = |result: serde_json::Value| ProgressUpdate {
+        status: JobStatus::Running,
+        stage: ProgressStage::Running,
+        progress: 0.5,
+        message: "running".to_owned(),
+        error: None,
+        result: Some(object(result)),
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: None,
+        worker_id: Some("worker-1".to_owned()),
+    };
+    store
+        .update_job_progress(&created.id, report(json!({ "resumeCheckpointStep": 50 })))
+        .expect("progress");
+    store
+        .update_job_progress(&created.id, report(json!({ "resumeCheckpointStep": 100 })))
+        .expect("progress");
+    store
+        .update_job_progress(&created.id, report(json!({ "other": true })))
+        .expect("progress");
+    // The worker died with the job: its row no longer names the job, so startup recovery
+    // interrupts it (an exactly-owned job would be preserved for the live worker instead).
+    Connection::open(store.db_path())
+        .expect("db opens")
+        .execute(
+            "update workers set status = 'offline', current_job_id = null",
+            [],
+        )
+        .expect("worker fixture updates");
+    store
+        .mark_interrupted_on_startup()
+        .expect("startup interrupt succeeds");
+
+    let job = store.get_job(&created.id).expect("job loads");
+    assert_eq!(job.status, JobStatus::Interrupted);
+    assert_eq!(job.result.get("resumeCheckpointStep"), Some(&json!(100)));
+    assert_eq!(job.result.get("other"), Some(&json!(true)));
+}
+
+/// sc-25907 (epic 25899 E3): a Qwen Image 2.1 TURBO image job — plain text-to-image and an ordered
+/// reference edit — is claimed by an MLX worker and by a Candle worker, through the store's real
+/// claim path, exactly as a base 2.1 job is.
+///
+/// *Mutation that reds this:* dropping `qwen_image_2_1_turbo` from `IMAGE_MODEL_CAPS` (both lanes
+/// stop claiming), from the MLX match arm (the MLX claim fails), or from the Candle
+/// `QwenImage21Edit` route (the conditioned Candle claim fails).
+#[test]
+fn qwen_image_2_1_turbo_image_jobs_are_claimed_by_the_mlx_and_the_candle_worker() {
+    let payloads = [
+        json!({ "model": "qwen_image_2_1_turbo", "prompt": "a lighthouse at dusk" }),
+        json!({
+            "model": "qwen_image_2_1_turbo",
+            "mode": "edit_image",
+            "prompt": "make the sky violet",
+            "sourceAssetId": "asset_source",
+            "referenceAssetIds": ["asset_source", "asset_style"]
+        }),
+    ];
+    for (index, payload) in payloads.iter().enumerate() {
+        for native in ["mlx", "candle"] {
+            let store = store(&format!("qwen-2-1-turbo-claim-{native}-{index}"));
+            let job = store
+                .create_job(image_job_with(payload.clone(), "auto"))
+                .expect("job creates");
+            let worker = format!("worker-{native}");
+            if native == "mlx" {
+                register_gpu_worker(&store, &worker, "mlx", image_caps());
+            } else {
+                register_candle_worker(&store, &worker);
+            }
+            let claimed = store
+                .claim_next_job(&worker)
+                .unwrap_or_else(|error| panic!("{worker} claim ok: {error:?}"))
+                .unwrap_or_else(|| panic!("{worker} must claim Turbo job {index}"));
+            assert_eq!(claimed.id, job.id, "{worker}/{index}");
+        }
+    }
 }

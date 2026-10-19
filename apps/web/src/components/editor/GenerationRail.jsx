@@ -3,6 +3,7 @@ import { Icon } from "../Icons.jsx";
 import { LoraPickerSection } from "../generationStudio.jsx";
 import { MOTIONS } from "./editorUtils.js";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../StudioUpdateNotice.jsx";
+import { errorMessage } from "../../errorMessage.js";
 
 // The right-hand generation-settings rail (design 2a, epic 12798). Presentational: it
 // renders the controls owned by useEditorGeneration (`gen`) plus the contextual header
@@ -18,13 +19,17 @@ export function GenerationRail({ gen, header, contextActions = [], onGenerate, g
     if (!presetName.trim()) {
       return;
     }
-    const created = await gen.savePreset(presetName);
-    if (created) {
-      setSaveMsg(`Saved “${created.name ?? presetName}”`);
-      setPresetName("");
-      setShowSave(false);
-    } else {
-      setSaveMsg("Could not save preset.");
+    try {
+      const created = await gen.savePreset(presetName);
+      if (created) {
+        setSaveMsg(`Saved “${created.name ?? presetName}”`);
+        setPresetName("");
+        setShowSave(false);
+      } else {
+        setSaveMsg("Could not save preset.");
+      }
+    } catch (error) {
+      setSaveMsg(errorMessage(error, "Could not save preset."));
     }
   }
 
@@ -33,6 +38,11 @@ export function GenerationRail({ gen, header, contextActions = [], onGenerate, g
       <div className="ve-rail-head">
         <p className="ve-rail-eyebrow">{header?.eyebrow ?? "No selection"}</p>
         <h3 className="ve-rail-title">{header?.title ?? "Timeline"}</h3>
+        {header?.details?.length ? (
+          <dl className="ve-rail-details">
+            {header.details.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+          </dl>
+        ) : null}
         <div className="ve-ctx-grid">
           {contextActions.map((action) => (
             <button

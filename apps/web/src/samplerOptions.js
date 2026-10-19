@@ -148,7 +148,68 @@ export function stepsDefaultFromModel(model) {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+// `limits.steps` — the EXACT set of denoise step counts a model can render, or `null` for no menu
+// (sc-19502). Distilled models bake their sigma waypoints into training, so LTX-2.3 renders at 8
+// steps and nothing else; the API and worker refuse anything off this menu.
+//
+// Deliberately mirrors `allowed_steps` in crates/sceneworks-core/src/video_request.rs, INCLUDING
+// its "unsatisfiable means no menu" fallback: a menu whose entries are all unusable would otherwise
+// pin the control to nothing and make the model unusable from the UI. A UI stricter than the gate
+// blocks legal requests; a UI looser than it offers a knob the backend will refuse.
+//
+// ⚠️ Reads the BASE `limits` directly — NOT `effectiveLimits(model, backend)`, unlike every sampler
+// helper above. That is load-bearing, not an oversight. `effectiveLimits` REPLACES the whole block
+// with `mlx.limits` / `candle.limits` when one exists, so a model carrying a per-backend sampler
+// override would read as having no step menu here while the Rust gate — which reads top-level
+// `limits.steps` lane-agnostically — still refuses off-menu counts. That is precisely the UI/gate
+// desync sc-19502 fixed. The step count is a property of the distilled weights, not of the backend
+// (both LTX lanes bake the identical schedule), so there is deliberately no per-lane form of this
+// key; `both_ltx_lanes_agree_on_one_legal_step_count` asserts none appears.
+export function stepsMenuFromModel(model) {
+  const raw = model?.limits?.steps;
+  if (!Array.isArray(raw)) return null;
+  const menu = raw
+    .map((value) => (typeof value === "number" ? value : Number.NaN))
+    .filter((value) => Number.isInteger(value) && value > 0);
+  return menu.length ? menu : null;
+}
+
 export function guidanceDefaultFromModel(model) {
   const value = Number(model?.defaults?.guidanceScale);
   return Number.isFinite(value) ? value : null;
+}
+
+// The Steps input's ceiling (sc-25679): the historical 80, raised to the model's own default when
+// that is higher — Iris-3B ships 100 steps. Mirrors the worker's `max_requested_steps`, which clamps
+// `advanced.steps` to the same bound, so the form never offers a count the worker would cut down.
+export const BASE_MAX_STEPS = 80;
+
+export function maxStepsForModel(model) {
+  return Math.max(BASE_MAX_STEPS, stepsDefaultFromModel(model) ?? 0);
+}
+
+// Is the negative prompt inert for this model at this guidance (sc-25679)? A model declaring
+// `image.negativePromptRequiresGuidance` treats the negative prompt as the CFG unconditional, so at
+// guidance 1.0 (CFG off) its engine refuses one. `guidanceOverride` is the Studio's raw override
+// ("" = use the model default). Absent declaration = never inert.
+export function negativePromptInertAtGuidance(model, guidanceOverride) {
+  if (model?.image?.negativePromptRequiresGuidance !== true) return false;
+  return guidanceIsOff(model, guidanceOverride);
+}
+
+// Is classifier-free guidance OFF at this override (sc-25681)? Exactly 1.0 — the override, or the
+// model default when the override is cleared — is CFG off (the engines' `uses_cfg` test).
+export function guidanceIsOff(model, guidanceOverride) {
+  const override = guidanceOverride === "" || guidanceOverride == null ? Number.NaN : Number(guidanceOverride);
+  const effective = Number.isFinite(override) ? override : guidanceDefaultFromModel(model);
+  return effective === 1;
+}
+
+// The patch-grid hint (sc-25681): `image.patchGridVisibleBelow` (Iris-3B, 1024) — informational,
+// the size is never restricted.
+export function patchGridHint(model, width, height) {
+  const side = model?.image?.patchGridVisibleBelow;
+  return side > 0 && (width < side || height < side)
+    ? `Below ${side}px a side, ${model.name} shows a visible patch grid.`
+    : null;
 }

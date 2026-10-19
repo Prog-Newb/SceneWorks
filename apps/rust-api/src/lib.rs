@@ -24,16 +24,17 @@ use sceneworks_core::contracts::{
     CancelPendingJobsRequest, CancelPendingJobsResponse, ClaimRequest, ClaimResponse,
     ClearJobsRequest, ClearJobsResponse, ContractNumber, DuplicateJobRequest, GenerationMetrics,
     GenerationMetricsRow, ImageUpscaleRequest, JobCreateRequest, JobSnapshot, JobStatus, JobType,
-    JsonObject, ProgressRequest, QueueSummary, RetryJobRequest, WorkerCapability,
-    WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
-    WorkerTerminationRequest,
+    JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest, QueueSummary,
+    RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
+    WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
 };
 use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
 use sceneworks_core::image_request::{
     default_count as image_default_count, default_resolution as image_default_resolution,
 };
 use sceneworks_core::jobs_store::{
-    candle_supported, mac_capabilities, mac_rust_supported, model_mac_support, CreateJob,
+    candle_supported, mac_capabilities, mac_rust_supported, model_candle_support,
+    model_mac_support, video_job_type_for_mode, video_request_is_claimable_by_any_lane, CreateJob,
     DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
     RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
 };
@@ -41,14 +42,16 @@ use sceneworks_core::lora_family::{
     accepted_lora_families, apply_adapter_metadata_to_manifest_entry,
     apply_model_manifest_defaults, canonical_lora_family, detect_lora_family, detect_model_family,
     first_safetensors_path, read_adapter_metadata, read_safetensors_header,
-    reconcile_detected_family, AdapterFileMetadata, SafetensorsHeaderError,
+    reconcile_detected_family, validate_minimax_h3_trainer_header, AdapterFileMetadata,
+    SafetensorsHeaderError,
 };
 use sceneworks_core::lora_url::{lora_source_url_file_stem, parse_lora_source_url, LoraUrlError};
 use sceneworks_core::project_store::{
     AssetStatusPatch, AssetTagsPatch, CharacterCreateInput, CharacterLookInput,
     CharacterLookUpdateInput, CharacterLoraInput, CharacterLoraUpdateInput,
-    CharacterReferenceInput, CharacterReferenceUpdateInput, CharacterUpdateInput, ProjectStore,
-    ProjectStoreError, UploadAsset, KEYPOINT_UPLOADS_CACHE_DIR, POSE_UPLOADS_CACHE_DIR,
+    CharacterReferenceInput, CharacterReferenceUpdateInput, CharacterUpdateInput,
+    FilmReferenceInput, ProjectStore, ProjectStoreError, UploadAsset, KEYPOINT_UPLOADS_CACHE_DIR,
+    POSE_UPLOADS_CACHE_DIR,
 };
 use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
 use sceneworks_core::training::{
@@ -62,7 +65,10 @@ use sceneworks_core::training_store::{
     TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
 use sceneworks_core::video_request::{
-    default_resolution, duration_limit_error, fps_limit_error, resolve_duration, resolve_fps,
+    classify_reference_set, default_resolution, duration_limit_error, fps_limit_error,
+    reference_limit_error, requested_auto_duration, requested_ltx25_vae_decoder, requested_steps,
+    requested_temporal_upsample_rounds, resolve_duration, resolve_fps, steps_limit_error,
+    ReferenceSetVerdict,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -74,6 +80,7 @@ use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
+use tokio_util::sync::CancellationToken;
 use tower_http::compression::{
     predicate::{Predicate, SizeAbove},
     CompressionLayer, CompressionLevel,
@@ -88,6 +95,19 @@ mod startup;
 use startup::{StartupCriticality, StartupMaintenance, StartupPhaseTimer};
 mod saved_voices;
 use saved_voices::{create_saved_voice, delete_saved_voice, list_saved_voices};
+mod yue2_scores;
+use yue2_scores::{
+    create_yue2_comparison, create_yue2_score_version, edit_yue2_score_version,
+    get_yue2_comparison, get_yue2_score_version, get_yue2_transcription,
+    get_yue2_transcription_file, inspect_yue2_score, inspect_yue2_score_version,
+    list_yue2_comparisons, list_yue2_score_renders, list_yue2_score_versions,
+    list_yue2_transcriptions, record_yue2_score_render,
+};
+mod yue2_jobs;
+use yue2_jobs::{
+    create_yue2_jobs, delete_license_acknowledgment, get_job_yue2_eligibility,
+    get_license_acknowledgment, put_license_acknowledgment,
+};
 mod characters;
 use characters::{
     add_character_reference, archive_character, attach_character_lora, create_character,
@@ -130,25 +150,31 @@ use workflows::{get_asset_workflow, inspect_workflow, max_inspect_multipart_body
 // crate-root consumer.
 #[cfg(test)]
 use assets::sweep_stale_asset_uploads_before;
+mod iris_curricula;
+mod iris_task_training;
+mod iris_training;
 mod training;
 use training::{
     batch_rename_training_dataset_items, create_training_dataset,
     create_training_dataset_analysis_job, create_training_dataset_caption_job,
     create_training_dataset_face_analysis_job, create_training_dataset_parquet_import_job,
-    create_training_dataset_upscale_job, create_training_job, delete_training_dataset,
-    finalize_training_dataset_parquet_import, get_training_dataset, get_training_dataset_readiness,
+    create_training_dataset_subject_mask_job, create_training_dataset_upscale_job,
+    create_training_job, delete_training_dataset, finalize_training_dataset_parquet_import,
+    get_training_dataset, get_training_dataset_readiness, get_training_dataset_subject_masks,
     list_training_datasets, list_training_presets, list_training_targets,
     repoint_training_dataset_items, resolve_control_overlay_output_location,
     resolve_finetune_output_location, resolve_training_output_location,
     set_training_dataset_item_quality_ack, smart_crop_training_dataset_items,
     strip_exif_training_dataset_items, trusted_adapter_files, trusted_base_checkpoint_files,
-    update_training_dataset, upload_training_dataset_item, validate_lora_id_component,
+    update_training_dataset, upload_ltx_prepared_bundle, upload_training_dataset_item,
+    upload_training_dataset_subject_mask, validate_lora_id_component,
     write_training_dataset_analysis_embeddings, write_training_dataset_caption_sidecars,
-    write_training_dataset_face_embeddings,
+    write_training_dataset_face_embeddings, write_training_dataset_subject_masks,
 };
 mod generation;
 use generation::{
-    create_audio_job, create_image_job, create_interleave_job, create_video_job, create_vqa_job,
+    create_audio_job, create_image_job, create_interleave_job, create_vector_job,
+    create_vector_prompt_workflow, create_video_job, create_vqa_job,
     parse_recipe_preset_resolution, typed_generation_route, JobCatalogSnapshot,
 };
 #[cfg(test)]
@@ -158,7 +184,7 @@ mod jobs;
 use jobs::{
     cancel_job, cancel_pending_jobs, claim_job, clear_job, clear_jobs, create_job, duplicate_job,
     get_job, get_job_metrics, invalidate_model_catalog_for_terminal_jobs, list_jobs, list_metrics,
-    retry_job, update_job_progress, upsert_job_metrics,
+    prioritize_jobs, retry_job, update_job_progress, upsert_job_metrics,
 };
 mod workers;
 use workers::{
@@ -175,20 +201,33 @@ use dto::{
     AccessResponse, AssetPurgeQuery, AssetsQuery, AudioJobRequest, CatalogDeleteQuery,
     CharacterCreateRequest, CharacterLookRequest, CharacterLookUpdateRequest, CharacterLoraRequest,
     CharacterLoraUpdateRequest, CharacterReferenceRequest, CharacterReferenceUpdateRequest,
-    CharacterTestRequest, CharacterUpdateRequest, CharactersQuery, CreateEventTicketRequest,
-    DatasetAnalysisJobRequest, DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest,
-    DatasetFaceRecordsBody, DatasetImageFixBody, DatasetParquetImportJobRequest,
-    DatasetRepointBody, DatasetUpscaleJobRequest, DirectoriesResponse, EventsQuery,
-    FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse, HostCapabilitiesResponse,
-    ImageJobRequest, InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest,
-    LoraUpdateRequest, LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest,
-    ModelImportRequest, PersonDetectionJobRequest, PersonTrackCorrectionsRequest,
+    CharacterTestRequest, CharacterUpdateRequest, CharactersQuery,
+    ConditionalComponentsDownloadRequest, CreateEventTicketRequest, DatasetAnalysisJobRequest,
+    DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest, DatasetFaceRecordsBody,
+    DatasetImageFixBody, DatasetParquetImportJobRequest, DatasetRepointBody,
+    DatasetSubjectMaskJobRequest, DatasetSubjectMasksBody, DatasetUpscaleJobRequest,
+    DirectoriesResponse, EventsQuery, FaceLikenessCompareRequest, FrameExtractRequest,
+    HealthResponse, HostCapabilitiesResponse, ImageJobRequest, InterleaveJobRequest, JobsQuery,
+    LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest, LorasQuery, MetricsQuery,
+    ModelConvertRequest, ModelDownloadRequest, ModelImportRequest, ModelImportSourceV1,
+    OwnershipModeV1, PersonDetectionJobRequest, PersonTrackCorrectionsRequest,
     PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest,
     QualityAckBody, ReadinessQuery, RecipePresetsQuery, SavedVoiceCreateRequest,
     StartupReadinessResponse, TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest,
-    TrainingCaptionJobRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
+    TrainingCaptionJobRequest, VectorMode, VectorPromptWorkflowRequest, VectorRequest,
+    VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
+// The linked-library lifecycle seam (epic 20398, sc-20635): approve, rename, relink, scan, rescan
+// and forget an approved checkpoint library. AC1's six verbs, reachable from a client.
+mod checkpoint_library;
+// The single model-source seam every job-creation path calls (sc-19708): generic carrier
+// attachment + typed external-library availability preflight, all data-driven.
+mod model_library;
+mod model_sources;
+// Read + control surface for the app-owned resolved-model hot cache (sc-19711): status for the
+// Settings storage card, and the per-model keep/remove operations the Model Manager drives.
+mod model_cache;
 use manifest::{
     acquire_manifest_file_lock, load_manifest_entries, manifest_write_lock, merge_entries_by_id,
     merge_object, mutate_manifest_entries, remove_catalog_manifest_entry, write_manifest_atomic,
@@ -196,11 +235,15 @@ use manifest::{
 };
 #[cfg(test)]
 use manifest::{strip_jsonc_comments, API_MANAGED_MANIFEST_HEADER};
+use model_cache::{
+    get_model_cache, preview_model_cache_removal, remove_model_cache_entry, set_model_cache_pin,
+};
 mod models;
 use models::{
-    create_model_convert_job, create_model_download_job, create_model_import_job, delete_model,
-    delete_model_variant, list_models, model_catalog, model_is_installed,
-    resolve_model_manifest_entry, ModelCatalogCache, ModelSizeCache,
+    create_conditional_components_download_jobs, create_model_convert_job,
+    create_model_download_job, create_model_import_job, delete_model, delete_model_variant,
+    list_models, model_catalog, model_is_installed, resolve_model_manifest_entry,
+    resolve_selected_image_text_encoder, ModelCatalogCache, ModelSizeCache,
 };
 #[cfg(test)]
 use models::{
@@ -246,6 +289,13 @@ use prompts::create_prompt_refine_job;
 // `face_likeness_compare` job scoring a candidate asset against a source identity reference asset.
 mod face_likeness;
 use face_likeness::create_face_likeness_compare_job;
+// Iris-3B monocular depth (sc-25682): the typed `image_depth` route behind the Image Editor and
+// Library depth actions.
+mod depth_jobs;
+use depth_jobs::create_image_depth_job;
+// Iris-3B restoration pre-submission plan preview (sc-25683): the engine's pure planner, no weights.
+mod image_restoration;
+use image_restoration::plan_image_restoration;
 mod poses;
 use poses::{create_pose_sources, create_poses, get_pose_preview, sweep_stale_pose_uploads};
 mod keypoints;
@@ -259,7 +309,34 @@ use logs::list_logs;
 // The shared HTTP error type (sc-8890, F-088), re-exported so the `use super::*`
 // in every handler module keeps resolving `ApiError` unchanged.
 mod error;
+// Local filmmaking harness (epic 22708, sc-22710): plan -> jobs -> assets -> timeline -> export.
+pub mod film_harness;
+mod film_lifecycle;
+pub mod film_planner;
+mod film_planner_connections;
+mod film_planning;
+mod film_review;
+mod films;
+mod openai_planner;
 pub(crate) use error::ApiError;
+use film_lifecycle::{cancel_film_run, get_film_run_progress, list_film_runs, resume_film_run};
+use film_planner_connections::{
+    list_film_planner_connections, save_film_planner_connection, test_film_planner_connection,
+};
+use film_planning::{
+    apply_film_planning_candidate, cancel_film_planning, film_planner_availability,
+    get_film_planning_operation, parse_film_draft_script, start_film_planning,
+};
+use film_review::{
+    analyze_film_take, decide_film_take, get_film_review, repair_film_take, replace_film_take,
+    swap_film_take,
+};
+use films::{
+    add_film_reference, add_film_sound, create_film_draft, create_film_run, export_film_run,
+    get_film_draft, get_film_render_options, get_film_run, get_reference_pack, list_film_drafts,
+    preflight_film_draft, preview_film_render_options, start_film_run, update_film_draft,
+    update_reference_pack,
+};
 // Serde `#[serde(default = "...")]` value providers for the DTOs (sc-8890, F-088),
 // re-exported so the `#[serde(default = "default_x")]` string paths and sibling
 // call sites keep resolving unchanged.
@@ -330,6 +407,14 @@ const MAX_JSON_BODY_BYTES: usize = 10 * 1024 * 1024;
 // still exceed the ordinary API ceiling by hundreds of megabytes.
 const MAX_PARQUET_FINALIZE_BODY_BYTES: usize = 512 * 1024 * 1024;
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
+// sc-2126: the subject-mask worker POSTs a dataset's masks as base64 PNG in chunks of at most
+// 64 MiB of encoded items (`SUBJECT_MASK_POST_CHUNK_BYTES` in the worker's subject_mask_jobs.rs),
+// so any dataset size fits; this per-body ceiling leaves the chunk generous headroom.
+const MAX_SUBJECT_MASKS_BODY_BYTES: usize = 256 * 1024 * 1024;
+// One replacement-mask upload: the store's encoded-mask cap plus multipart framing headroom. The
+// store re-checks the exact limit and answers a field-level error past it.
+const MAX_SUBJECT_MASK_MULTIPART_BODY_BYTES: usize =
+    sceneworks_core::training_subject_masks::SUBJECT_MASK_MAX_UPLOAD_BYTES as usize + 1024 * 1024;
 const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
 const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
 const MAX_MODEL_MULTIPART_BODY_BYTES: usize = MAX_MODEL_UPLOAD_BYTES + 16 * 1024 * 1024;
@@ -367,7 +452,10 @@ const STALE_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
 // sc-8884 (F-082): the char cap applied to every free-text prompt field (`prompt` and
 // `negativePrompt`). Both are persisted into jobs.db and re-broadcast over SSE on every
 // `job.updated`, so an uncapped field bloats the row and every subscriber's payload.
-const MAX_PROMPT_CHARS: usize = 4000;
+// Declared in sceneworks-core (sc-22710) so the pre-dispatch plan validator in
+// `sceneworks_core::film_plan` refuses exactly what this route refuses instead of hand-copying
+// the number and drifting.
+pub(crate) use sceneworks_core::MAX_PROMPT_CHARS;
 // sc-8884 (F-082): serialized-size ceiling for the free-form `advanced` object. It is a
 // pass-through bag threaded to the worker, so it has no per-key schema — bound its total
 // serialized size instead. 64 KiB is generous for legitimate advanced settings.
@@ -521,6 +609,16 @@ fn json_rejection_response(rejection: JsonRejection) -> Response {
         JsonRejection::JsonSyntaxError(error) => error.body_text(),
         other => other.body_text(),
     };
+    json_decode_error_response(detail)
+}
+
+/// The 422 body a failed JSON decode answers with, as ONE definition (sc-24029).
+///
+/// A handler that has to look at its body BEFORE the typed decode extracts a `Value` and decodes
+/// the typed shape itself, so it also has to report a decode failure itself. Without this it would
+/// invent a second shape for the same failure, and the same malformed body would be reported two
+/// ways depending on which route received it.
+pub(crate) fn json_decode_error_response(detail: String) -> Response {
     (
         StatusCode::UNPROCESSABLE_ENTITY,
         Json(json!({
@@ -769,7 +867,10 @@ async fn parent_death(parent_pid: Option<i32>) {
     }
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(
+    film_controller_shutdown: film_harness::FilmControllerShutdown,
+    api_shutdown: CancellationToken,
+) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -805,6 +906,14 @@ async fn shutdown_signal() {
             );
         }
     }
+    // Set intent before Axum starts draining. Film controllers call this API over loopback and can
+    // therefore exit as soon as the listener closes; their lease Drop must already distinguish
+    // process shutdown from an ordinary handled controller error.
+    film_controller_shutdown.request();
+    // Axum stops accepting connections when this future returns, but waits for existing
+    // connections indefinitely. End app-owned long-lived streams immediately and wake the
+    // server's finite drain deadline before returning control to Axum.
+    api_shutdown.cancel();
 }
 
 /// Stream a multipart field to `temp_path`, enforcing `max_bytes` (returning
@@ -1143,7 +1252,12 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
 pub(crate) fn create_app_with_state(
     settings: Settings,
 ) -> Result<(Router, AppState), JobsStoreError> {
-    create_app_with_state_mode(settings, false)
+    create_app_with_state_mode(
+        settings,
+        false,
+        film_harness::FilmControllerShutdown::default(),
+        CancellationToken::new(),
+    )
 }
 
 #[cfg(test)]
@@ -1158,15 +1272,31 @@ pub(crate) fn create_app_with_deferred_startup_maintenance(
     Ok((router, state))
 }
 
+#[cfg(test)]
 pub(crate) fn create_app_with_pending_startup_maintenance(
     settings: Settings,
 ) -> Result<(Router, AppState), JobsStoreError> {
-    create_app_with_state_mode(settings, true)
+    create_app_with_state_mode(
+        settings,
+        true,
+        film_harness::FilmControllerShutdown::default(),
+        CancellationToken::new(),
+    )
+}
+
+pub(crate) fn create_app_with_pending_startup_maintenance_with_shutdowns(
+    settings: Settings,
+    film_controller_shutdown: film_harness::FilmControllerShutdown,
+    api_shutdown: CancellationToken,
+) -> Result<(Router, AppState), JobsStoreError> {
+    create_app_with_state_mode(settings, true, film_controller_shutdown, api_shutdown)
 }
 
 fn create_app_with_state_mode(
     settings: Settings,
     defer_upload_sweeps: bool,
+    film_controller_shutdown: film_harness::FilmControllerShutdown,
+    api_shutdown: CancellationToken,
 ) -> Result<(Router, AppState), JobsStoreError> {
     let _filesystem_phase = StartupPhaseTimer::start(
         "filesystem_preflight",
@@ -1291,6 +1421,7 @@ fn create_app_with_state_mode(
         thumbnail_generation_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         workflow_strip_slots: Arc::new(tokio::sync::Semaphore::new(WORKFLOW_STRIP_SLOTS)),
         auth_throttle: Arc::new(AuthThrottle::default()),
+        resolved_cache_session: Arc::new(AsyncMutex::new(None)),
         manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
         manifest_write_locks: Arc::new(Mutex::new(HashMap::new())),
         model_catalog_cache: Arc::new(ModelCatalogCache::default()),
@@ -1299,6 +1430,8 @@ fn create_app_with_state_mode(
         model_size_estimate_test_hook: Arc::new(Mutex::new(None)),
         #[cfg(test)]
         model_size_estimate_disabled_override: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        video_platform_override: Arc::new(Mutex::new(None)),
         external_lora_cache: Arc::new(Mutex::new(external_loras::ExternalLoraCache::default())),
         external_base_model_cache: Arc::new(Mutex::new(
             external_base_models::ExternalBaseModelCache::default(),
@@ -1312,6 +1445,8 @@ fn create_app_with_state_mode(
         },
         progress_side_effects_lock: Arc::new(AsyncMutex::new(())),
         catalog_scan_supervisor: Arc::new(catalog_scan_supervisor::CatalogScanSupervisor::default()),
+        film_controller_shutdown,
+        api_shutdown,
         catalog_scan_invalid_recovery_reported: Arc::new(AsyncMutex::new(
             std::collections::HashSet::new(),
         )),
@@ -1354,6 +1489,7 @@ fn create_app_with_state_mode(
     };
     let cors = cors_layer(&state.settings);
     let returned_state = state.clone();
+    generation::spawn_vector_prompt_workflow_recovery(state.clone());
 
     // MCP server (epic 10231, sc-10233): the rmcp streamable-HTTP service is
     // nested at `/mcp` INSIDE this router, so the `access_control` layer below
@@ -1396,6 +1532,18 @@ fn create_app_with_state_mode(
         .route("/api/v1/auth/verify", post(verify_access))
         .route("/api/v1/training/targets", get(list_training_targets))
         .route("/api/v1/training/presets", get(list_training_presets))
+        .route(
+            "/api/v1/training/data-walk",
+            get(iris_training::training_data_walk),
+        )
+        .route(
+            "/api/v1/training/iris/stage-presets",
+            get(iris_curricula::iris_stage_presets),
+        )
+        .route(
+            "/api/v1/training/iris/plan-check",
+            post(iris_curricula::iris_plan_check),
+        )
         .route("/api/v1/catalogs", get(list_catalogs).post(create_catalog))
         .route("/api/v1/catalogs/attach", post(attach_catalog))
         .route(
@@ -1537,6 +1685,21 @@ fn create_app_with_state_mode(
             post(set_training_dataset_item_quality_ack),
         )
         .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/ltx-prepared-bundle",
+            post(upload_ltx_prepared_bundle).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        // Iris depth / restoration dataset sidecars + the pre-launch dataset check (sc-25687/8).
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/iris-sidecar/:kind",
+            post(iris_task_training::upload_iris_item_sidecar)
+                .delete(iris_task_training::delete_iris_item_sidecar)
+                .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/iris-check",
+            post(iris_task_training::check_iris_task_dataset),
+        )
+        .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/batch-rename",
             post(batch_rename_training_dataset_items),
         )
@@ -1564,6 +1727,23 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/face-analysis-jobs",
             post(create_training_dataset_face_analysis_job),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-mask-jobs",
+            post(create_training_dataset_subject_mask_job),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-masks",
+            // The worker POSTs generated masks (base64 PNG) in chunks of up to 64 MiB, beyond the
+            // small JSON router default, so this route gets its own bounded limit.
+            get(get_training_dataset_subject_masks)
+                .post(write_training_dataset_subject_masks)
+                .layer(DefaultBodyLimit::max(MAX_SUBJECT_MASKS_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/subject-mask",
+            post(upload_training_dataset_subject_mask)
+                .layer(DefaultBodyLimit::max(MAX_SUBJECT_MASK_MULTIPART_BODY_BYTES)),
         )
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/analysis-embeddings",
@@ -1594,6 +1774,10 @@ fn create_app_with_state_mode(
             post(create_training_job),
         )
         .route(
+            "/api/v1/training/jobs/:job_id/iris-metrics",
+            get(iris_curricula::iris_training_metrics),
+        )
+        .route(
             "/api/v1/projects/:project_id/files/*relative_path",
             get(get_project_file),
         )
@@ -1604,6 +1788,65 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/voices/:voice_id",
             delete(delete_saved_voice),
+        )
+        // YuE2 score inspection, bounded edits, renders and listening comparisons (sc-22997).
+        .route("/api/v1/yue2/score/inspect", post(inspect_yue2_score))
+        .route(
+            "/api/v1/projects/:project_id/yue2/score-versions",
+            get(list_yue2_score_versions).post(create_yue2_score_version),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/score-versions/:version_id",
+            get(get_yue2_score_version),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/score-versions/:version_id/inspection",
+            get(inspect_yue2_score_version),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/score-versions/:version_id/edits",
+            post(edit_yue2_score_version),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/score-versions/:version_id/renders",
+            get(list_yue2_score_renders).post(record_yue2_score_render),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/comparisons",
+            get(list_yue2_comparisons).post(create_yue2_comparison),
+        )
+        // Recording transcriptions (sc-23002): the review artifact's record, scores and exports.
+        .route(
+            "/api/v1/projects/:project_id/yue2/transcriptions",
+            get(list_yue2_transcriptions),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/transcriptions/:transcription_id",
+            get(get_yue2_transcription),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/transcriptions/:transcription_id/files/*file",
+            get(get_yue2_transcription_file),
+        )
+        // YuE2 song jobs (sc-22999 / sc-23002): create / plan / fromPlan / cover / renderVersion /
+        // decode / transcribe.
+        .route(
+            "/api/v1/projects/:project_id/yue2/jobs",
+            post(create_yue2_jobs),
+        )
+        .route(
+            "/api/v1/jobs/:job_id/yue2-eligibility",
+            get(get_job_yue2_eligibility),
+        )
+        .route(
+            "/api/v1/models/:model_id/license-acknowledgment",
+            get(get_license_acknowledgment)
+                .put(put_license_acknowledgment)
+                .delete(delete_license_acknowledgment),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/comparisons/:comparison_id",
+            get(get_yue2_comparison),
         )
         .route(
             "/api/v1/projects/:project_id/characters",
@@ -1656,8 +1899,124 @@ fn create_app_with_state_mode(
             get(list_timelines).post(create_timeline),
         )
         .route(
+            "/api/v1/projects/:project_id/films",
+            get(list_film_drafts).post(create_film_draft),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id",
+            get(get_film_draft).put(update_film_draft),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/reference-pack",
+            get(get_reference_pack).put(update_reference_pack),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/references",
+            post(add_film_reference),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/sound",
+            post(add_film_sound),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/runs",
+            post(create_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/preflight",
+            post(preflight_film_draft),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/render-options",
+            get(get_film_render_options).post(preview_film_render_options),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/brief/parse",
+            post(parse_film_draft_script),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planners",
+            get(film_planner_availability),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planning",
+            get(get_film_planning_operation).post(start_film_planning),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planning/cancel",
+            post(cancel_film_planning),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planning/apply",
+            post(apply_film_planning_candidate),
+        )
+        .route(
+            "/api/v1/film-planner-connections",
+            get(list_film_planner_connections),
+        )
+        .route(
+            "/api/v1/film-planner-connections/:connection_id",
+            put(save_film_planner_connection),
+        )
+        .route(
+            "/api/v1/film-planner-connections/:connection_id/test",
+            post(test_film_planner_connection),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id",
+            get(get_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs",
+            get(list_film_runs),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/progress",
+            get(get_film_run_progress),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/start",
+            post(start_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/resume",
+            post(resume_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/cancel",
+            post(cancel_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/export",
+            post(export_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review",
+            get(get_film_review).post(analyze_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/decision",
+            post(decide_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/swap",
+            post(swap_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/replace",
+            post(replace_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/repair",
+            post(repair_film_take),
+        )
+        .route(
             "/api/v1/projects/:project_id/timelines/:timeline_id",
             get(get_timeline).put(update_timeline),
+        )
+        .route(
+            "/api/v1/projects/:project_id/timelines/:timeline_id/film-deliveries",
+            post(timelines::deliver_film_timeline),
         )
         .route(
             "/api/v1/projects/:project_id/timelines/:timeline_id/exports",
@@ -1688,6 +2047,12 @@ fn create_app_with_state_mode(
             post(save_person_track_corrections),
         )
         .route("/api/v1/image/jobs", post(create_image_job))
+        .route("/api/v1/image/vectorize/jobs", post(create_vector_job))
+        .route(
+            "/api/v1/image/vectorize/prompt/jobs",
+            post(create_vector_prompt_workflow),
+        )
+        .route("/api/v1/image/depth/jobs", post(create_image_depth_job))
         .route("/api/v1/image/vqa/jobs", post(create_vqa_job))
         .route("/api/v1/image/interleave/jobs", post(create_interleave_job))
         .route("/api/v1/video/jobs", post(create_video_job))
@@ -1735,7 +2100,44 @@ fn create_app_with_state_mode(
             UI_PREFERENCES_PATH,
             get(get_ui_preferences).put(set_ui_preferences),
         )
+        // The model source library's live status + relocation seam (sc-19709). Its own path
+        // prefix, not `/models/...`, so a library operation can never collide with a model id.
+        .route(
+            "/api/v1/model-library",
+            get(model_library::get_model_library),
+        )
+        .route(
+            "/api/v1/model-library/relocate",
+            post(model_library::relocate_model_library),
+        )
         .route("/api/v1/models", get(list_models))
+        // The curated managed NVFP4 variants (sc-11043, epic 11037). A STATIC sibling of
+        // `/api/v1/models/:model_id` for the same reason the library routes are.
+        .route(
+            "/api/v1/models/managed-variants",
+            get(checkpoint_library::list_managed_variants),
+        )
+        // Linked checkpoint libraries (epic 20398, sc-20635). A STATIC sibling of
+        // `/api/v1/models/:model_id`, exactly like `/api/v1/models/import`, so a library
+        // operation is never mistaken for a model id.
+        .route(
+            "/api/v1/models/library-roots",
+            get(checkpoint_library::list_library_roots)
+                .post(checkpoint_library::approve_library_root),
+        )
+        .route(
+            "/api/v1/models/library-roots/:root_id",
+            patch(checkpoint_library::update_library_root)
+                .delete(checkpoint_library::remove_library_root),
+        )
+        .route(
+            "/api/v1/models/library-roots/:root_id/scan",
+            get(checkpoint_library::scan_library_root),
+        )
+        .route(
+            "/api/v1/models/library-roots/:root_id/rescan",
+            post(checkpoint_library::rescan_library_checkpoint),
+        )
         .route("/api/v1/models/:model_id", delete(delete_model))
         .route(
             "/api/v1/models/:model_id/variants/:variant",
@@ -1746,6 +2148,10 @@ fn create_app_with_state_mode(
             post(create_model_download_job),
         )
         .route(
+            "/api/v1/models/:model_id/conditional-components/:purpose/download",
+            post(create_conditional_components_download_jobs),
+        )
+        .route(
             "/api/v1/models/:model_id/convert",
             post(create_model_convert_job),
         )
@@ -1754,6 +2160,15 @@ fn create_app_with_state_mode(
             post(create_model_import_job)
                 .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
         )
+        // Resolved-model hot cache (sc-19711). The GET is UI-polled, so it is deliberately one
+        // cheap write-free listing; the three POSTs are single deliberate user actions.
+        .route("/api/v1/model-cache", get(get_model_cache))
+        .route(
+            "/api/v1/model-cache/removal-preview",
+            post(preview_model_cache_removal),
+        )
+        .route("/api/v1/model-cache/remove", post(remove_model_cache_entry))
+        .route("/api/v1/model-cache/pin", post(set_model_cache_pin))
         .route("/api/v1/control-overlays", get(list_control_overlays))
         .route("/api/v1/styles", get(list_styles))
         .route("/api/v1/loras", get(list_loras))
@@ -1802,6 +2217,10 @@ fn create_app_with_state_mode(
             "/api/v1/prompt-batches/:batch_id/duplicate",
             post(duplicate_prompt_batch),
         )
+        .route(
+            "/api/v1/image-restoration/plan",
+            post(plan_image_restoration),
+        )
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/jobs/claim", post(claim_job))
         // Clear completed items from the queue (sc-12231, issue #1556). A static
@@ -1810,6 +2229,9 @@ fn create_app_with_state_mode(
         // Cancel every pending (queued / pending_caption) item at once (sc-13448).
         // Static segment like `/clear`, so it takes priority over `/jobs/:job_id`.
         .route("/api/v1/jobs/cancel-pending", post(cancel_pending_jobs))
+        // Move selected not-yet-started jobs to the front. This is a static segment and must be
+        // registered before the per-job routes below.
+        .route("/api/v1/jobs/prioritize", post(prioritize_jobs))
         .route("/api/v1/jobs/events", get(job_events))
         .route("/api/v1/jobs/events/ticket", post(create_event_ticket))
         // Media ticket (sc-8810): auth-protected mint endpoint; the ticket is honored
@@ -2041,6 +2463,16 @@ async fn get_project_file(
     // One fixed representation prevents unbounded cache variants. Derivatives
     // are generated on first use, so assets written before this route existed
     // backfill without a migration.
+    let force_download = project_file
+        .content_type
+        .eq_ignore_ascii_case("image/svg+xml");
+    if force_download && query.thumbnail.is_some() {
+        // Do not let the generic thumbnail branch become a second inline SVG preview route. Vector
+        // sidecars point at the worker-rendered PNG instead.
+        return Err(ApiError::bad_request(
+            "SVG thumbnails are not supported; use the vector PNG preview",
+        ));
+    }
     let (served_path, content_type) = if let Some(size) = query.thumbnail {
         if size != GRID_THUMBNAIL_SIZE {
             return Err(ApiError::bad_request(format!(
@@ -2437,6 +2869,17 @@ fn project_file_response_headers(
     last_modified: Option<SystemTime>,
 ) -> Result<HeaderMap, ApiError> {
     let mut headers = HeaderMap::new();
+    // Every representation, including stripWorkflow, ranges and 304 responses, shares this
+    // boundary. SVG source is download-only; only the worker-rendered PNG is inline media.
+    let content_type = if content_type.eq_ignore_ascii_case("image/svg+xml") {
+        headers.insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment"),
+        );
+        "application/octet-stream"
+    } else {
+        content_type
+    };
     for (name, value) in [
         (header::CONTENT_TYPE, content_type.to_owned()),
         (header::ACCEPT_RANGES, "bytes".to_owned()),
@@ -2968,6 +3411,506 @@ where
         .map_err(Into::into)
 }
 
+/// Project a stored/worker-owned job into the public HTTP/SSE shape.
+///
+/// A selected image text encoder is resolved to an exact filesystem source only after the API has
+/// accepted the client's opaque option id. That resolution must remain available to the worker
+/// claim, but it is never browser state: exposing it in a job response would turn the otherwise
+/// opaque option back into a host path and would let replay clients persist server-private
+/// metadata. Keep the stored row intact and remove only that private resolution from public clones.
+fn public_job_snapshot(mut job: JobSnapshot) -> JobSnapshot {
+    let private_resolution = job
+        .payload
+        .get_mut("modelManifestEntry")
+        .and_then(Value::as_object_mut)
+        .and_then(|manifest_entry| manifest_entry.remove("resolvedTextEncoder"));
+    if let Some(selected_path) = private_resolution
+        .as_ref()
+        .and_then(|resolution| resolution.get("path"))
+        .and_then(Value::as_str)
+    {
+        let source_kind = private_resolution
+            .as_ref()
+            .and_then(|resolution| resolution.get("sourceKind"))
+            .and_then(Value::as_str);
+        let selected_paths = private_text_encoder_path_spellings(selected_path, source_kind);
+        redact_private_text_encoder_diagnostic(&mut job.message);
+        if let Some(error) = job.error.as_mut() {
+            redact_private_text_encoder_diagnostic(error);
+        }
+        if let Some(title) = job.title.as_mut() {
+            redact_selected_text_encoder_paths(title, &selected_paths);
+        }
+        redact_selected_text_encoder_paths_in_map(&mut job.payload, &selected_paths);
+        redact_selected_text_encoder_paths_in_map(&mut job.result, &selected_paths);
+        redact_selected_text_encoder_paths_in_btree_map(&mut job.extra, &selected_paths);
+    }
+    job
+}
+
+#[derive(Clone, Debug)]
+struct PrivatePathSpelling {
+    value: String,
+    directory: bool,
+    case_insensitive: bool,
+}
+
+fn private_text_encoder_path_spellings(
+    path: &str,
+    source_kind: Option<&str>,
+) -> Vec<PrivatePathSpelling> {
+    // Missing/unknown private metadata is not expected, but public projection must fail closed:
+    // directory semantics are the safe superset because they also scrub admitted descendants.
+    let directory = source_kind != Some("file");
+    let path_bytes = path.as_bytes();
+    let case_insensitive = (path_bytes.first().is_some_and(u8::is_ascii_alphabetic)
+        && path_bytes.get(1) == Some(&b':')
+        && path_bytes
+            .get(2)
+            .is_some_and(|separator| matches!(separator, b'/' | b'\\')))
+        || path.starts_with("\\\\");
+    let mut spellings = vec![path.to_owned()];
+    if case_insensitive {
+        spellings.push(path.replace('\\', "/"));
+        spellings.push(path.replace('/', "\\"));
+    }
+    if directory {
+        for spelling in &mut spellings {
+            while spelling.len() > 1
+                && spelling.ends_with(['/', '\\'])
+                && !spelling.trim_matches(['/', '\\']).is_empty()
+                && !(spelling.len() == 3 && spelling.as_bytes().get(1) == Some(&b':'))
+            {
+                spelling.pop();
+            }
+        }
+    }
+    spellings.retain(|spelling| !spelling.is_empty());
+    spellings.sort_by_key(|spelling| std::cmp::Reverse(spelling.len()));
+    spellings.dedup();
+    spellings
+        .into_iter()
+        .map(|value| PrivatePathSpelling {
+            value,
+            directory,
+            case_insensitive,
+        })
+        .collect()
+}
+
+fn redact_private_text_encoder_diagnostic(value: &mut String) {
+    redact_absolute_paths(value);
+}
+
+/// Redact only the admitted selected source spelling from public contract data.
+///
+/// Payload/result/extra can legitimately contain unrelated filesystem fields (for example an
+/// installed LoRA or generated output). They must remain stable when a text encoder is selected.
+/// HTTP(S) and scheme-relative URL spans are skipped so a URL whose path happens to contain the
+/// same spelling is not rewritten.
+fn redact_selected_text_encoder_paths(value: &mut String, spellings: &[PrivatePathSpelling]) {
+    const REDACTED: &str = "[selected text encoder]";
+    let original = value.as_bytes();
+    let is_url_end = |byte: u8| {
+        byte.is_ascii_whitespace()
+            || matches!(
+                byte,
+                b'"' | b'\'' | b'`' | b'<' | b'>' | b'|' | b')' | b']' | b'}' | b',' | b';'
+            )
+    };
+    let starts_with_ignore_ascii_case = |index: usize, needle: &[u8]| {
+        original
+            .get(index..index.saturating_add(needle.len()))
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(needle))
+    };
+    let url_boundary = |index: usize| {
+        index == 0
+            || original[index - 1].is_ascii_whitespace()
+            || matches!(
+                original[index - 1],
+                b'(' | b'[' | b'{' | b'=' | b',' | b';' | b'\'' | b'"' | b'`' | b'<'
+            )
+    };
+    let is_web_url = |index: usize| {
+        (url_boundary(index)
+            && (starts_with_ignore_ascii_case(index, b"http://")
+                || starts_with_ignore_ascii_case(index, b"https://")))
+            || ((index == 0 || url_boundary(index))
+                && original.get(index..index + 2) == Some(b"//")
+                && original
+                    .get(index + 2)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'['))
+    };
+    let is_file_url = |index: usize| {
+        url_boundary(index)
+            && starts_with_ignore_ascii_case(index, b"file:")
+            && original
+                .get(index + 5)
+                .is_some_and(|separator| matches!(separator, b'/' | b'\\'))
+    };
+
+    let mut output = String::with_capacity(value.len());
+    let mut copied_through = 0;
+    let mut index = 0;
+    while index < original.len() {
+        if is_file_url(index) {
+            output.push_str(&value[copied_through..index]);
+            output.push_str(REDACTED);
+            index += 5;
+            while index < original.len() && !is_url_end(original[index]) {
+                index += 1;
+            }
+            copied_through = index;
+            continue;
+        }
+        let after_scheme_slashes = || {
+            let mut cursor = index;
+            while cursor > 0 && matches!(original[cursor - 1], b'/' | b'\\') {
+                cursor -= 1;
+            }
+            cursor > 0 && original[cursor - 1] == b':'
+        };
+        let Some(spelling) = spellings.iter().find(|spelling| {
+            (index == 0
+                || after_scheme_slashes()
+                || !matches!(
+                    original[index - 1],
+                    b'.' | b'-' | b'_' | b'/' | b'\\' | b'0'..=b'9' | b'A'..=b'Z'
+                        | b'a'..=b'z'
+                ))
+                && original
+                    .get(index..index.saturating_add(spelling.value.len()))
+                    .is_some_and(|candidate| {
+                        if spelling.case_insensitive {
+                            candidate.eq_ignore_ascii_case(spelling.value.as_bytes())
+                        } else {
+                            candidate == spelling.value.as_bytes()
+                        }
+                    })
+                && original
+                    .get(index + spelling.value.len())
+                    .is_none_or(|next| {
+                        if spelling.directory {
+                            matches!(next, b'/' | b'\\')
+                                || next.is_ascii_whitespace()
+                                || matches!(
+                                    next,
+                                    b'"' | b'\''
+                                        | b'`'
+                                        | b'<'
+                                        | b'>'
+                                        | b'|'
+                                        | b')'
+                                        | b']'
+                                        | b'}'
+                                        | b','
+                                        | b';'
+                                        | b':'
+                                        | b'='
+                                        | b'?'
+                                        | b'#'
+                                        | b'&'
+                                )
+                        } else if *next == b'.' {
+                            original
+                                .get(index + spelling.value.len() + 1)
+                                .is_none_or(|after| {
+                                    after.is_ascii_whitespace()
+                                        || matches!(
+                                            after,
+                                            b'"' | b'\''
+                                                | b'`'
+                                                | b'<'
+                                                | b'>'
+                                                | b'|'
+                                                | b')'
+                                                | b']'
+                                                | b'}'
+                                                | b','
+                                                | b';'
+                                        )
+                                })
+                        } else {
+                            next.is_ascii_whitespace()
+                                || matches!(
+                                    next,
+                                    b'"' | b'\''
+                                        | b'`'
+                                        | b'<'
+                                        | b'>'
+                                        | b'|'
+                                        | b')'
+                                        | b']'
+                                        | b'}'
+                                        | b','
+                                        | b';'
+                                        | b':'
+                                        | b'='
+                                        | b'?'
+                                        | b'#'
+                                        | b'&'
+                                        | b'!'
+                                )
+                        }
+                    })
+        }) else {
+            if is_web_url(index) {
+                index += 1;
+                while index < original.len() && !is_url_end(original[index]) {
+                    index += 1;
+                }
+                continue;
+            }
+            index += 1;
+            continue;
+        };
+        output.push_str(&value[copied_through..index]);
+        output.push_str(REDACTED);
+        index += spelling.value.len();
+        copied_through = index;
+    }
+    if copied_through != 0 {
+        output.push_str(&value[copied_through..]);
+        *value = output;
+    }
+}
+
+/// Remove any remaining absolute filesystem token from a selected-encoder job's public clone.
+///
+/// A confinement error can enumerate unrelated allowed roots and a later symlink error can name a
+/// target that no longer matches the selected source. This pure lexical pass is deliberately
+/// scoped to jobs carrying the server-private encoder resolution; it performs no filesystem I/O
+/// while projecting an HTTP/SSE response. Once a filesystem location is found, the remainder is
+/// dropped rather than guessing where an unquoted `Path::display()` value containing spaces ends.
+/// Web URLs and relative paths remain intact, while `file://` URLs are filesystem locations and
+/// are therefore private.
+fn redact_absolute_paths(value: &mut String) {
+    const REDACTED: &str = "[selected text encoder]";
+    let bytes = value.as_bytes();
+    let boundary = |index: usize| match index.checked_sub(1).and_then(|i| bytes.get(i)) {
+        None => true,
+        Some(previous) => {
+            !previous.is_ascii_alphanumeric()
+                && !matches!(previous, b'_' | b'.' | b'-' | b'/' | b'\\')
+        }
+    };
+    let starts_with_ignore_ascii_case = |index: usize, needle: &[u8]| {
+        bytes
+            .get(index..index.saturating_add(needle.len()))
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(needle))
+    };
+    let is_web_url = |index: usize| {
+        boundary(index)
+            && (starts_with_ignore_ascii_case(index, b"http://")
+                || starts_with_ignore_ascii_case(index, b"https://")
+                || (bytes.get(index..index + 2) == Some(b"//")
+                    && bytes
+                        .get(index + 2)
+                        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'[')))
+    };
+    let is_file_url =
+        |index: usize| boundary(index) && starts_with_ignore_ascii_case(index, b"file://");
+    let is_home_relative = |index: usize| {
+        if bytes.get(index.wrapping_sub(1)) == Some(&b'~') {
+            return true;
+        }
+        if bytes.get(index.wrapping_sub(1)) != Some(&b'}') {
+            return false;
+        }
+        bytes[..index]
+            .iter()
+            .rposition(|byte| *byte == b'{')
+            .is_some_and(|open| {
+                open > 0
+                    && bytes[open - 1] == b'$'
+                    && bytes[open + 1..index - 1]
+                        .iter()
+                        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            })
+    };
+    let is_absolute_path = |index: usize, require_boundary: bool| {
+        if require_boundary && !boundary(index) {
+            return false;
+        }
+        let starts_component = |byte: &u8| {
+            !byte.is_ascii_whitespace()
+                && !matches!(
+                    byte,
+                    b'/' | b'\\'
+                        | b'"'
+                        | b'\''
+                        | b'`'
+                        | b'<'
+                        | b'>'
+                        | b'|'
+                        | b')'
+                        | b']'
+                        | b'}'
+                        | b','
+                        | b';'
+                )
+        };
+        let unix = !is_home_relative(index)
+            && bytes.get(index) == Some(&b'/')
+            && bytes.get(index + 1).is_some_and(starts_component);
+        let drive = bytes.get(index).is_some_and(u8::is_ascii_alphabetic)
+            && bytes.get(index + 1) == Some(&b':')
+            && bytes
+                .get(index + 2)
+                .is_some_and(|separator| matches!(separator, b'/' | b'\\'))
+            && bytes.get(index + 3).is_some_and(starts_component);
+        let unc = bytes.get(index..index + 2) == Some(b"\\\\")
+            && bytes.get(index + 2).is_some_and(starts_component);
+        unix || drive || unc
+    };
+    let is_url_end = |byte: u8| {
+        byte.is_ascii_whitespace()
+            || matches!(
+                byte,
+                b'"' | b'\'' | b'`' | b'<' | b'>' | b'|' | b')' | b']' | b'}' | b',' | b';'
+            )
+    };
+    let web_token_end = |start: usize| {
+        let mut end = start;
+        while end < bytes.len() && !is_url_end(bytes[end]) {
+            end += 1;
+        }
+        end
+    };
+    let mut index = 0;
+    while index < bytes.len() {
+        if is_web_url(index) {
+            index = web_token_end(index);
+            continue;
+        }
+        let file_url = is_file_url(index);
+        if !file_url && !is_absolute_path(index, true) {
+            index += 1;
+            continue;
+        }
+
+        let prefix_end = index
+            .checked_sub(1)
+            .filter(|previous| matches!(bytes[*previous], b'"' | b'\'' | b'`' | b'<'));
+        value.truncate(prefix_end.unwrap_or(index));
+        value.push_str(REDACTED);
+        return;
+    }
+}
+
+fn redact_selected_text_encoder_paths_in_map(
+    object: &mut serde_json::Map<String, Value>,
+    spellings: &[PrivatePathSpelling],
+) {
+    let original = std::mem::take(object);
+    let mut redacted = serde_json::Map::with_capacity(original.len());
+    let mut collisions = std::collections::HashSet::new();
+    for (mut key, mut value) in original {
+        redact_selected_text_encoder_paths(&mut key, spellings);
+        redact_selected_text_encoder_paths_in_value(&mut value, spellings);
+        if collisions.contains(&key) {
+            continue;
+        }
+        if redacted.contains_key(&key) {
+            redacted.insert(
+                key.clone(),
+                Value::String("[redacted collision]".to_owned()),
+            );
+            collisions.insert(key);
+        } else {
+            redacted.insert(key, value);
+        }
+    }
+    *object = redacted;
+}
+
+fn redact_selected_text_encoder_paths_in_btree_map(
+    object: &mut std::collections::BTreeMap<String, Value>,
+    spellings: &[PrivatePathSpelling],
+) {
+    let original = std::mem::take(object);
+    let mut redacted = std::collections::BTreeMap::new();
+    let mut collisions = std::collections::HashSet::new();
+    for (mut key, mut value) in original {
+        redact_selected_text_encoder_paths(&mut key, spellings);
+        redact_selected_text_encoder_paths_in_value(&mut value, spellings);
+        if collisions.contains(&key) {
+            continue;
+        }
+        if redacted.contains_key(&key) {
+            redacted.insert(
+                key.clone(),
+                Value::String("[redacted collision]".to_owned()),
+            );
+            collisions.insert(key);
+        } else {
+            redacted.insert(key, value);
+        }
+    }
+    *object = redacted;
+}
+
+fn redact_selected_text_encoder_paths_in_value(
+    value: &mut Value,
+    spellings: &[PrivatePathSpelling],
+) {
+    match value {
+        Value::String(value) => redact_selected_text_encoder_paths(value, spellings),
+        Value::Array(values) => {
+            for value in values {
+                redact_selected_text_encoder_paths_in_value(value, spellings);
+            }
+        }
+        Value::Object(object) => redact_selected_text_encoder_paths_in_map(object, spellings),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn public_job_snapshots(jobs: Vec<JobSnapshot>) -> Vec<JobSnapshot> {
+    jobs.into_iter().map(public_job_snapshot).collect()
+}
+
+fn public_queue_summary(mut summary: QueueSummary) -> QueueSummary {
+    summary.active_jobs = public_job_snapshots(summary.active_jobs);
+    summary
+}
+
+/// Defense in depth for live publications. Most producers already pass typed public projections,
+/// but `job.updated` also originates at worker/stale-sweep seams that intentionally retain the raw
+/// job for lifecycle work. Redact at the serialization boundary so no new producer can accidentally
+/// publish the worker-private selection receipt. `jobs.snapshot` is currently built directly in the
+/// SSE bootstrap; supporting it here keeps this boundary safe if that snapshot becomes live later.
+fn redact_private_job_metadata_from_event(event: &str, value: &mut Value) {
+    fn redact_job(value: &mut Value) {
+        let Ok(job) = serde_json::from_value::<JobSnapshot>(value.clone()) else {
+            // A job event that cannot be projected through the public typed contract is not safe to
+            // publish. Clear it so the caller's serialization remains path-free and fail-closed.
+            *value = Value::Null;
+            return;
+        };
+        *value = serde_json::to_value(public_job_snapshot(job)).unwrap_or(Value::Null);
+    }
+
+    match event {
+        "job.updated" => redact_job(value),
+        "queue.updated" => {
+            if let Some(jobs) = value.get_mut("activeJobs").and_then(Value::as_array_mut) {
+                for job in jobs {
+                    redact_job(job);
+                }
+            }
+        }
+        "jobs.snapshot" => {
+            if let Some(jobs) = value.get_mut("jobs").and_then(Value::as_array_mut) {
+                for job in jobs {
+                    redact_job(job);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn queue_summary_snapshot(state: AppState) -> Result<QueueSummary, ApiError> {
     queue_summary_snapshot_inner(state, false).await
 }
@@ -3009,7 +3952,7 @@ async fn queue_summary_snapshot_inner(
     // (sc-8186). The sweep returns each job exactly once (it also flips the owning worker offline, so
     // a later sweep can't re-select it), so this neither spams nor double-fires. When skip_sweep is
     // set the sweep is empty, so nothing is broadcast here.
-    Ok(summary)
+    Ok(public_queue_summary(summary))
 }
 
 /// Apply the API-visible consequences of a stale-worker sweep exactly once at
@@ -3054,10 +3997,11 @@ async fn create_generation_job_with_status(
     job_type: JobType,
     project_id: Option<String>,
     project_name: Option<String>,
-    payload: JsonObject,
+    mut payload: JsonObject,
     requested_gpu: String,
     initial_status: Option<JobStatus>,
 ) -> Result<JobSnapshot, ApiError> {
+    model_sources::ensure_runtime_model_sources(&state, &job_type, &mut payload).await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type,
@@ -3096,7 +4040,16 @@ async fn publish_queue_skip_sweep(state: &AppState) -> Result<(), ApiError> {
 }
 
 fn publish<T: Serialize>(state: &AppState, event: &str, data: &T) {
-    if let Ok(data) = serde_json::to_string(data) {
+    let data = if matches!(event, "job.updated" | "queue.updated" | "jobs.snapshot") {
+        let Ok(mut value) = serde_json::to_value(data) else {
+            return;
+        };
+        redact_private_job_metadata_from_event(event, &mut value);
+        serde_json::to_string(&value)
+    } else {
+        serde_json::to_string(data)
+    };
+    if let Ok(data) = data {
         // Publishing with no subscribers is expected; slow subscribers are dropped so they reconnect.
         state.events.publish(EventMessage {
             event: event.to_owned(),
@@ -3313,6 +4266,10 @@ fn serialize_job_lora(lora: &Value, selected_lora: &Value, lora_id: &str) -> Val
         "families": preferred_lora_value(selected_lora, lora, "families"),
         "compatibleFamilies": preferred_lora_value(selected_lora, lora, "compatibleFamilies"),
         "modelFamilies": preferred_lora_value(selected_lora, lora, "modelFamilies"),
+        // Exact model-id allowlist. Keep both accepted spellings so the API compatibility gate and
+        // the worker see the same conjunctive constraint after catalog hydration.
+        "modelIds": preferred_lora_value(selected_lora, lora, "modelIds"),
+        "model_ids": preferred_lora_value(selected_lora, lora, "model_ids"),
         // The specific base model the LoRA was trained for (e.g. wan_2_2 vs
         // wan_2_2_t2v_14b). The worker gates Wan 5B-vs-14B on this since both share
         // family `wan-video`. Absent for LoRAs that don't record one.
@@ -3873,8 +4830,13 @@ fn optional_number_to_f64(
     number.map(|value| number_to_f64(value, field)).transpose()
 }
 
+/// The only output heights `POST /api/v1/projects/:id/timelines/:id/exports` admits. One
+/// declaration (sc-22710): the film harness picks an export resolution before it dispatches, and a
+/// second hand-copied list would turn a pre-dispatch diagnostic into a 400 at enqueue on drift.
+pub(crate) const TIMELINE_EXPORT_RESOLUTIONS: &[u32] = &[640, 720, 1024, 1280];
+
 fn validate_timeline_export(payload: &TimelineExportRequest) -> Result<(), ApiError> {
-    if ![640, 720, 1024, 1280].contains(&payload.resolution) {
+    if !TIMELINE_EXPORT_RESOLUTIONS.contains(&payload.resolution) {
         return Err(ApiError::bad_request(
             "Resolution must be one of 640, 720, 1024, or 1280.",
         ));
@@ -4201,6 +5163,18 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
             "prompt must be between 1 and 4000 characters",
         ));
     }
+    // A native prompt batch (sc-25681): every prompt obeys the single prompt's length bound. Its
+    // shape against the model (declared cap, `prompt == prompts[0]`, `prompts × count`) is judged
+    // in `create_image_job` against the canonical catalog entry.
+    if payload
+        .prompts
+        .iter()
+        .any(|prompt| prompt.is_empty() || prompt.chars().count() > MAX_PROMPT_CHARS)
+    {
+        return Err(ApiError::bad_request(
+            "each of prompts must be between 1 and 4000 characters",
+        ));
+    }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
     validate_prompt_enhancement_fields(&payload.advanced)?;
     validate_image_pose_count(&payload.advanced)?;
@@ -4230,18 +5204,65 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     // Only a *named* dimension is bounded here: an omitted side is resolved from the model's
     // declared `defaults.resolution` in `create_image_job` (sc-12400), the same shape as the video
     // route's duration/fps/size.
+    //
+    // sc-24113 lowers the FLOOR of this shape check from 256 to 32 and nothing else. This gate runs
+    // before the model is known, so — exactly like the video route's `1..=30` duration blanket — it
+    // is a payload-sanity outer bound, not the model's envelope. It had to widen because
+    // Qwen-Image 2.1 genuinely renders from 32 px per side, which the old blanket refused outright
+    // with no model ever getting a say.
+    //
+    // Nothing is loosened for any other model: `create_image_job` immediately re-checks the
+    // resolved geometry against the model's own `limits.minDimension` / `maxDimension` /
+    // `requiresDimensionsMultipleOf`, and an image model that declares NO floor falls back to
+    // `HISTORICAL_MIN_IMAGE_DIMENSION` — the same 256 this line used to enforce. So a 64-px request
+    // to any pre-existing model still 400s, just one layer down and with the model named.
     if let Some(width) = payload.width {
-        validate_dimension(width, "width", MAX_IMAGE_DIMENSION)?;
+        validate_dimension_in(
+            width,
+            "width",
+            SHAPE_MIN_IMAGE_DIMENSION,
+            MAX_IMAGE_DIMENSION,
+        )?;
     }
     if let Some(height) = payload.height {
-        validate_dimension(height, "height", MAX_IMAGE_DIMENSION)?;
+        validate_dimension_in(
+            height,
+            "height",
+            SHAPE_MIN_IMAGE_DIMENSION,
+            MAX_IMAGE_DIMENSION,
+        )?;
     }
     if payload.upscale.enabled {
-        if ![2, 4].contains(&payload.upscale.factor) {
-            return Err(ApiError::bad_request("upscale.factor must be 2 or 4"));
-        }
         if payload.upscale.engine.trim().is_empty() {
             return Err(ApiError::bad_request("upscale.engine is required"));
+        }
+        if payload.upscale.is_iris() {
+            // Iris restoration (sc-25683) is sized by `upscale.scale` (default 4×, any positive
+            // factor), not `factor`; a non-default `factor` would be silently ignored, so refuse it.
+            if payload.upscale.factor != sceneworks_core::contracts::default_image_upscale_factor()
+            {
+                return Err(ApiError::bad_request(
+                    "upscale.factor is not a control of the Iris restoration engine; use upscale.scale",
+                ));
+            }
+            if payload.upscale.extra.contains_key("softness") {
+                return Err(ApiError::bad_request(
+                    "upscale.softness is not a control of the Iris restoration engine",
+                ));
+            }
+            payload
+                .upscale
+                .iris_params()
+                .map_err(|error| ApiError::bad_request(format!("upscale.{error}")))?;
+        } else {
+            if ![2, 4].contains(&payload.upscale.factor) {
+                return Err(ApiError::bad_request("upscale.factor must be 2 or 4"));
+            }
+            sceneworks_core::image_restoration::reject_iris_only_keys(
+                &payload.upscale.iris_controls(),
+                &payload.upscale.engine,
+            )
+            .map_err(|error| ApiError::bad_request(format!("upscale.{error}")))?;
         }
     }
     Ok(())
@@ -4280,6 +5301,45 @@ fn validate_character_test_job(payload: &CharacterTestRequest) -> Result<(), Api
     Ok(())
 }
 
+/// Every `mode` a `POST /api/v1/video/jobs` request may name — the enqueue allow-list, and a
+/// SEPARATE reachability gate from the catalog: a mode absent HERE 400s with "Unsupported video
+/// mode" no matter what the model's manifest `capabilities` declare, what `VIDEO_UI_MODES` offers,
+/// or what the worker can render.
+///
+/// It is a named `const` rather than the inline array literal it was so a test can enumerate the
+/// REAL list. A guard that retypes the modes asserts against its own copy and stays green while
+/// this list drifts — the false-green shape that let GH #2074 ship. `every_declared_video_capability_is_submittable`
+/// (tests/jobs.rs) reads this constant and the shipped manifest, so a new family's capability that
+/// is not admitted here is RED at the source.
+///
+/// ⚠️ Adding a family means checking SIX surfaces, not one (sc-17159): manifest `capabilities`,
+/// [`sceneworks_core::jobs_store::routing`]'s `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible` +
+/// `VIDEO_MODEL_CAPS`, the candle claim gate, THIS list plus the per-mode required-asset `match`
+/// below it, and the worker's dispatch arm.
+pub(crate) const VIDEO_JOB_MODES: &[&str] = &[
+    "image_to_video",
+    "text_to_video",
+    "first_last_frame",
+    "extend_clip",
+    "video_bridge",
+    "replace_person",
+    // Bernini editing / reference-driven video modes (sc-4703).
+    "video_to_video",
+    "reference_to_video",
+    "reference_video_to_video",
+    // Bernini multi-source-video modes (sc-5425): mv2v (multiple source clips)
+    // and ads2v (source video + reference video + reference images).
+    "multi_video_to_video",
+    "ads2v",
+    // SCAIL-2 standalone character animation (sc-5448 / sc-5449, epic 5439): reference
+    // character image + driving video → animated clip. It was wired end-to-end — catalog
+    // `capabilities`, `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible`, the candle claim gate,
+    // the worker's `generate_scail2` — and offered in the Video Studio, but never added
+    // HERE, so every submission 400'd on "Unsupported video mode" and the mode was
+    // unreachable from the moment it shipped (GH #2074).
+    "animate_character",
+];
+
 fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
@@ -4297,31 +5357,7 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
             sceneworks_core::lora_family::MAX_JOB_LORAS
         )));
     }
-    if ![
-        "image_to_video",
-        "text_to_video",
-        "first_last_frame",
-        "extend_clip",
-        "video_bridge",
-        "replace_person",
-        // Bernini editing / reference-driven video modes (sc-4703).
-        "video_to_video",
-        "reference_to_video",
-        "reference_video_to_video",
-        // Bernini multi-source-video modes (sc-5425): mv2v (multiple source clips)
-        // and ads2v (source video + reference video + reference images).
-        "multi_video_to_video",
-        "ads2v",
-        // SCAIL-2 standalone character animation (sc-5448 / sc-5449, epic 5439): reference
-        // character image + driving video → animated clip. It was wired end-to-end — catalog
-        // `capabilities`, `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible`, the candle claim gate,
-        // the worker's `generate_scail2` — and offered in the Video Studio, but never added
-        // HERE, so every submission 400'd on "Unsupported video mode" and the mode was
-        // unreachable from the moment it shipped (GH #2074).
-        "animate_character",
-    ]
-    .contains(&payload.mode.as_str())
-    {
+    if !VIDEO_JOB_MODES.contains(&payload.mode.as_str()) {
         return Err(ApiError::bad_request("Unsupported video mode"));
     }
     if payload
@@ -4352,6 +5388,29 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
             "sourceClipAssetIds must contain at most {MAX_VIDEO_SOURCE_CLIP_ASSET_IDS} ids"
         )));
     }
+    // The audio references (sc-17160), rejected blank-first and bounded exactly like the two
+    // id lists above — same order, same wording — because "consistent with the existing lists"
+    // is the contract a caller reads off one list and applies to the next.
+    if payload
+        .reference_audio_asset_ids
+        .iter()
+        .any(|id| id.trim().is_empty())
+    {
+        return Err(ApiError::bad_request(
+            "referenceAudioAssetIds must not contain blank ids",
+        ));
+    }
+    if payload.reference_audio_asset_ids.len() > MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS {
+        return Err(ApiError::bad_request(format!(
+            "referenceAudioAssetIds must contain at most {MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS} ids"
+        )));
+    }
+    // There is deliberately NO combined blanket here, only the three per-list ones above. 12 is
+    // MiniMax-H3's number, not a product-wide truth: today's caps admit 8 images AND 8 clips on
+    // one request, so a blanket 12 would refuse a 16-file shape this route accepts right now —
+    // narrowing every existing video model, which is precisely what the cap change must not do.
+    // The combined budget is a per-model fact and lives with the model, as
+    // `limits.maxCombinedReferenceAssets` (see `create_video_job`).
     // Only a *named* duration is bounded here, for the same reason as fps below: an omitted one is
     // resolved from the model's declared `defaults.duration` in `create_video_job`. This blanket
     // stays a payload-sanity check; the model's own `limits.hardMaxDuration` is enforced there
@@ -4382,9 +5441,21 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         validate_dimension(height, "height", MAX_VIDEO_DIMENSION)?;
     }
     match payload.mode.as_str() {
-        "image_to_video" if payload.source_asset_id.is_none() => Err(ApiError::bad_request(
-            "Image to Video requires a source image.",
-        )),
+        "image_to_video"
+            if payload.source_asset_id.is_none()
+                && !sceneworks_core::h3_keyframes::accepts_last_only_image_to_video(
+                    &payload.model,
+                    &payload.mode,
+                    payload
+                        .last_frame_asset_id
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty()),
+                ) =>
+        {
+            Err(ApiError::bad_request(
+                "Image to Video requires a source image.",
+            ))
+        }
         "first_last_frame"
             if payload.source_asset_id.is_none() || payload.last_frame_asset_id.is_none() =>
         {
@@ -4417,9 +5488,47 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         "video_to_video" if payload.source_clip_asset_id.is_none() => Err(ApiError::bad_request(
             "Video to Video requires a source clip.",
         )),
-        "reference_to_video" if payload.reference_asset_ids.is_empty() => Err(
-            ApiError::bad_request("Reference to Video requires at least one reference image."),
-        ),
+        // `reference_to_video` requires at least one VISUAL reference — an image or a video clip.
+        // Audio references are admitted alongside them and never instead of them.
+        //
+        // Two corrections in one line. sc-17159 widened this from `reference_asset_ids.is_empty()`
+        // because Bernini, the only r2v model at the time, takes images alone, so "at least one
+        // reference image" and "at least one reference" were the same sentence — true for the
+        // clips MiniMax-H3 Ref2VA added, and WRONG for the audio it added at the same time.
+        //
+        // sc-19574 settled it against the reference implementation rather than by argument.
+        // diffusers `MiniMaxH3` (upstream PR #14355, `0.40.0.dev0 @ 7564fb01`) states the rule on
+        // `MiniMaxH3AudioReference` — "never on its own — an audio reference has to be paired with
+        // at least one image or video reference. It never reaches the conditioner and is encoded by
+        // the audio VAE alone" — and ENFORCES it in `before_encoder.py`:
+        //
+        //     if set(kinds) == {"audio"}:
+        //         raise ValueError("An audio reference has to be paired with at least one image or
+        //                           video reference and cannot be used on its own.")
+        //
+        // So the engine was right and this layer was wrong: an audio-only set leaves the visual
+        // conditioner with nothing to read, and the render it would produce is unconditioned. The
+        // worker refuses it too (sc-19508, `minimax_h3_validate_partition`); refusing it HERE is
+        // what makes the user find out at submission instead of after a queued job fails.
+        //
+        // The rule itself is `sceneworks_core::video_request::classify_reference_set`, which the
+        // MCP tool and the worker call too — one predicate, three layers, so they cannot drift back
+        // into disagreement. Only the WORDING is this layer's. It does NOT loosen Bernini: its own
+        // conditioning assembly (`resolve_bernini_conditioning`, both lanes) still refuses an r2v
+        // with no `referenceAssetIds`, naming bernini — the model-specific half of the requirement
+        // belongs with the model, exactly like `limits.maxReferenceAssets`.
+        "reference_to_video"
+            if classify_reference_set(
+                payload.reference_asset_ids.len(),
+                payload.source_clip_asset_ids.len(),
+                payload.reference_audio_asset_ids.len(),
+            ) != ReferenceSetVerdict::Conditionable =>
+        {
+            Err(ApiError::bad_request(
+                "Reference to Video requires at least one reference image or video clip. Audio \
+                 references condition the soundtrack and cannot be the only reference.",
+            ))
+        }
         "reference_video_to_video" if payload.source_clip_asset_id.is_none() => Err(
             ApiError::bad_request("Reference + Video requires a source clip."),
         ),
@@ -4606,6 +5715,263 @@ fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
         }
     }
     validate_model_id(&payload.base_model)?;
+    validate_audio_song_fields(payload)?;
+    Ok(())
+}
+
+/// The ICL reference modes a YuE `_icl` checkpoint accepts (sc-19384): one mixed clip, or a
+/// vocal + instrumental pair.
+const AUDIO_ICL_MODES: &[&str] = &["single", "dual"];
+/// The weight tiers an audio model can ship as physical per-tier downloads (sc-19384).
+const AUDIO_QUANT_TIERS: &[&str] = &["bf16", "q8", "q4"];
+/// Upstream YuE's `prompt_end_time` default: the ICL window end when only a start is given.
+const AUDIO_ICL_DEFAULT_END_SECS: f32 = 30.0;
+/// The output limiters a segmented-song model applies to its stems (YuE `save_audio`, sc-19384).
+const AUDIO_OUTPUT_LIMITERS: &[&str] = &["clamp", "rescale"];
+
+/// Payload-shape floor for the segmented-song / ICL / tier fields (YuE, sc-19384), before the model
+/// is known: numeric knobs finite and in a sane blanket range, guidance on/off coherent with the
+/// scale, the ICL mode a known token with exactly its own asset ids, and the reference window
+/// well-ordered. [`validate_audio_job_for_model`] then gates each field on the model's declared
+/// capability once the manifest entry is resolved.
+fn validate_audio_song_fields(payload: &AudioJobRequest) -> Result<(), ApiError> {
+    if let Some(segments) = payload.segments {
+        if !(1..=100).contains(&segments) {
+            return Err(ApiError::bad_request("segments must be between 1 and 100"));
+        }
+    }
+    if let Some(tokens) = payload.max_new_tokens_per_segment {
+        // YuE's stage-1 context is 16384 positions and each segment keeps `16384 - budget - 1` of
+        // them for its prompt, which must be at least 1 — so 16382 is the largest budget the engine
+        // accepts. Refused here rather than after admission, the ICL encode and the 7B load.
+        if !(1..=16_382).contains(&tokens) {
+            return Err(ApiError::bad_request(
+                "maxNewTokensPerSegment must be between 1 and 16382",
+            ));
+        }
+    }
+    if let Some(penalty) = payload.repetition_penalty {
+        if !penalty.is_finite() || penalty <= 0.0 || penalty > 10.0 {
+            return Err(ApiError::bad_request(
+                "repetitionPenalty must be greater than 0 and at most 10",
+            ));
+        }
+    }
+    if payload.guidance_enabled == Some(false) && payload.guidance.is_some() {
+        return Err(ApiError::bad_request(
+            "guidance (CFG scale) cannot be set while guidanceEnabled is false",
+        ));
+    }
+    if let Some(tier) = payload.quant_tier.as_deref() {
+        if !AUDIO_QUANT_TIERS.contains(&tier.trim().to_lowercase().as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "quantTier must be one of {AUDIO_QUANT_TIERS:?}"
+            )));
+        }
+    }
+    if let Some(limiter) = payload.output_limiter.as_deref() {
+        if !AUDIO_OUTPUT_LIMITERS.contains(&limiter.trim().to_lowercase().as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "outputLimiter must be one of {AUDIO_OUTPUT_LIMITERS:?}"
+            )));
+        }
+    }
+    let present = |value: &Option<String>| value.as_deref().is_some_and(|id| !id.trim().is_empty());
+    let single = present(&payload.icl_reference_asset_id);
+    let vocal = present(&payload.icl_vocal_asset_id);
+    let instrumental = present(&payload.icl_instrumental_asset_id);
+    let window = payload.icl_start_secs.is_some() || payload.icl_end_secs.is_some();
+    match payload
+        .icl_mode
+        .as_deref()
+        .map(|mode| mode.trim().to_lowercase())
+        .filter(|mode| !mode.is_empty())
+        .as_deref()
+    {
+        None => {
+            if single || vocal || instrumental || window {
+                return Err(ApiError::bad_request(
+                    "ICL reference fields need an iclMode (\"single\" or \"dual\")",
+                ));
+            }
+        }
+        Some("single") => {
+            if !single || vocal || instrumental {
+                return Err(ApiError::bad_request(
+                    "iclMode \"single\" takes exactly iclReferenceAssetId (no vocal/instrumental ids)",
+                ));
+            }
+        }
+        Some("dual") => {
+            if single || !vocal || !instrumental {
+                return Err(ApiError::bad_request(
+                    "iclMode \"dual\" takes both iclVocalAssetId and iclInstrumentalAssetId (no \
+                     iclReferenceAssetId)",
+                ));
+            }
+        }
+        Some(_) => {
+            return Err(ApiError::bad_request(format!(
+                "iclMode must be one of {AUDIO_ICL_MODES:?}"
+            )));
+        }
+    }
+    for (field, value) in [
+        ("iclStartSecs", payload.icl_start_secs),
+        ("iclEndSecs", payload.icl_end_secs),
+    ] {
+        if let Some(secs) = value {
+            if !secs.is_finite() || !(0.0..=3600.0).contains(&secs) {
+                return Err(ApiError::bad_request(format!(
+                    "{field} must be between 0 and 3600"
+                )));
+            }
+        }
+    }
+    // A window with only a start ends at upstream YuE's `prompt_end_time` default (30 s), so a start
+    // at or past 30 s with no end is as ill-ordered as an explicit end <= start.
+    if let Some(start) = payload.icl_start_secs {
+        let end = payload.icl_end_secs.unwrap_or(AUDIO_ICL_DEFAULT_END_SECS);
+        if end <= start {
+            return Err(ApiError::bad_request(format!(
+                "iclEndSecs must be greater than iclStartSecs (the window ends at \
+                 {AUDIO_ICL_DEFAULT_END_SECS} s when iclEndSecs is omitted)"
+            )));
+        }
+    }
+    if payload.icl_mode.is_some()
+        && (present(&payload.reference_audio_asset_id) || present(&payload.source_audio_asset_id))
+    {
+        return Err(ApiError::bad_request(
+            "an ICL reference cannot be combined with referenceAudioAssetId or sourceAudioAssetId",
+        ));
+    }
+    Ok(())
+}
+
+/// Gate the segmented-song / ICL / tier fields on the resolved model's DECLARED audio capabilities
+/// (sc-19384) — the manifest mirrors the engine's `Capabilities` flags, so a request the engine
+/// would refuse is a 400 here instead of a failed job. In particular an ICL mode is reachable only
+/// on an in-context-learning checkpoint (`audio.supportsSegmentedLyrics` + `ReferenceAudio`
+/// conditioning — the YuE `_icl` variants); such a checkpoint may also run WITHOUT one, as a plain
+/// prompt run, as upstream allows. A segmented-lyrics
+/// model also refuses the knobs it does not read (it sings lyrics to genre tags; length follows the
+/// lyrics and `segments`) rather than silently dropping them.
+pub(crate) fn validate_audio_job_for_model(
+    payload: &AudioJobRequest,
+    entry: &Value,
+) -> Result<(), ApiError> {
+    let model = &payload.model;
+    let audio = entry.get("audio");
+    let flag = |key: &str| {
+        audio
+            .and_then(|audio| audio.get(key))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    let segmented = flag("supportsSegmentedLyrics");
+    let repetition = flag("supportsRepetitionPenalty");
+    let region = flag("supportsReferenceRegion");
+    let reference_audio = audio
+        .and_then(|audio| audio.get("conditioning"))
+        .and_then(Value::as_array)
+        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "ReferenceAudio"));
+    let icl_model = segmented && reference_audio;
+
+    if (payload.segments.is_some() || payload.max_new_tokens_per_segment.is_some()) && !segmented {
+        return Err(ApiError::bad_request(format!(
+            "{model} does not render segmented lyrics (segments / maxNewTokensPerSegment)"
+        )));
+    }
+    if payload.output_limiter.is_some() && !flag("supportsOutputLimiter") {
+        return Err(ApiError::bad_request(format!(
+            "{model} does not take an outputLimiter"
+        )));
+    }
+    if payload.repetition_penalty.is_some() && !repetition {
+        return Err(ApiError::bad_request(format!(
+            "{model} does not take a repetitionPenalty"
+        )));
+    }
+    if payload.icl_mode.is_some() && !icl_model {
+        return Err(ApiError::bad_request(format!(
+            "iclMode needs an in-context-learning (`_icl`) checkpoint; {model} is not one"
+        )));
+    }
+    if (payload.icl_start_secs.is_some() || payload.icl_end_secs.is_some()) && !region {
+        return Err(ApiError::bad_request(format!(
+            "{model} does not take a reference window (iclStartSecs / iclEndSecs)"
+        )));
+    }
+    // An `_icl` checkpoint WITHOUT a reference is a plain prompt run, exactly as upstream YuE allows
+    // (epic R1); only the reverse — ICL fields on a CoT checkpoint — is refused above.
+    if segmented {
+        if payload
+            .lyrics
+            .as_deref()
+            .is_none_or(|lyrics| lyrics.trim().is_empty())
+        {
+            return Err(ApiError::bad_request(format!(
+                "{model} sings structured lyrics — lyrics are required"
+            )));
+        }
+        let refused = [
+            ("steps", payload.steps.is_some()),
+            ("targetDurationSecs", payload.target_duration_secs.is_some()),
+            ("bpm", payload.bpm.is_some()),
+            ("musicalKey", payload.musical_key.is_some()),
+            ("voice", payload.voice.is_some()),
+            ("script", payload.script.is_some()),
+            (
+                "sourceAudioAssetId",
+                payload.source_audio_asset_id.is_some(),
+            ),
+            (
+                "referenceAudioAssetId",
+                payload.reference_audio_asset_id.is_some(),
+            ),
+        ];
+        if let Some((field, _)) = refused.iter().find(|(_, present)| *present) {
+            return Err(ApiError::bad_request(format!(
+                "{field} is not a control of {model} (put tempo, key and voice in the genre tags; \
+                 song length follows the lyrics and segments)"
+            )));
+        }
+        // A segmented-song model reads a scale in 0..=1 as "guidance off", so an explicit ON scale
+        // must be above 1 — turn guidance off with guidanceEnabled: false instead.
+        if payload.guidance_enabled != Some(false) && payload.guidance.is_some_and(|g| g <= 1.0) {
+            return Err(ApiError::bad_request(format!(
+                "{model}: a guidance scale must be greater than 1 (set guidanceEnabled: false to \
+                 turn guidance off)"
+            )));
+        }
+    } else if payload.guidance_enabled.is_some() {
+        // The on/off switch is the segmented-song contract (a `0.0` scale reads as "no CFG" there);
+        // on any other model a `0.0` scale is a range error, so refuse the switch up front.
+        return Err(ApiError::bad_request(format!(
+            "{model} does not take guidanceEnabled (set a guidance scale instead)"
+        )));
+    }
+    if let Some(tier) = payload.quant_tier.as_deref() {
+        let tier = tier.trim().to_lowercase();
+        let offered = entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .is_some_and(|downloads| {
+                downloads.iter().any(|download| {
+                    download.get("coRequisite").and_then(Value::as_bool) != Some(true)
+                        && download
+                            .get("variant")
+                            .and_then(Value::as_str)
+                            .is_some_and(|variant| variant.eq_ignore_ascii_case(&tier))
+                })
+            });
+        if !offered {
+            return Err(ApiError::bad_request(format!(
+                "{model} does not ship a {tier} tier"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -4685,16 +6051,158 @@ fn validate_audio_edit_fields(payload: &AudioJobRequest) -> Result<(), ApiError>
 /// largest trained bucket (3456) with headroom; video uses its own lower cap.
 const MAX_IMAGE_DIMENSION: u32 = 4096;
 
+/// Payload-sanity FLOOR for a named image width/height, before the model is known (sc-24113).
+///
+/// 32, not 256, because Qwen-Image 2.1's envelope really starts at 32 px per side and this check
+/// runs with no model in hand. It is the outer bound only — see
+/// [`HISTORICAL_MIN_IMAGE_DIMENSION`] for the per-model floor that still applies.
+const SHAPE_MIN_IMAGE_DIMENSION: u32 = 32;
+
+/// The per-model fallback floor applied in `create_image_job` to any image model that declares no
+/// `limits.minDimension` (sc-24113).
+///
+/// This is the 256 that `validate_image_job` used to enforce for everything, moved down one layer
+/// so that widening the shape check could not loosen a single already-shipped model: a request
+/// below 256 to a model with no declared floor is refused exactly as before, now naming the model.
+const HISTORICAL_MIN_IMAGE_DIMENSION: u32 = 256;
+
 /// Upper bound for video width/height — a lower backstop than images, matching
 /// the cap enforced when validating a video job request.
 const MAX_VIDEO_DIMENSION: u32 = 1920;
-const MAX_VIDEO_REFERENCE_ASSET_IDS: usize = 8;
+// ---------------------------------------------------------------------------
+// Reference-media payload-sanity blankets (sc-17160).
+//
+// These three are the OUTER bound — "no video model in the product accepts more than
+// this" — and play exactly the role the `1..=30` duration and `1..=60` fps blankets do
+// a few lines up in `validate_video_job`: they run BEFORE the model is known (a recipe
+// preset can still replace it — sc-12300), so they cannot be the per-model answer.
+//
+// The BINDING per-model cap is `sceneworks_core::video_request::reference_limit_error`,
+// enforced in `create_video_job` against the resolved manifest entry, and mirrored in the
+// worker's `video_preflight`. Its defaults are 8 images / 8 clips / 0 audio / no combined
+// ceiling, so raising the image blanket from 8 to 9 here does NOT hand a 9th reference to
+// any already-shipped model — bernini and every other family still refuse it, one layer
+// down, on `limits.maxReferenceAssets`.
+//
+// The COMBINED cap has no blanket at all, only a per-model declaration, for the same reason
+// in the opposite direction: see the note where the per-list checks end.
+// ---------------------------------------------------------------------------
+
+/// 9 — MiniMax-H3 Ref2VA's image-reference ceiling, the largest of any shipped video model
+/// (every other family stops at [`sceneworks_core::video_request::DEFAULT_MAX_REFERENCE_ASSETS`]).
+const MAX_VIDEO_REFERENCE_ASSET_IDS: usize = 9;
 const MAX_VIDEO_SOURCE_CLIP_ASSET_IDS: usize = 8;
+/// 3 — Ref2VA's audio-reference ceiling. No model declares more; models that declare
+/// nothing take none at all (`DEFAULT_MAX_REFERENCE_AUDIO_ASSETS` is 0).
+const MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS: usize = 3;
+
+/// Validate the exact model/mode spelling and reference array every video creation boundary will
+/// persist. The typed submit route and retry/duplicate all call this after preset/patch merging and
+/// current manifest resolution, so replay cannot drift into the worker parser's deliberately
+/// tolerant behavior (which trims strings and drops blank/non-string list entries for legacy reads).
+///
+/// This helper is validation-only: it never trims, filters, sorts, or truncates, preserving every
+/// accepted id byte-for-byte and in caller order. SCAIL-2 additionally consumes strict ordered
+/// Reference/Mask pairs, has six source positions, and may expose multiple characters only once the
+/// current server-owned entry says the paired inference descriptor is installed.
+pub(crate) fn validate_video_reference_asset_ids_payload(
+    payload: &JsonObject,
+    model_manifest_entry: &Value,
+) -> Result<(), ApiError> {
+    let reference_asset_ids = match payload.get("referenceAssetIds") {
+        None => &[][..],
+        Some(Value::Array(values)) => values.as_slice(),
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "referenceAssetIds must be an array of string ids",
+            ));
+        }
+    };
+    for value in reference_asset_ids {
+        let id = value.as_str().ok_or_else(|| {
+            ApiError::bad_request("referenceAssetIds must contain only string ids")
+        })?;
+        if id.trim().is_empty() {
+            return Err(ApiError::bad_request(
+                "referenceAssetIds must not contain blank ids",
+            ));
+        }
+        if id != id.trim() {
+            return Err(ApiError::bad_request(
+                "referenceAssetIds must not contain leading or trailing whitespace",
+            ));
+        }
+    }
+    if reference_asset_ids.len() > MAX_VIDEO_REFERENCE_ASSET_IDS {
+        return Err(ApiError::bad_request(format!(
+            "referenceAssetIds must contain at most {MAX_VIDEO_REFERENCE_ASSET_IDS} ids"
+        )));
+    }
+
+    let model = match payload.get("model") {
+        None => "",
+        Some(Value::String(model)) if model == model.trim() => model.as_str(),
+        Some(Value::String(_)) => {
+            return Err(ApiError::bad_request(
+                "model must not contain leading or trailing whitespace",
+            ));
+        }
+        Some(_) => return Err(ApiError::bad_request("model must be a string")),
+    };
+    let mode = match payload.get("mode") {
+        None => "",
+        Some(Value::String(mode)) if mode == mode.trim() => mode.as_str(),
+        Some(Value::String(_)) => {
+            return Err(ApiError::bad_request(
+                "mode must not contain leading or trailing whitespace",
+            ));
+        }
+        Some(_) => return Err(ApiError::bad_request("mode must be a string")),
+    };
+    let reference_count = reference_asset_ids.len();
+    if model == "scail2_14b"
+        && mode == "animate_character"
+        && reference_count > sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
+    {
+        return Err(ApiError::bad_request(format!(
+            "SCAIL-2 Animate Character supports at most {} reference characters.",
+            sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
+        )));
+    }
+    if model == "scail2_14b"
+        && mode == "animate_character"
+        && reference_count > 1
+        && !model_manifest_entry
+            .get("ui")
+            .and_then(|ui| ui.get("scail2MultiReference"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        return Err(ApiError::bad_request(
+            "SCAIL-2 Animate Character multi-reference is unavailable until the paired inference descriptor is installed.",
+        ));
+    }
+    Ok(())
+}
 
 fn validate_dimension(value: u32, field: &'static str, max: u32) -> Result<(), ApiError> {
-    if !(256..=max).contains(&value) {
+    validate_dimension_in(value, field, 256, max)
+}
+
+/// [`validate_dimension`] with an explicit floor (sc-24113).
+///
+/// Every caller but the image-generation shape check passes the historical 256 through the wrapper
+/// above and is byte-identical. The image route passes [`SHAPE_MIN_IMAGE_DIMENSION`] because its
+/// real floor is per-model and is applied once the manifest entry is resolved.
+fn validate_dimension_in(
+    value: u32,
+    field: &'static str,
+    min: u32,
+    max: u32,
+) -> Result<(), ApiError> {
+    if !(min..=max).contains(&value) {
         return Err(ApiError::bad_request(format!(
-            "{field} must be between 256 and {max}"
+            "{field} must be between {min} and {max}"
         )));
     }
     Ok(())
@@ -4731,6 +6239,7 @@ fn find_timeline_item<'a>(timeline: &'a Value, item_id: &str) -> Result<&'a Valu
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Timeline item not found".to_owned(),
+            context: None,
             code: None,
         })
 }

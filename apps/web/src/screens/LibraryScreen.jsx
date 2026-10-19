@@ -166,7 +166,10 @@ export function LibraryScreen() {
       <WorkPanel>
         <div className="toolbar">
           <label className="file-upload-button">
-            <input accept="image/*,video/*" disabled={isImporting} onChange={handleImport} type="file" />
+            {/* Audio since sc-18650: `ProjectStore::import_asset` accepts `audio/*` and normalizes
+                the upload to the PCM-16 WAV every audio consumer reads, so the Library's own Import
+                button admits the same set the server does. */}
+            <input accept="image/*,video/*,audio/*" disabled={isImporting} onChange={handleImport} type="file" />
             {isImporting ? "Importing..." : "Import"}
           </label>
           <input
@@ -188,7 +191,10 @@ export function LibraryScreen() {
           <select aria-label="Asset type" onChange={(event) => setTypeFilter(event.target.value)} value={typeFilter}>
             <option value="all">All media</option>
             <option value="image">Images</option>
+            <option value="vector">Vectors</option>
+            <option value="depth">Depth maps</option>
             <option value="video">Videos</option>
+            <option value="audio">Audio</option>
             <option value="upload">Uploads</option>
             <option value="render">Renders</option>
           </select>
@@ -281,6 +287,9 @@ export function LibraryScreen() {
             vqaPending={vqaPending}
             audioModels={audioModels}
             createVqaJob={createVqaJob}
+            onEstimateDepth={
+              batch.depthAvailability?.available ? (asset) => batch.openBatchWith([asset.id], "depth") : null
+            }
           />
         </div>
       )}

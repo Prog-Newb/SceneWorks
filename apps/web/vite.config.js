@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { defineConfig, searchForWorkspaceRoot } from "vite";
+import { defineConfig } from "vite";
 
 import precompressPlugin from "./vite-plugin-precompress.js";
 import bundleReportPlugin from "./vite-plugin-bundle-report.js";
 import themeInitPlugin from "./vite-plugin-theme-init.js";
+import editorGuidesPlugin from "./vite-plugin-editor-guides.js";
 
 // Expose the product version (kept in lockstep across the repo's package.json /
 // tauri.conf.json by scripts/sync-version.mjs) to the frontend as a build-time
@@ -25,29 +26,14 @@ const bundleBudgets = JSON.parse(
 // loader would deny it unless it's on server.fs.allow. (The production embedded
 // build resolves these via rollup and isn't gated by this.)
 const licensesDir = fileURLToPath(new URL("../desktop/licenses", import.meta.url));
-
-// The style-catalog drift-guard test (src/data/styleCatalog.test.js) imports the
-// authored documents/style.txt as ?raw to re-derive styles.json. That dir is at
-// the repo root, outside the web project root, so allow it like licensesDir.
-const documentsDir = fileURLToPath(new URL("../../documents", import.meta.url));
-
-// The same drift-guard test also imports the backend Style manifest
-// (config/manifests/builtin.styles.jsonc, sc-13134) as ?raw to assert it stays a
-// mechanical derivation of style.txt. config/ is at the repo root, outside the web
-// project root, so allow it like documentsDir.
-const configDir = fileURLToPath(new URL("../../config", import.meta.url));
-
-// The live-preview-support drift guard (src/data/previewSupportCatalog.test.js, sc-16965) imports
-// crates/sceneworks-worker/src/engines.rs as ?raw to re-parse the MODEL_TABLE join the generator
-// reads — the same "derive from the committed bytes" shape as documents/style.txt above. crates/ is
-// at the repo root, outside the web project root, so allow it like documentsDir.
-const cratesDir = fileURLToPath(new URL("../../crates", import.meta.url));
+const webRoot = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig({
   // Generate the pre-paint /theme-init.js from src/accents.js at dev/build time
   // (single source of truth for the accent-id list). See vite-plugin-theme-init.js.
   plugins: [
     themeInitPlugin(),
+    editorGuidesPlugin(),
     bundleReportPlugin({ budgets: bundleBudgets }),
     precompressPlugin(),
   ],
@@ -71,14 +57,14 @@ export default defineConfig({
       "Cache-Control": "no-store",
     },
     fs: {
-      // Keep the default workspace-root allowance and add the desktop license
-      // corpus the Licenses screen imports from.
+      // Do not use Vite's default workspace-root allowance: a LAN-opted dev
+      // server must not turn the checkout into an /@fs/ download surface. The
+      // web root and production license corpus are the only exposed roots.
+      // Drift guards read their repository inputs directly with Node rather
+      // than widening the configuration shared by every Vite server.
       allow: [
-        searchForWorkspaceRoot(process.cwd()),
+        webRoot,
         licensesDir,
-        documentsDir,
-        configDir,
-        cratesDir,
       ],
     },
   },

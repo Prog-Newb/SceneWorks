@@ -1,5 +1,6 @@
 import { buildStructuredPromptRecipe } from "./ideogramCaption.js";
 import { tierQuantize, isConvRotTier, isNvfp4Tier, NVFP4_TIER } from "./quantTier.js";
+import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
 
 // sc-8854 (F-052): pure builder for the Image Studio job's `advanced` payload. Extracted
 // verbatim from ImageStudio.submit() — the ~110-line object literal that assembled the
@@ -25,15 +26,32 @@ export function buildImageJobAdvanced(state) {
     sampler,
     scheduler,
     schedulerShift,
+    // sc-25681: a model with a schedule-shift axis but no scheduler menu (Iris-3B,
+    // `image.supportsSchedulerShift`) — the shift rides on its own.
+    supportsSchedulerShift,
+    // sc-25681: the CFG interval `[start, end]` (already resolved by the studio: `null` when the
+    // model does not offer one, the default full interval is selected, or CFG is off) and the
+    // caption-overflow policy (`"default"` = the checkpoint's own).
+    cfgInterval,
+    captionOverflow,
     // Step / guidance overrides.
     stepsOverride,
     guidanceOverride,
     guidanceMethod,
+    // Runtime-curated compatible language encoder substitution (sc-18314).
+    supportsTextEncoderSelection,
+    textEncoderModel,
+    defaultTextEncoderId,
     // Flash attention (sc-3674).
     flashAttn,
     // Caption upsampling (sc-6135).
     promptEnhance,
     enhancePrompt,
+    // Transparency / RGBA output (sc-24113). `selectedModel` is the CAPABILITY source: the
+    // fragment is re-derived against the currently selected model, so a sticky `true` carried over
+    // from an alpha-capable model can never leak onto one that would refuse it.
+    selectedModel,
+    transparentBackground,
     // Boogu precision (sc-6568) + quant-tier A/B (sc-8515).
     precisionToggle,
     bf16Precision,
@@ -44,6 +62,9 @@ export function buildImageJobAdvanced(state) {
     showPidToggle,
     usePid,
     pidTarget,
+    // Experimental load-time alternate decoder. `native` is the byte-exact default and omitted.
+    showDecoderPicker,
+    decoder,
     // Character-reference knobs.
     mode,
     referenceAssetId,
@@ -113,11 +134,20 @@ export function buildImageJobAdvanced(state) {
     // (non-default) scheduler is active — it shapes that curated schedule;
     // the default scheduler keeps the engine's resolution-native shift, so
     // emitting it there would override the no-op default (epic 7114).
-    ...(scheduler &&
-    scheduler !== "default" &&
+    // sc-25681: a model that declares the shift axis without a scheduler menu (Iris-3B) sends
+    // its shift regardless — there is no scheduler picker to gate it on.
+    ...(((scheduler && scheduler !== "default") || supportsSchedulerShift) &&
     Number.isFinite(Number(schedulerShift))
       ? { schedulerShift: Number(schedulerShift) }
       : {}),
+    // CFG interval (sc-25681): emitted only for a non-default interval on a model that offers
+    // one, with CFG on — the studio resolves all three into `cfgInterval` (null otherwise), so a
+    // default recipe stays byte-identical and an interval the engine would refuse never rides.
+    ...(Array.isArray(cfgInterval) && cfgInterval.length === 2
+      ? { cfgInterval: [Number(cfgInterval[0]), Number(cfgInterval[1])] }
+      : {}),
+    // Caption-overflow policy (sc-25681): "default" (the checkpoint's own) is omitted.
+    ...(captionOverflow && captionOverflow !== "default" ? { captionOverflow } : {}),
     // Step / guidance overrides — empty string means "use the model
     // default", which the worker reads off MODEL_TARGETS.
     ...(stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
@@ -125,6 +155,14 @@ export function buildImageJobAdvanced(state) {
       : {}),
     ...(guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
       ? { guidanceScale: Number(guidanceOverride) }
+      : {}),
+    // The bundled/paired encoder is the byte-identical default. Only an explicit non-default
+    // opaque catalog id rides the request; stale authored ids intentionally remain present so the
+    // API can fail closed instead of silently substituting the builtin encoder.
+    ...(supportsTextEncoderSelection &&
+    textEncoderModel &&
+    textEncoderModel !== defaultTextEncoderId
+      ? { textEncoderModel }
       : {}),
     // Flash attention (sc-3674): only emitted when toggled OFF — the worker defaults to ON
     // when `advanced.flashAttn` is absent, so the default-on case adds nothing to the payload.
@@ -142,6 +180,21 @@ export function buildImageJobAdvanced(state) {
     // makes that invariant load-bearing so a future manifest change can never emit both
     // mlxQuantize spreads for one model (the tier picker below would win the object-spread
     // race, but we never render/emit both).
+    // Transparency (sc-24113). Emits `transparentBackground: true` ONLY for a genuine request on
+    // an alpha-capable model; an opaque render puts nothing new on the wire, so every existing
+    // lane's payload stays byte-identical.
+    //
+    // Written as a literal-key ternary rather than as `...transparencyAdvanced(...)` because the
+    // `every_advanced_key_the_studio_can_emit_is_classified` coverage lint (workflow_share.rs)
+    // reads this object's keys STATICALLY: a spread of a call expression hides every key it
+    // contributes, so the knob would silently stop being classified — and a knob this lint cannot
+    // see is a knob that can silently stop travelling. `qwenAlpha.js` still owns the CAPABILITY
+    // predicate, which is the half that must not drift; `transparentBackground` is a stable
+    // SceneWorks request axis (not one of the provisional engine-side names), so spelling it here
+    // costs nothing.
+    ...(transparentBackground && modelSupportsAlphaOutput(selectedModel)
+      ? { transparentBackground: true }
+      : {}),
     ...(precisionToggle && bf16Precision && !showTierPicker ? { mlxQuantize: 0 } : {}),
     // Quant-tier A/B (sc-8515) + on-disk tier fidelity (sc-12090): send the resolved tier's
     // mlxQuantize (bf16→0, q8→8, q4→4) whenever the tier state maps to a known quant value —
@@ -190,6 +243,9 @@ export function buildImageJobAdvanced(state) {
     // size by capping the effective base. Emit `pidTarget:"2k"` only when the PiD toggle is shown+on AND
     // 2K is picked; "4k" is the worker default, so omitting it keeps existing usePid recipes byte-identical.
     ...(showPidToggle && usePid && pidTarget === "2k" ? { pidTarget: "2k" } : {}),
+    // Descriptor-derived alternate decoder. The UI exposes only ids from capability facts; the API
+    // and worker independently revalidate eligibility/install state. Never emit alongside PiD.
+    ...(showDecoderPicker && !usePid && decoder && decoder !== "native" ? { decoder } : {}),
     // IP-Adapter / InstantID reference strength only applies when a character
     // reference is attached AND the model uses the IP-Adapter knob; Qwen's
     // edit pipeline ignores this scalar (hideReferenceStrength gates it out).

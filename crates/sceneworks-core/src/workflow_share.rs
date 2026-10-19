@@ -187,6 +187,11 @@ pub const INPUT_KIND_SOURCE_CLIP: &str = "sourceClip";
 /// A reference CLIP a video run conditions on (`referenceClipAssetId`, Bernini's ads2v) —
 /// sc-15956. The moving counterpart of [`INPUT_KIND_REFERENCE`].
 pub const INPUT_KIND_REFERENCE_CLIP: &str = "referenceClip";
+/// A reference AUDIO clip a video run conditions on (`referenceAudioAssetIds`, MiniMax-H3's
+/// Ref2VA) — sc-17160. The audible counterpart of [`INPUT_KIND_REFERENCE`], and a separate kind
+/// for the same reason [`INPUT_KIND_SOURCE_CLIP`] is: "this recipe needs a voice or a piece of
+/// music" is a different ask of whoever replays it than "this recipe needs a picture".
+pub const INPUT_KIND_REFERENCE_AUDIO: &str = "referenceAudio";
 
 /// A LoRA the run applied, reduced to what another install can act on: the display name, the
 /// weight, the Hugging Face repo id when the catalog entry resolved to one, and (only when the
@@ -223,6 +228,15 @@ pub struct WorkflowUpscale {
     pub engine: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub softness: Option<f64>,
+    /// Iris restoration (sc-25683): the applied output scale (any positive factor; 1 = restore only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+    /// Iris restoration: `budgeted` or `original` input sizing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_sizing: Option<String>,
+    /// Iris restoration: whether the wavelet colour correction ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_fix: Option<bool>,
 }
 
 /// The portable, sanitized workflow of one generated image.
@@ -1044,6 +1058,16 @@ pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
         }]),
     },
     WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/image_jobs.rs",
+        function: "standalone_restore_workflow_share",
+        lane: "POST /api/v1/jobs type=image_upscale engine=iris — the standalone Iris restoration's \
+               own envelope (sc-25683)",
+        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
+            path: "apps/web/src/imageJobs.js",
+            function: "buildUpscaleJobBody",
+        }]),
+    },
+    WorkflowWriteSeam {
         path: "crates/sceneworks-worker/src/image_jobs/detail.rs",
         function: "run_image_detail_job",
         lane: "POST /api/v1/image/detail/jobs — writes the refined PNG (macOS-gated; the scan is \
@@ -1051,6 +1075,16 @@ pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
         disposition: SeamDisposition::Embeds(&[WebBuilderRef {
             path: "apps/web/src/imageJobs.js",
             function: "buildDetailJobBody",
+        }]),
+    },
+    WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/upscale_jobs.rs",
+        function: "run_iris_restore_job_using",
+        lane: "POST /api/v1/jobs type=image_upscale engine=iris — hands the standalone Iris \
+               restoration's envelope to the shared single-child writer (sc-25683)",
+        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
+            path: "apps/web/src/imageJobs.js",
+            function: "buildUpscaleJobBody",
         }]),
     },
     WorkflowWriteSeam {
@@ -1224,8 +1258,14 @@ pub enum AdvancedShape {
     /// `keypoints`, `hands`, `face` — all three drive the rendered skeleton). Pose-library ids,
     /// and anything else the picker attached, do not travel.
     Poses,
+    /// MiniMax-H3 Veda request controls, kept as the exact five-field wire object after the shared
+    /// H3 validator refuses malformed values or unknown fields.
+    H3VedaSettings,
     /// The Krea multi-phase denoise list, reduced to `{ steps, guidance, loras:[{index, weight}] }`.
     Phases,
+    /// A `[start, end]` pair of finite numbers (the CFG interval, sc-25681). Anything else —
+    /// another length, a string, a nested value — is dropped, like an object under a scalar key.
+    NumberPair,
 }
 
 /// One classified `advanced` key.
@@ -1331,6 +1371,18 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         "Authored time-shift (mu) for the curated schedule.",
     ),
     allow(
+        "cfgInterval",
+        AdvancedShape::NumberPair,
+        "Authored classifier-free-guidance interval [start, end] in model time (sc-25681, \
+         Iris-3B): which denoise steps guidance runs on — changes the picture, names nothing local.",
+    ),
+    allow(
+        "captionOverflow",
+        AdvancedShape::Scalar,
+        "Authored caption-overflow policy (warn / error / silent, sc-25681): whether an over-long \
+         prompt is truncated or refused — authored intent about the prompt, not a hardware budget.",
+    ),
+    allow(
         "steps",
         AdvancedShape::Scalar,
         "Authored step-count override.",
@@ -1351,10 +1403,26 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         "Authored caption-upsampling opt-in — changes the prompt the model sees.",
     ),
     allow(
+        "transparentBackground",
+        AdvancedShape::Scalar,
+        "Authored transparency (sc-24113): the model decodes four channels and the render carries a \
+         real alpha channel instead of being composited onto white. WHAT TO MAKE, not what this \
+         machine can afford — a cut-out is the picture the author asked for, and replaying their \
+         recipe onto an opaque render would silently produce a different image. It is not a memory \
+         accommodation and names nothing local (no id, path or preset). Emitted only for a model \
+         that advertises `supportsAlphaOutput`; a replay onto a model that does not is refused by \
+         name at the worker rather than downgraded.",
+    ),
+    allow(
         "usePid",
         AdvancedShape::Scalar,
         "Authored decoder choice: PiD changes the produced image, and is the output's \
          non-commercial marker. Unlike a quant tier it is not a memory accommodation.",
+    ),
+    allow(
+        "decoder",
+        AdvancedShape::Scalar,
+        "Authored alternate terminal decoder id. Native is omitted; replay must preserve an explicit experimental decoder choice.",
     ),
     allow(
         "pidTarget",
@@ -1536,12 +1604,55 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
          changes the output rather than a memory accommodation.",
     ),
     allow_from(
-        "textEncoderModel",
+        "transformerVariant",
         AdvancedShape::Scalar,
         AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX-2.5 transformer choice (`distilled` or `dev`). It changes the checkpoint, \
+         schedule, guidance, and refinement recipe, so dropping it changes the rendered clip.",
+    ),
+    allow_from(
+        "vaeDecoder",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX-2.5 Conv-versus-DiffVAE decoder choice. The selected decoder changes the \
+         actual reconstruction path and its rendered detail.",
+    ),
+    allow_from(
+        "autoDuration",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX-2.5 duration-head opt-in. It decides whether the prompt or an explicit \
+         duration supplies the frame count, so it is generation intent rather than budget.",
+    ),
+    allow_from(
+        "autoDurationMinSeconds",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored lower bound for LTX-2.5's duration prediction. It constrains the resulting clip \
+         length and must travel with the opt-in.",
+    ),
+    allow_from(
+        "autoDurationMaxSeconds",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored upper bound for LTX-2.5's duration prediction. It constrains the resulting clip \
+         length and must travel with the opt-in.",
+    ),
+    allow_from(
+        "temporalUpsampleRounds",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX-2.5 temporal-refinement count. Each round runs a real x2 DFR refinement and \
+         changes both the output frame count and motion, so it is replay-critical intent.",
+    ),
+    allow_from(
+        "textEncoderModel",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::StudioBuilder,
         "Authored text-encoder pick. It changes what the model SEES of the prompt, so a replay \
-         without it is a different run. A catalog-global model slug, not an install-local id — the \
-         same class as `styleId` and unlike `controlWeights`, which carries a resolved path.",
+         without it is a different run. Only the opaque selection id travels; the server-owned \
+         source path does not. A missing choice stays authored and fails closed on replay instead \
+         of silently substituting the bundled encoder.",
     ),
     allow_from(
         "lightning",
@@ -1582,6 +1693,14 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         AdvancedKeySource::VideoStudioBuilder,
         "Authored right-clip conditioning strength for a bridge — the sibling of \
          `videoConditioningStrength`, and dropping it would make a shared bridge replay lopsided.",
+    ),
+    allow_from(
+        "veda",
+        AdvancedShape::H3VedaSettings,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored MiniMax-H3 Veda sparsity and full-attention controls. The complete closed wire \
+         object changes the denoising recipe and must travel together; malformed or unknown \
+         members are refused rather than silently producing a different recipe.",
     ),
     allow_from(
         "timelineAction",
@@ -2299,6 +2418,18 @@ fn describe_inputs(job_payload: &JsonObject) -> Vec<WorkflowInput> {
             control_mode: None,
         });
     }
+    // The audio references (sc-17160), counted exactly as the still and clip references are.
+    // Without their own kind a shared multi-modal recipe would describe "9 reference images +
+    // 2 source clips" and say nothing about the audio it also needs — the recipient sees a
+    // complete-looking input list and reproduces an under-conditioned render.
+    let reference_audio = id_list_len("referenceAudioAssetIds");
+    if reference_audio > 0 {
+        inputs.push(WorkflowInput {
+            kind: INPUT_KIND_REFERENCE_AUDIO.to_owned(),
+            count: u32::try_from(reference_audio).unwrap_or(u32::MAX),
+            control_mode: None,
+        });
+    }
     let advanced = job_payload.get("advanced").and_then(Value::as_object);
     let control_image = advanced
         .and_then(|advanced| advanced.get("controlImage"))
@@ -2338,6 +2469,16 @@ fn sanitize_upscale(value: Option<&Value>) -> Option<WorkflowUpscale> {
             .and_then(Value::as_str)
             .and_then(shareable_label),
         softness: upscale.get("softness").and_then(Value::as_f64),
+        scale: upscale
+            .get("scale")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value > 0.0),
+        input_sizing: upscale
+            .get("inputSizing")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "budgeted" | "original"))
+            .map(str::to_owned),
+        color_fix: upscale.get("colorFix").and_then(Value::as_bool),
     })
 }
 
@@ -2394,6 +2535,7 @@ pub const INPUT_KINDS: &[&str] = &[
     INPUT_KIND_CONTROL,
     INPUT_KIND_SOURCE_CLIP,
     INPUT_KIND_REFERENCE_CLIP,
+    INPUT_KIND_REFERENCE_AUDIO,
 ];
 
 // ---------------------------------------------------------------------------
@@ -2657,6 +2799,13 @@ fn reduce_workflow_share(share: WorkflowShare) -> WorkflowShare {
             factor: upscale.factor,
             engine: upscale.engine.as_deref().and_then(shareable_label),
             softness: upscale.softness.filter(|value| value.is_finite()),
+            scale: upscale
+                .scale
+                .filter(|value| value.is_finite() && *value > 0.0),
+            input_sizing: upscale
+                .input_sizing
+                .filter(|value| matches!(value.as_str(), "budgeted" | "original")),
+            color_fix: upscale.color_fix,
         }),
         loras,
         inputs,
@@ -2826,12 +2975,35 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
             AdvancedShape::StructuredPrompt => sanitize_structured_prompt(value),
             AdvancedShape::Poses => sanitize_poses(value),
             AdvancedShape::Phases => sanitize_phases(value),
+            AdvancedShape::H3VedaSettings => sanitize_h3_veda_settings(value),
+            AdvancedShape::NumberPair => sanitize_number_pair(value),
         };
         if let Some(sanitized) = sanitized {
             out.insert(key.clone(), sanitized);
         }
     }
     out
+}
+
+/// Preserve a complete, valid Veda control object. The API's shared H3 validator owns the wire
+/// grammar and `deny_unknown_fields`; this boundary adds a small byte ceiling before parsing, then
+/// keeps the original strings intact so ranges and separators replay exactly as authored.
+fn sanitize_h3_veda_settings(value: &Value) -> Option<Value> {
+    const MAX_CONTROL_TEXT_BYTES: usize = PROSE_MAX_BYTES;
+    const MAX_H3_STEPS: u32 = 200;
+
+    let object = value.as_object()?;
+    if object.values().any(|member| {
+        member
+            .as_str()
+            .is_some_and(|text| text.len() > MAX_CONTROL_TEXT_BYTES)
+    }) {
+        return None;
+    }
+    let mut advanced = JsonObject::new();
+    advanced.insert("veda".to_owned(), value.clone());
+    crate::h3_veda::requested_h3_veda("minimax_h3", &advanced, MAX_H3_STEPS).ok()?;
+    Some(Value::Object(object.clone()))
 }
 
 /// The prose keys inside a sanitized value that are what the user typed, and so are exempt
@@ -2865,6 +3037,13 @@ fn sanitize_scalar(key: &str, value: &Value) -> Option<Value> {
         // close: it is how a path reaches the file through a key that is otherwise allowed.
         _ => None,
     }
+}
+
+fn sanitize_number_pair(value: &Value) -> Option<Value> {
+    let pair = value.as_array().filter(|pair| pair.len() == 2)?;
+    pair.iter()
+        .all(|number| number.as_f64().is_some_and(f64::is_finite))
+        .then(|| value.clone())
 }
 
 fn sanitize_structured_prompt(value: &Value) -> Option<Value> {
@@ -3276,6 +3455,59 @@ mod tests {
         assert!(!recipe.contains_key("caption"));
         // `magicPromptBackend: null` is not a scalar we carry.
         assert!(!recipe.contains_key("magicPromptBackend"));
+    }
+
+    #[test]
+    fn veda_keeps_every_valid_wire_control_and_refuses_unknown_or_malformed_members() {
+        let all_layers = (0..50)
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let all_steps = (0..200)
+            .map(|step| step.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let complete = json!({
+            "enabled": true,
+            "generated": "32",
+            "reference": "0%",
+            "fullAttentionLayers": all_layers,
+            "fullAttentionSteps": all_steps
+        });
+        let advanced = json!({"veda": complete})
+            .as_object()
+            .cloned()
+            .expect("object");
+        assert_eq!(sanitize_advanced(&advanced)["veda"], complete);
+
+        let controls = json!({
+            "enabled": true,
+            "generated": "32",
+            "reference": "0%",
+            "fullAttentionLayers": "49, 2–0",
+            "fullAttentionSteps": "0; 3"
+        });
+        let advanced = json!({"veda": controls})
+            .as_object()
+            .cloned()
+            .expect("object");
+        assert_eq!(sanitize_advanced(&advanced)["veda"], controls);
+
+        for controls in [
+            json!({"enabled": true, "unknown": "must not be smuggled"}),
+            json!({"enabled": true, "generated": "C:\\weights\\veda"}),
+            json!({"enabled": true, "fullAttentionSteps": "200"}),
+            json!({"enabled": true, "fullAttentionLayers": "50"}),
+        ] {
+            let advanced = json!({"veda": controls})
+                .as_object()
+                .cloned()
+                .expect("object");
+            assert!(
+                !sanitize_advanced(&advanced).contains_key("veda"),
+                "malformed or unknown Veda data must not become a partial recipe"
+            );
+        }
     }
 
     #[test]
@@ -4090,8 +4322,9 @@ mod tests {
         assert_eq!(MAX_SHARE_LORAS, crate::lora_family::MAX_JOB_LORAS);
         assert_eq!(MAX_SHARE_LORAS, 5);
         assert_eq!(MAX_SHARE_INPUTS, INPUT_KINDS.len());
-        // Four image kinds plus the video lane's two clip kinds (sc-15956).
-        assert_eq!(MAX_SHARE_INPUTS, 6);
+        // Four image kinds, the video lane's two clip kinds (sc-15956), and the audio reference
+        // (sc-17160).
+        assert_eq!(MAX_SHARE_INPUTS, 7);
         // The worker's `MAX_MULTIPHASE_PHASES`; pinned against its source by
         // `the_phase_cap_matches_the_multi_phase_validators` in tests/workflow_share.rs, which can
         // read the file this crate cannot import.

@@ -4,6 +4,7 @@ import { Logo } from "../components/Logo.jsx";
 import { ConfirmHost } from "../appConfirm.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { assetCanRenderAsAudio } from "../components/assetMedia.jsx";
+import { lazyScreen } from "../components/LazyScreen.jsx";
 import { terminalStatuses } from "../constants.js";
 import { breakpointFor, contentMaxWidth } from "./breakpoint.js";
 import { ADVANCED_MODE } from "./uiMode.js";
@@ -29,7 +30,6 @@ import { SimpleAssets } from "./SimpleAssets.jsx";
 import { SimpleModelManager } from "./SimpleModelManager.jsx";
 import { SimpleQueue } from "./SimpleQueue.jsx";
 import { SimpleSettings } from "./SimpleSettings.jsx";
-import { SimpleLicenses } from "./SimpleLicenses.jsx";
 import "./simple.css";
 
 // The Simple UI shell (design handoff "Simple UI for creative studios").
@@ -42,6 +42,15 @@ import "./simple.css";
 //
 // It renders INSIDE App's providers, so every screen reads the same live catalogs, job
 // feed and actions the full workspace does. There is no parallel data layer.
+
+// The bundled licence corpus (apps/desktop/licenses/manifest.json via data/bundledLicenses.js)
+// is ~740 kB raw — the single largest module in the app. Simple reaches it from one Settings
+// sub-screen, so it loads on demand instead of riding in every Simple session's static graph.
+const SimpleLicenses = lazyScreen(
+  () => import("./SimpleLicenses.jsx"),
+  "SimpleLicenses",
+  "Licenses",
+);
 
 export const SIMPLE_SCREENS = [
   {
@@ -73,6 +82,7 @@ const TOAST_MS = 1900;
 const PERSIST_DEBOUNCE_MS = 400;
 
 export function SimpleShell({
+  appVersion,
   accent,
   onAccentChange,
   embedWorkflow = true,
@@ -297,44 +307,47 @@ export function SimpleShell({
         style={{ "--su-content-max": contentMaxWidth(breakpoint) }}
       >
         {!phone || drawer ? (
-          <nav aria-label="Primary" className="su-nav su-scroll">
-            <div className="su-brand">
-              <Logo size={30} />
-              <div>
-                <div className="su-brand-name">SceneWorks</div>
-                <div className="su-brand-sub">Simple</div>
-              </div>
-            </div>
-            {SIMPLE_SCREENS.map((group) => (
-              <React.Fragment key={group.group}>
-                <div className="su-nav-group-title">{group.group}</div>
-                <div
-                  className={
-                    group.group === "Studios" ? "su-nav-group su-nav-group--studios" : "su-nav-group"
-                  }
-                >
-                  {group.items.map((item) => {
-                    const IconComponent = item.icon;
-                    return (
-                      <button
-                        aria-current={screen === item.id ? "page" : undefined}
-                        className={screen === item.id ? "su-nav-item active" : "su-nav-item"}
-                        key={item.id}
-                        onClick={() => goTo(item.id)}
-                        type="button"
-                      >
-                        <IconComponent size={group.group === "Studios" ? 19 : 18} />
-                        <span className="su-nav-label">{item.label}</span>
-                        {item.id === "queue" && queueCount ? (
-                          <span className="su-nav-badge">{queueCount}</span>
-                        ) : null}
-                      </button>
-                    );
-                  })}
+          <nav aria-label="Primary" className="su-nav">
+            <div className="su-nav-scroll su-scroll">
+              <div className="su-brand">
+                <Logo size={30} />
+                <div>
+                  <div className="su-brand-name">SceneWorks</div>
+                  <div className="su-brand-sub">Simple</div>
                 </div>
-              </React.Fragment>
-            ))}
+              </div>
+              {SIMPLE_SCREENS.map((group) => (
+                <React.Fragment key={group.group}>
+                  <div className="su-nav-group-title">{group.group}</div>
+                  <div
+                    className={
+                      group.group === "Studios" ? "su-nav-group su-nav-group--studios" : "su-nav-group"
+                    }
+                  >
+                    {group.items.map((item) => {
+                      const IconComponent = item.icon;
+                      return (
+                        <button
+                          aria-current={screen === item.id ? "page" : undefined}
+                          className={screen === item.id ? "su-nav-item active" : "su-nav-item"}
+                          key={item.id}
+                          onClick={() => goTo(item.id)}
+                          type="button"
+                        >
+                          <IconComponent size={group.group === "Studios" ? 19 : 18} />
+                          <span className="su-nav-label">{item.label}</span>
+                          {item.id === "queue" && queueCount ? (
+                            <span className="su-nav-badge">{queueCount}</span>
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </React.Fragment>
+              ))}
+            </div>
             <div className="su-nav-footer">
+              {appVersion}
               <SimpleModeSwitch locked={lockedToSimple} mode="simple" onChange={onModeChange} />
             </div>
           </nav>

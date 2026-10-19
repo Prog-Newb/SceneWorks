@@ -105,9 +105,9 @@ const L_COUNT = "how many images the run asked for";
 const L_UPSCALE = "any upscale settings";
 const L_LORAS = "LoRA names, weights, Hugging Face repo ids and exact content hashes";
 const L_SETTINGS =
-  "the shared generation settings (sampler, scheduler, steps, guidance, strength and the other numeric knobs)";
+  "the shared settings (sampler, scheduler, steps, guidance, strength, other knobs, Veda percentages and attention lists)";
 const L_PASSES =
-  "which optional passes ran — caption upsampling, the PiD decoder and its tier, face restoration — and the control type";
+  "which optional passes ran — caption upsampling, the PiD or alternate decoder and PiD tier, face restoration — and the control type";
 const L_ANGLE = "the head angle or turnaround the run asked for";
 const L_POSES =
   "the pose, hand and face coordinates a pose selection produced — landmark arrays derived from a reference photo, facial landmarks included";
@@ -119,7 +119,10 @@ const L_INPUTS =
 const L_CLIP = "the clip length, frame rate and quality preset a video run asked for";
 const L_MOTION = "the camera-motion preset, and which timeline action produced a clip";
 const L_VIDEO_ENGINE =
-  "which video pipeline, checkpoint variant, text encoder and fast-step recipe a video run used";
+  "which video pipeline, transformer, checkpoint and VAE decoder variants, and fast-step recipe a video run used";
+const L_VIDEO_TIMING =
+  "whether LTX predicted the clip duration, its requested bounds and the temporal-refinement count";
+const L_TEXT_ENCODER = "which text encoder read the prompt";
 const L_OMITTED = "a note naming any list that was too long to record";
 
 // Every field the envelope can carry, and what the copy says about it. Keys prefixed `advanced.`
@@ -151,6 +154,9 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["upscale.factor", L_UPSCALE],
   ["upscale.engine", L_UPSCALE],
   ["upscale.softness", L_UPSCALE],
+  ["upscale.scale", L_UPSCALE],
+  ["upscale.inputSizing", L_UPSCALE],
+  ["upscale.colorFix", L_UPSCALE],
   ["loras[].name", L_LORAS],
   ["loras[].weight", L_LORAS],
   ["loras[].repo", L_LORAS],
@@ -159,6 +165,8 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["advanced.sampler", L_SETTINGS],
   ["advanced.scheduler", L_SETTINGS],
   ["advanced.schedulerShift", L_SETTINGS],
+  ["advanced.cfgInterval", L_SETTINGS],
+  ["advanced.captionOverflow", L_SETTINGS],
   ["advanced.steps", L_SETTINGS],
   ["advanced.guidanceScale", L_SETTINGS],
   ["advanced.guidanceMethod", L_SETTINGS],
@@ -171,7 +179,12 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["advanced.textStyleGain", L_SETTINGS],
   ["advanced.imageGuidanceScale", L_SETTINGS],
   ["advanced.enhancePrompt", L_PASSES],
+  // sc-24113. Grouped with the PASSES rather than the settings: like the PiD decoder beside it, it
+  // selects what comes out of the decode — the model's alpha channel kept rather than composited
+  // over white — not a sampling parameter.
+  ["advanced.transparentBackground", L_PASSES],
   ["advanced.usePid", L_PASSES],
+  ["advanced.decoder", L_PASSES],
   ["advanced.pidTarget", L_PASSES],
   ["advanced.faceRestore", L_PASSES],
   ["advanced.controlMode", L_PASSES],
@@ -189,8 +202,15 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["advanced.timelineAction", L_MOTION],
   ["advanced.ltxPipeline", L_VIDEO_ENGINE],
   ["advanced.distilledVariant", L_VIDEO_ENGINE],
-  ["advanced.textEncoderModel", L_VIDEO_ENGINE],
+  ["advanced.transformerVariant", L_VIDEO_ENGINE],
+  ["advanced.vaeDecoder", L_VIDEO_ENGINE],
+  ["advanced.autoDuration", L_VIDEO_TIMING],
+  ["advanced.autoDurationMinSeconds", L_VIDEO_TIMING],
+  ["advanced.autoDurationMaxSeconds", L_VIDEO_TIMING],
+  ["advanced.temporalUpsampleRounds", L_VIDEO_TIMING],
+  ["advanced.textEncoderModel", L_TEXT_ENCODER],
   ["advanced.lightning", L_VIDEO_ENGINE],
+  ["advanced.veda", L_SETTINGS],
   ["advanced.videoCfgGuidanceScale", L_SETTINGS],
   ["advanced.videoStgGuidanceScale", L_SETTINGS],
   ["advanced.videoRescaleScale", L_SETTINGS],

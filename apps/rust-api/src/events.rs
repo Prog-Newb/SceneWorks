@@ -67,6 +67,7 @@ pub(crate) async fn create_event_ticket(
             .map_err(|error| ApiError {
                 status: StatusCode::UNPROCESSABLE_ENTITY,
                 detail: format!("JSON decode error: {error}"),
+                context: None,
                 code: None,
             })?
             .unwrap_or_default()
@@ -106,6 +107,7 @@ pub(crate) async fn create_event_ticket(
                 "Too many outstanding event tickets; retry after at most \
                  {EVENT_TICKET_TTL_SECONDS} seconds"
             ),
+            context: None,
             code: None,
         })
 }
@@ -237,6 +239,7 @@ pub(crate) async fn job_events(
         .collect::<std::collections::HashSet<_>>();
     jobs.retain(|job| !cleared_job_id_set.contains(&job.id));
     jobs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    let jobs = public_job_snapshots(jobs);
     let initial_jobs = EventMessage {
         event: "jobs.snapshot".to_owned(),
         data: serde_json::to_string(&json!({
@@ -264,12 +267,14 @@ pub(crate) async fn job_events(
     Ok(Sse::new(sse_event_stream(
         messages,
         vec![initial_jobs, initial_queue],
+        state.api_shutdown.clone(),
     )))
 }
 
 fn sse_event_stream(
     messages: ReceiverStream<EventMessage>,
     initial_messages: Vec<EventMessage>,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> impl futures_util::Stream<Item = Result<Event, Infallible>> {
     let mut heartbeat = tokio::time::interval_at(
         TokioInstant::now() + Duration::from_secs(15),
@@ -277,31 +282,44 @@ fn sse_event_stream(
     );
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     futures_util::stream::unfold(
-        (messages, heartbeat, true, initial_messages.into_iter()),
-        |(mut messages, mut heartbeat, send_ready, mut initial_messages)| async move {
+        (
+            messages,
+            heartbeat,
+            true,
+            initial_messages.into_iter(),
+            shutdown,
+        ),
+        |(mut messages, mut heartbeat, send_ready, mut initial_messages, shutdown)| async move {
+            if shutdown.is_cancelled() {
+                return None;
+            }
             if send_ready {
                 return Some((
                     Ok(ready_event()),
-                    (messages, heartbeat, false, initial_messages),
+                    (messages, heartbeat, false, initial_messages, shutdown),
                 ));
             }
             if let Some(initial_message) = initial_messages.next() {
                 return Some((
                     Ok(sse_message_event(initial_message)),
-                    (messages, heartbeat, false, initial_messages),
+                    (messages, heartbeat, false, initial_messages, shutdown),
                 ));
             }
             tokio::select! {
+                () = shutdown.cancelled() => None,
                 message = messages.next() => {
                     message.map(|message| {
                         (
                             Ok(sse_message_event(message)),
-                            (messages, heartbeat, false, initial_messages),
+                            (messages, heartbeat, false, initial_messages, shutdown),
                         )
                     })
                 }
                 _ = heartbeat.tick() => {
-                    Some((Ok(heartbeat_event()), (messages, heartbeat, false, initial_messages)))
+                    Some((
+                        Ok(heartbeat_event()),
+                        (messages, heartbeat, false, initial_messages, shutdown),
+                    ))
                 }
             }
         },

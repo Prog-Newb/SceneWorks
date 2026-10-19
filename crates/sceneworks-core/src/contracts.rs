@@ -157,6 +157,14 @@ string_enum! {
         ProceduralPreview => "procedural_preview",
         ZImageDiffusers => "z_image_diffusers",
         QwenImage => "qwen_image",
+        // sc-24108: Qwen-Image 2.1 stamps its own adapter id rather than reusing `qwen_image`.
+        // The recipe records which weights produced an asset, and 2.1's snapshot, latent space
+        // and licence are all different from 2512's — a shared stamp would make the two
+        // indistinguishable on replay.
+        QwenImage21 => "qwen_image_2_1",
+        // sc-25907: the distilled Turbo checkpoint stamps its own id for the same reason — its
+        // weights are not base's, so a replayed asset must say which of the two produced it.
+        QwenImage21Turbo => "qwen_image_2_1_turbo",
         LensTurbo => "lens_turbo",
         SenseNovaU1 => "sensenova_u1",
         FluxDiffusers => "flux_diffusers",
@@ -214,6 +222,9 @@ string_enum! {
         ImageEdit => "image_edit",
         ImageVqa => "image_vqa",
         ImageInterleave => "image_interleave",
+        // Vector Studio generation. Request mode is carried in the typed payload and routed to a
+        // mode-specific worker capability before claim.
+        VectorGenerate => "vector_generate",
         VideoGenerate => "video_generate",
         VideoExtend => "video_extend",
         VideoBridge => "video_bridge",
@@ -253,6 +264,12 @@ string_enum! {
         // through MLX on macOS and Candle/CUDA off-Mac (zero-Python, the box-PVS path of
         // the sc-4926 SAM3 stack); GPU-required like generation.
         ImageSegment => "image_segment",
+        // Monocular depth of an existing image asset (Image Editor + Library, Iris-3B epic 25678 /
+        // sc-25682): the `iris_3b_depth` task export predicts a float32 HxW relative-log-depth map
+        // at the EXIF-corrected source size, persisted as a `depth` asset (raw `.npy` + a separate
+        // derived preview PNG). Native MLX on macOS and Candle/CUDA off-Mac; GPU-required like
+        // generation.
+        ImageDepth => "image_depth",
         // Standalone upscale of an existing VIDEO asset (Video Studio, epic 4811 /
         // sc-4816) — SceneWorks' first video upscaler. Native-MLX SeedVR2 one-step
         // super-resolution on the macOS Rust worker (zero-Python, epic 3482): decode
@@ -304,6 +321,13 @@ string_enum! {
         // embedding + its frame fraction → the face sidecar. GPU-routed like dataset_analysis (the
         // native SCRFD+ArcFace stack), served by the Rust/MLX worker.
         DatasetFaceAnalysis => "dataset_face_analysis",
+        // Subject-mask generation over a training dataset (epic 2123, sc-2126): SAM3 "person"
+        // segmentation of every image, unioned over every detected person, POSTed to the dataset's
+        // content-hash-keyed mask sidecar (`training_subject_masks`) for the masked-loss trainer.
+        // GPU-routed; it has NO dedicated worker capability — it requires `image_segment`, the
+        // SAM3 capability the same native MLX/Candle workers already advertise (see
+        // jobs_store::required_capability), so it routes exactly where smart-select does.
+        DatasetSubjectMask => "dataset_subject_mask",
         // On-demand identity-likeness compare of two existing assets (epic 4406, sc-4415): a SOURCE
         // identity reference asset + a CANDIDATE asset, scored through the shared SCRFD+ArcFace
         // face-likeness scorer (face_likeness.rs) and returned as the standard
@@ -331,6 +355,10 @@ string_enum! {
         // stranded row to `queued` (see jobs_store::mark_interrupted_on_startup), so it can
         // never sit un-claimable forever.
         PendingCaption => "pending_caption",
+        // Accepted but not worker-claimable while an API-owned multi-job workflow waits for its
+        // prerequisite asset. Unlike pending_caption, restart recovery resumes the coordinator and
+        // never degrades this row directly to queued.
+        PendingWorkflow => "pending_workflow",
         Preparing => "preparing",
         Downloading => "downloading",
         LoadingModel => "loading_model",
@@ -349,6 +377,7 @@ string_enum! {
         // Stage twin of JobStatus::PendingCaption (sc-9120): the job is awaiting the
         // API-side async payload rewrite (Ideogram 4 auto-caption) before it becomes queued.
         PendingCaption => "pending_caption",
+        PendingWorkflow => "pending_workflow",
         Preparing => "preparing",
         Downloading => "downloading",
         Importing => "importing",
@@ -401,6 +430,10 @@ string_enum! {
         ImageEdit => "image_edit",
         ImageVqa => "image_vqa",
         ImageInterleave => "image_interleave",
+        // Native StarVector providers advertise modes independently. A worker that implements only
+        // raster vectorization must never claim a text_to_svg job (or vice versa).
+        VectorImageToSvg => "vector_image_to_svg",
+        VectorTextToSvg => "vector_text_to_svg",
         VideoGenerate => "video_generate",
         VideoExtend => "video_extend",
         VideoBridge => "video_bridge",
@@ -449,6 +482,10 @@ string_enum! {
         // SAM3 MLX worker on macOS and the native SAM3 Candle worker on CUDA hosts. See
         // jobs_store::job_requires_gpu and the backend routing predicates.
         ImageSegment => "image_segment",
+        // Iris-3B monocular depth (Image Editor + Library, sc-25682). Advertised by the native MLX
+        // worker on macOS and the Candle worker off-Mac when the Iris depth provider is linked.
+        // See jobs_store::job_requires_gpu.
+        ImageDepth => "image_depth",
         // Standalone VIDEO upscale (Video Studio, epic 4811 / sc-4816). Advertised by
         // the macOS Rust/MLX worker and the off-Mac candle/CUDA worker (native
         // SeedVR2, zero-Python). GPU-required. See jobs_store::worker_supports_job.
@@ -527,6 +564,7 @@ string_enum! {
         Upload => "upload",
         Frame => "frame",
         Render => "render",
+        Vector => "vector",
         // An interleaved text-image document (SenseNova-U1). The asset's `file`
         // points to an InterleavedDocument JSON in assets/documents/; the images it
         // references are ordinary `image` assets. See sc-1576.
@@ -535,6 +573,11 @@ string_enum! {
         // points to the rendered skeleton preview; keypoints/hands/face + category live
         // in the sidecar's `pose` field. Stored under a reserved global poses project.
         Pose => "pose",
+        // A monocular depth map (Iris-3B, sc-25682). The asset's `file` is the RAW float32
+        // row-major `<f4` `.npy` (HxW relative log depth at the EXIF-corrected source size, never
+        // rewritten); `preview` points at a separately stored derived PNG; the sidecar's `depth`
+        // block carries the value convention, preprocessing and model/config identity.
+        Depth => "depth",
     }
 }
 
@@ -741,6 +784,29 @@ impl ImageUpscaleRequest {
             .and_then(Value::as_f64)
             .map(|value| value.clamp(0.0, 1.0) as f32)
             .unwrap_or(0.0)
+    }
+
+    /// Whether this block selects the Iris-3B restoration engine (sc-25683).
+    pub fn is_iris(&self) -> bool {
+        crate::image_restoration::is_iris_engine(&self.engine)
+    }
+
+    /// The Iris-only controls (`scale` / `inputSizing` / `colorFix`) carried in the flattened
+    /// extras, as a JSON object for [`crate::image_restoration`]'s shared parse.
+    pub fn iris_controls(&self) -> JsonObject {
+        crate::image_restoration::IRIS_ONLY_KEYS
+            .iter()
+            .filter_map(|key| {
+                self.extra
+                    .get(*key)
+                    .map(|value| ((*key).to_owned(), value.clone()))
+            })
+            .collect()
+    }
+
+    /// The parsed Iris restoration controls (a typed refusal for a malformed one).
+    pub fn iris_params(&self) -> Result<crate::image_restoration::IrisRestoreParams, String> {
+        crate::image_restoration::parse_iris_restore_params(&self.iris_controls())
     }
 }
 
@@ -1057,12 +1123,42 @@ pub struct JobSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationMetrics {
+    /// Provider-owned post-generation H3 attention observations; absent on historical/unadopted jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub veda_execution: Option<Value>,
     // --- resolved effective settings ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Normalized quant label: "bf16" / "q8" / "q4" / "int8-convrot".
+    /// Normalized quant label: "bf16" / "q8" / "q4" / "int8-convrot" / "nvfp4".
+    ///
+    /// This is the **request/tier** identity — which variant was selected. It is deliberately NOT
+    /// the answer to "what did this host execute": a checkpoint stored NVFP4 reports
+    /// `quantLabel: "nvfp4"` on a pre-Blackwell box too, where the run took the dense BF16
+    /// fallback. Read [`Self::execution_representation`] for what actually ran (sc-21484).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quant_label: Option<String>,
+    /// The **source codec** the checkpoint's weights are stored in — the engine's stable codec id
+    /// (`"nvfp4-v1"`, `"int8-per-row-v1"`, `"dense-bf16-v1"`, …), never a tier spelling
+    /// (sc-21484, epic 11037).
+    ///
+    /// A device-independent fact about the artifact: the same file reports the same value on
+    /// `sm_120`, on datacenter `sm_100`, on a pre-Blackwell GPU, on a Mac and on CPU. `None` when
+    /// the run's source shape has no single classified codec (a diffusers tree, a builtin turnkey
+    /// tier) or when SceneWorks' classification has no proved engine codec for it — never a
+    /// fallback to the tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_codec: Option<String>,
+    /// What this host **actually materialized** the source codec as: `"native-packed"` (the stored
+    /// packing was the execution operand — NVFP4 W4A4) or `"dense-fallback"` (the stored bytes were
+    /// decoded to dense BF16 and executed dense). The engine's stable
+    /// `ExecutionRepresentation::label()` strings (sc-21484, epic 11037).
+    ///
+    /// `None` means **not measured**, which is neither of the two. Nothing derives this from the
+    /// host's capability or from [`Self::source_codec`]: a host that *could* run packed may still
+    /// have taken the dense path for a reason only the load receipt knows, so an absent receipt
+    /// stays absent rather than being filled in from what was likely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_representation: Option<String>,
     /// Quant bit-width (16 / 8 / 4); None for non-bits tiers like ConvRot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quant_bits: Option<u32>,
@@ -1234,6 +1330,10 @@ pub struct DuplicateJobRequest {
 pub struct RetryJobRequest {
     #[serde(default)]
     pub payload_changes: JsonObject,
+    /// Training jobs only (sc-25785): `true` resumes the job's plan from its latest checkpoint,
+    /// `false` restarts it from step 0; absent keeps the plan's own `advanced.resume`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<bool>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -1284,6 +1384,29 @@ pub struct CancelPendingJobsRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CancelPendingJobsResponse {
     pub canceled: usize,
+    pub jobs: Vec<JobSnapshot>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+/// Body for `POST /api/v1/jobs/prioritize` — move selected jobs that have not started to the
+/// front of the durable worker queue. The API caps the collection size; unknown, active, and
+/// terminal ids are harmlessly ignored so a selection racing a worker claim cannot preempt it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrioritizeJobsRequest {
+    pub job_ids: Vec<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+/// Response for `POST /api/v1/jobs/prioritize`: the snapshots whose queue ranks changed, in their
+/// preserved relative scheduling order. Returning the snapshots lets the acting client reorder
+/// immediately while the same updates fan out over SSE to every other Queue screen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrioritizeJobsResponse {
+    pub prioritized: usize,
     pub jobs: Vec<JobSnapshot>,
     #[serde(flatten)]
     pub extra: ExtraFields,
@@ -1748,6 +1871,11 @@ pub struct ModelDownload {
     /// through the contract type rather than the `extra` bag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_id: Option<String>,
+    /// Exact identity of a pinned single-file artifact, enforced beyond HF metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_size_bytes: Option<u64>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

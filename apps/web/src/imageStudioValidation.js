@@ -13,11 +13,20 @@ import { MAX_IMAGE_DIMENSION, MIN_IMAGE_DIMENSION } from "./resolutionOverride.j
 import { promptBudget } from "./styleComposer.js";
 import { issue } from "./validation/issues.js";
 
-export function batchPromptBudgetOverages(composedPrompts = []) {
-  return composedPrompts.flatMap((prompt, index) => {
+// `limit` lets a streaming caller stop after the first actionable violation instead
+// of retaining an entry for every member of a very large batch.
+export function batchPromptBudgetOverages(composedPrompts = [], limit = Infinity) {
+  const overages = [];
+  let index = 0;
+  for (const prompt of composedPrompts) {
     const budget = promptBudget(prompt);
-    return budget.over ? [{ item: index + 1, ...budget }] : [];
-  });
+    if (budget.over) {
+      overages.push({ item: index + 1, ...budget });
+      if (overages.length >= limit) break;
+    }
+    index += 1;
+  }
+  return overages;
 }
 
 export function batchPromptBudgetMessage(overages = []) {
@@ -25,6 +34,24 @@ export function batchPromptBudgetMessage(overages = []) {
   return `Batch prompt${overages.length === 1 ? "" : "s"} ${items} exceed${
     overages.length === 1 ? "s" : ""
   } the character limit — shorten the prompt or pick a shorter style.`;
+}
+
+// The Iris restoration post-processing gate (sc-25683), shared by Generate and the batch Run: a
+// refused plan blocks with its reason (the request is never silently changed); a still-loading
+// preview is a silent requirement. `restorePlan` is null when no Iris pass is selected.
+function restorePlanIssues(restorePlan) {
+  if (restorePlan?.blocked) {
+    return [
+      issue.error(
+        "upscale",
+        restorePlan.error ? `Iris restoration cannot run: ${restorePlan.error}` : "Iris restoration cannot run as set.",
+      ),
+    ];
+  }
+  if (restorePlan && !restorePlan.ready) {
+    return [issue.requirement("upscale", "Planning the Iris restoration…")];
+  }
+  return [];
 }
 
 // Single-image Generate. The conditions whose message already has a home stay OUT of
@@ -62,11 +89,23 @@ export function imageGenerateValidation({
   // (or null) — a value the user actively broke that nothing else on the form explains, so it blocks
   // Generate AND is surfaced. Null/absent leaves the gate unchanged for every other model.
   dimensionError = null,
+  // More ordered references than the selected model declares (`limits.maxReferenceAssets`,
+  // sc-25908). A pre-computed, user-facing ERROR string (or null): the enqueue gate 400s the
+  // request, so the dead Generate button must say why before the click.
+  referenceOverflowError = null,
+  // A restored alternate decoder cannot be reconciled or safely omitted until the platform
+  // capability response identifies the active engine. Native selections never set this gate.
+  decoderCapabilitiesPending = false,
+  // Iris restoration post-processing (sc-25683): the planner preview's status when the Upscale pass
+  // uses the Iris engine, else null. A refused plan blocks Generate with its reason (the request is
+  // never silently changed); a still-loading preview is a silent requirement.
+  restorePlan = null,
 } = {}) {
   const issues = [];
   if (!activeProject) {
     issues.push(issue.requirement("project", "Open a project to generate"));
   }
+  issues.push(...restorePlanIssues(restorePlan));
   // A structured model needs caption content; everyone else a plain prompt. Both are
   // "you haven't written it yet" — silent, the empty field speaks for itself.
   if (structuredActive) {
@@ -115,6 +154,17 @@ export function imageGenerateValidation({
   if (dimensionError) {
     issues.push(issue.error(null, dimensionError));
   }
+  if (referenceOverflowError) {
+    issues.push(issue.error("references", referenceOverflowError));
+  }
+  if (decoderCapabilitiesPending) {
+    issues.push(
+      issue.error(
+        "decoder",
+        "Waiting for engine capabilities before using the restored decoder.",
+      ),
+    );
+  }
   return issues;
 }
 
@@ -148,11 +198,17 @@ export function imageBatchValidation({
   // (Mage-Flow) narrows the batch check to its own range + ÷16 stride, while every other model keeps the
   // global 256–4096 / no-stride envelope. Defaults to that global envelope for callers with no model.
   dimensionConstraints = { min: MIN_IMAGE_DIMENSION, max: MAX_IMAGE_DIMENSION, step: 1 },
+  decoderCapabilitiesPending = false,
+  // The Iris restoration post-processing plan status for EVERY distinct render size of the batch
+  // (each prompt's own [WxH] directive or the Studio size), else null — a batch whose prompts would
+  // be refused after their base image renders never starts.
+  restorePlan = null,
 } = {}) {
   const issues = [];
   if (!activeProject) {
     issues.push(issue.requirement("project", "Open a project to run a batch"));
   }
+  issues.push(...restorePlanIssues(restorePlan));
   if (batchStructuredExpandBlocked) {
     issues.push(
       issue.error(
@@ -177,6 +233,14 @@ export function imageBatchValidation({
   }
   if (promptBudgetOverages.length) {
     issues.push(issue.error(null, batchPromptBudgetMessage(promptBudgetOverages)));
+  }
+  if (decoderCapabilitiesPending) {
+    issues.push(
+      issue.error(
+        "decoder",
+        "Waiting for engine capabilities before using the restored decoder.",
+      ),
+    );
   }
   if (batchTotal === 0) {
     issues.push(issue.requirement("prompts", "Add at least one prompt to run a batch."));

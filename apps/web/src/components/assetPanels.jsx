@@ -1,3 +1,4 @@
+import { AssetVedaOutcome } from "./VedaOutcome.jsx";
 import React from "react";
 import { isAbortError } from "../api.js";
 import { appConfirm } from "../appConfirm.jsx";
@@ -11,6 +12,7 @@ import {
   assetCanRenderAsAudio,
   assetCanRenderAsVideo,
   assetUrl,
+  isVectorAsset,
   suppressThumbnailContextMenu,
 } from "./assetMedia.jsx";
 import {
@@ -26,8 +28,11 @@ import { audioAssetMetaLine, audioAssetRunGroups, formatClock } from "../audioTa
 import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
+import { AudioTrackBadge, assetHasAudioTrack } from "./AudioTrackBadge.jsx";
+import { ModelAttribution } from "./ModelAttribution.jsx";
 import { Modal } from "./Modal.jsx";
 import { assetImportedWorkflow } from "../workflowShare.js";
+import { depthAssetDetails, isDepthAsset } from "../depthJobs.js";
 
 // Zoom/pan model for the fullscreen image preview (sc-8728). Mirrors the Image
 // Editor canvas convention (`view = { scale, x, y }`, ImageEditor.jsx): `scale`
@@ -608,6 +613,8 @@ export function AssetDetail({
   createVqaJob,
   audioModels = [],
   audioPlayer = null,
+  // sc-25682: open the depth action for this image (absent when depth cannot run here).
+  onEstimateDepth = null,
 }) {
   if (!asset) {
     return <aside className="asset-detail empty-panel">No asset selected</aside>;
@@ -624,6 +631,8 @@ export function AssetDetail({
       ) : (
         <button className="preview-button" onClick={() => onPreview(asset)} type="button">
           <AssetMedia asset={asset} />
+          <AudioTrackBadge asset={asset} />
+          <AssetVedaOutcome asset={asset} />
         </button>
       )}
       <h3>{asset.displayName}</h3>
@@ -653,21 +662,57 @@ export function AssetDetail({
               Send to Editor
             </button>
           ) : null}
+          {onEstimateDepth && asset.type === "image" ? (
+            <button onClick={() => onEstimateDepth(asset)} type="button">
+              Estimate depth
+            </button>
+          ) : null}
+          {isDepthAsset(asset) ? (
+            <a className="button" download href={assetUrl(asset)}>
+              Download raw depth (.npy)
+            </a>
+          ) : null}
         </AssetStatusActions>
       </div>
       <dl>
         <div>
           <dt>Model</dt>
-          <dd>{asset.recipe?.model ?? "Unknown"}</dd>
+          <dd>
+            {asset.recipe?.model ?? "Unknown"}
+            {/* Licence-required attribution (sc-17227 §IV.2, sc-17161). The asset detail is where
+                a finished render is inspected and shared from, so the obligation reaches it too.
+                `recipe.model` is an id and is never joined back to the catalog, so the component
+                resolves it; an unknown id or a model that declares none renders nothing. */}
+            <ModelAttribution modelId={asset.recipe?.model ?? ""} />
+          </dd>
         </div>
         <div>
           <dt>Duration</dt>
           <dd>{asset.file?.duration ? `${asset.file.duration}s` : "Still"}</dd>
         </div>
+        {/* sc-19577. The detail panel is the one surface with room to spell out the difference
+            between "measured, and silent" and "never measured", so it renders the row only when the
+            worker recorded a verdict — and shows "No" for a genuinely silent render rather than
+            hiding it. The compact badge above answers the positive case at a glance; this row is
+            what makes a t2va job that produced no soundtrack legible instead of ambiguous. */}
+        {assetHasAudioTrack(asset) !== null ? (
+          <div>
+            <dt>Audio</dt>
+            <dd>{assetHasAudioTrack(asset) ? "Yes" : "No"}</dd>
+          </div>
+        ) : null}
         <div>
           <dt>Generation set</dt>
           <dd>{asset.generationSetId ?? "None"}</dd>
         </div>
+        {/* sc-25682: a reloaded depth map states what its values are, where it came from and how it
+            was made — read from the persisted sidecar, not from the job that produced it. */}
+        {depthAssetDetails(asset).map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
       </dl>
       {vqaEnabled && asset.type === "image" ? (
         <VqaPanel asset={asset} entries={vqaEntries} pending={vqaPending} onAsk={createVqaJob} />
@@ -685,6 +730,8 @@ export function AssetCard({ asset, deleteAsset, purgeAsset, onPreview, updateAss
       <button className="preview-button" onClick={() => onPreview(asset)} onContextMenu={suppressThumbnailContextMenu} type="button">
         <AssetMedia asset={asset} />
         <LikenessBadge asset={asset} />
+        <AudioTrackBadge asset={asset} />
+          <AssetVedaOutcome asset={asset} />
       </button>
       <div className="review-actions">
         <AssetStatusActions
@@ -919,7 +966,7 @@ function FullscreenPreviewComponent({
   // the "and nowhere else" half: no envelope, no button.
   const hasRecordedRecipe = Boolean(
     onUseRecipe &&
-      ["image", "video"].includes(asset.type) &&
+      ["image", "video", "vector"].includes(asset.type) &&
       (asset.generationSet?.recipe || asset.recipe),
   );
   // `asset.type === "image"` rather than the sibling's `["image", "video"]`: this button launches
@@ -956,6 +1003,13 @@ function FullscreenPreviewComponent({
   const compareActive = canCompare && compareMode;
 
   const viewportRef = React.useRef(null);
+  // Compare mode replaces the zoom viewport instead of merely hiding it. Keep the
+  // mounted node in state so the native wheel listener follows that replacement.
+  const [viewportNode, setViewportNode] = React.useState(null);
+  const setViewportRef = React.useCallback((node) => {
+    viewportRef.current = node;
+    setViewportNode(node);
+  }, []);
   const [view, setView] = React.useState(PREVIEW_FIT_VIEW);
   const dragRef = React.useRef(null);
 
@@ -987,7 +1041,7 @@ function FullscreenPreviewComponent({
   // Wheel-to-zoom anchored at the cursor. Native (non-passive) listener so we can
   // preventDefault the page scroll; React's onWheel is passive in some browsers.
   React.useEffect(() => {
-    const node = viewportRef.current;
+    const node = viewportNode;
     if (!node || isVideo) {
       return undefined;
     }
@@ -1000,7 +1054,7 @@ function FullscreenPreviewComponent({
     };
     node.addEventListener("wheel", onWheel, { passive: false });
     return () => node.removeEventListener("wheel", onWheel);
-  }, [isVideo, displayedAsset?.id]);
+  }, [isVideo, displayedAsset?.id, viewportNode]);
 
   const onPointerDown = (event) => {
     if (view.scale <= PREVIEW_MIN_SCALE) {
@@ -1155,10 +1209,10 @@ function FullscreenPreviewComponent({
         items.push({ key: "fit", label: "Fit to View", onSelect: fitToView });
       }
       const submenuItems = [];
-      if (onEditImage) {
+      if (onEditImage && !isVectorAsset(asset)) {
         submenuItems.push({ key: "image-editor", label: "Image Editor", onSelect: () => onEditImage(asset) });
       }
-      if (onEditInStudio) {
+      if (onEditInStudio && !isVectorAsset(asset)) {
         submenuItems.push({ key: "image-studio", label: "Image Studio", onSelect: () => onEditInStudio(asset) });
       }
       const submenu = submenuItems.length ? { label: "Edit in", items: submenuItems } : null;
@@ -1214,7 +1268,7 @@ function FullscreenPreviewComponent({
             <Icon.ArrowLeft size={18} />
           </button>
           {compareActive ? (
-            <div className="preview-compare" role="group" aria-label="Original and edited image side by side">
+            <div className="preview-compare" key="compare-viewport" role="group" aria-label="Original and edited image side by side">
               <figure className="preview-compare-pane">
                 <AssetMedia asset={sourceAsset} controls={false} />
                 <figcaption>Original</figcaption>
@@ -1229,11 +1283,12 @@ function FullscreenPreviewComponent({
           ) : (
             <div
               className={`preview-zoom-viewport${zoomed ? " zoomed" : ""}`}
+              key="zoom-viewport"
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={endDrag}
               onPointerCancel={endDrag}
-              ref={viewportRef}
+              ref={setViewportRef}
             >
               <div
                 className="preview-zoom-inner"
@@ -1244,6 +1299,8 @@ function FullscreenPreviewComponent({
             </div>
           )}
           <LikenessBadge asset={asset} />
+          <AudioTrackBadge asset={asset} />
+          <AssetVedaOutcome asset={asset} />
           <button
             aria-label="Next asset"
             className="preview-nav-button next"

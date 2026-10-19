@@ -1,5 +1,5 @@
 import React from "react";
-import { AssetMedia, assetCanRenderAsVideo } from "../assetMedia.jsx";
+import { AssetMedia, assetCanRenderAsAudio, assetCanRenderAsVideo } from "../assetMedia.jsx";
 import { Icon } from "../Icons.jsx";
 
 // The center program monitor (design 2a, epic 12798): the 16:9/9:16/1:1 preview of the
@@ -8,6 +8,7 @@ import { Icon } from "../Icons.jsx";
 // the forwarded video ref; the play/pause events flip the screen's isPlaying state.
 export function ProgramMonitor({
   selectedAsset,
+  canPlayTimeline = false,
   aspectClass,
   clipLabel,
   isAi,
@@ -21,7 +22,8 @@ export function ProgramMonitor({
   onPause,
   onEnded,
 }) {
-  const canPlay = assetCanRenderAsVideo(selectedAsset);
+  const isAudio = assetCanRenderAsAudio(selectedAsset);
+  const canPlay = canPlayTimeline || assetCanRenderAsVideo(selectedAsset) || isAudio;
 
   return (
     <div className="ve-monitor">
@@ -32,6 +34,8 @@ export function ProgramMonitor({
               asset={selectedAsset}
               className="ve-program-media"
               controls={false}
+              // TimelineAudio owns all audible layers, including picture audio.
+              muted
               onEnded={onEnded}
               onPause={onPause}
               onPlay={onPlay}

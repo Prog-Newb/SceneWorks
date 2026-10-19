@@ -3,6 +3,7 @@
 // verbatim so the per-Studio availability gates and the screens themselves agree on
 // exactly which models qualify. Predicates are capability + Mac-gating only (no install
 // state) — callers layer installState via the helpers at the bottom.
+import { candleModelBlock, candleVideoModeBlock } from "./candleGating.js";
 import { macModelBlock, macModelFeatureBlock, macVideoModeBlock } from "./macGating.js";
 import { POSE_DETECT_MODEL_ID, VISION_CAPTION_MODEL_ID } from "./constants.js";
 
@@ -27,6 +28,41 @@ export const VIDEO_MODES = [
 
 // Audio generation modes the Audio Studio exposes (epic 13400 C0/C1 mirror these keys).
 export const AUDIO_MODES = ["speech", "music", "sfx", "voiceclone"];
+
+// Vector Studio modes. A manifest must declare the mode and the selected native backend provider;
+// install state is evaluated separately so a missing-but-eligible model can be offered for download.
+export const VECTOR_MODES = ["image_to_svg", "text_to_svg"];
+
+export function vectorModelServesMode(model, mode, caps) {
+  if (model?.type !== "vector" || !VECTOR_MODES.includes(mode) || !model?.capabilities?.includes(mode)) {
+    return false;
+  }
+  const backend = caps?.platform === "macos" || caps?.platform === "darwin" ? "mlx" : "candle";
+  return model?.vector?.providers?.[backend]?.available === true;
+}
+
+export function vectorModelAvailability(model, mode, caps) {
+  if (model?.type !== "vector" || !VECTOR_MODES.includes(mode) || !model?.capabilities?.includes(mode)) {
+    return { available: false, reason: "unsupported_mode" };
+  }
+  const backend = caps?.platform === "macos" || caps?.platform === "darwin" ? "mlx" : "candle";
+  const provider = model?.vector?.providers?.[backend];
+  if (provider?.available !== true) {
+    return { available: false, reason: provider?.reason ?? "provider_not_linked", backend };
+  }
+  if (model?.installState !== "installed" || model?.cacheState !== "complete") {
+    return {
+      available: false,
+      reason: model?.cacheState === "incomplete" ? "model_incomplete" : "model_missing",
+      backend,
+    };
+  }
+  return { available: true, reason: null, backend, providerId: provider.id };
+}
+
+export function vectorModelUsable(model, caps) {
+  return model?.type === "vector" && VECTOR_MODES.some((mode) => vectorModelServesMode(model, mode, caps));
+}
 
 // Conditioning kinds that mark a voice-clone (voice-conversion / speaker-embedding) model —
 // distinct from ACE-Step's "AudioEdit" conditioning, which is a music-editing signal, not a
@@ -68,16 +104,45 @@ export function imageModelUsable(model, caps) {
   );
 }
 
-// Video Studio — mirrors VideoStudio.jsx `modelServesMode`.
+// Video Studio — the ONE authority for "does this model serve this mode?" (VideoStudio.jsx imports
+// it rather than keeping the local copy it used to have; two copies is how one platform's gate got
+// added and the other's did not).
+//
+// Three conjuncts, one per layer of the reachability question (sc-19570):
+//   * the model DECLARES the mode (the manifest capability), and
+//   * under active Mac gating, MLX claims it for this model (`macVideoModeBlock`), and
+//   * under active off-Mac gating, candle claims it for this model (`candleVideoModeBlock`).
+// The two platform blocks are mutually exclusive and each is a no-op on the other's platform, so AT
+// MOST one of them can ever fire.
+//
+// ⚠️ NOT "exactly one", and declaration alone is NOT "never again the whole answer" — this comment
+// asserted both and each is false in the same two states, where NEITHER block fires and this
+// function collapses back to `capabilities.includes(mode)`:
+//   1. Before `GET /api/v1/capabilities/mac` responds. `DEFAULT_MAC_CAPABILITIES` sets both
+//      `macGatingActive` and `candleGatingActive` false, so both helpers short-circuit to "not
+//      blocked" on every platform. Every consumer of this predicate renders at least one pass in
+//      that window.
+//   2. On a Mac in observe mode, permanently. `macGatingActive` is the SCENEWORKS_MLX_REQUIRED
+//      rollout flag rather than a fact about the host, and `candleGatingActive` is `!is_mac`, so a
+//      Mac with the flag off has neither.
+// Both are deliberate — a client that has not been told what it is running on must not invent a
+// gate — but a reader who believes the stronger claim will look for a bug that is not there.
 export function videoModelServesMode(model, mode, caps) {
-  return Boolean(model?.capabilities?.includes(mode)) && !macVideoModeBlock(model, caps, mode);
+  return (
+    Boolean(model?.capabilities?.includes(mode)) &&
+    !macVideoModeBlock(model, caps, mode) &&
+    !candleVideoModeBlock(model, caps, mode)
+  );
 }
 
-// Usable on Video Studio: a video-type model that isn't Mac-blocked and serves ≥1 mode.
+// Usable on Video Studio: a video-type model that isn't platform-blocked and serves ≥1 mode.
 export function videoModelUsable(model, caps) {
+  const platform = caps?.platform ?? "";
   return (
     model?.type === "video" &&
     !macModelBlock(model, caps) &&
+    !candleModelBlock(model, caps) &&
+    !(model?.macOnly === true && platform !== "macos") &&
     VIDEO_MODES.some((mode) => videoModelServesMode(model, mode, caps))
   );
 }
@@ -91,11 +156,20 @@ export function videoModelUsable(model, caps) {
 //                  MOSS-TTSD, sc-13676). A streaming / multi-speaker TTS has no fixed voice list (it
 //                  speaks in its own voice(s)), so that capability is its speech signal — never a
 //                  hardcoded id.
-//   * music      — advertises audio-editing ops (audio.editModes[]: inpaint/repaint/extend). → ACE-Step.
+//   * music      — advertises audio-editing ops (audio.editModes[]: inpaint/repaint/extend) → ACE-Step,
+//                  OR sings segmented lyrics (audio.supportsSegmentedLyrics → the six YuE lyrics2song
+//                  checkpoints, sc-19383). A lyrics-to-song model has no edit surface, so the lyrics
+//                  capability is its music signal; without it YuE CoT would fall through to sfx.
 //   * voiceclone — conditions on a reference / speaker-identity embedding
 //                  (audio.conditioning ⊇ ReferenceAudio | VoiceEmbedding). → OpenVoice V2, Chatterbox-VE.
 //                  ACE-Step's conditioning is "AudioEdit" (a music-edit signal), so it does NOT match.
+//                  YuE ICL's ReferenceAudio is a SONG prompt (a lyrics2song model), not a voice to clone,
+//                  so a model that sings segmented lyrics never serves voiceclone.
 //   * sfx        — a general text-to-audio generator (audio.sampleRates[]) that is none of the above. → MOSS.
+// A model that plans a SYMBOLIC SONG (audio.supportsSymbolicSong → YuE2, sc-22998) serves none of
+// the four: its request is a style + lyrics + score plan with a decoder choice, which none of these
+// modes builds, and it would otherwise fall through to sfx on its sample rate alone. It is surfaced
+// by its own experimental surface (sc-23000), never through an existing mode.
 function audioBlock(model) {
   return model?.audio && typeof model.audio === "object" ? model.audio : null;
 }
@@ -121,6 +195,11 @@ function audioHasEditModes(audio) {
   return Array.isArray(audio?.editModes) && audio.editModes.length > 0;
 }
 
+// A lyrics-to-song model (backend Capabilities.supports_segmented_lyrics — YuE, sc-19383).
+function audioSingsSegmentedLyrics(audio) {
+  return audio?.supportsSegmentedLyrics === true;
+}
+
 function audioGenerates(audio) {
   // A generative (text→waveform) model advertises the sample rates it emits.
   return Array.isArray(audio?.sampleRates) && audio.sampleRates.length > 0;
@@ -131,19 +210,23 @@ function audioHasVoiceCloneConditioning(audio) {
   return conditioning.some((kind) => VOICE_CLONE_CONDITIONING.has(String(kind).toLowerCase()));
 }
 
+function audioPlansSymbolicSong(audio) {
+  return audio?.supportsSymbolicSong === true;
+}
+
 export function audioModelServesMode(model, mode) {
   const audio = audioBlock(model);
-  if (!audio) {
+  if (!audio || audioPlansSymbolicSong(audio)) {
     return false;
   }
   if (mode === "speech") {
     return audioHasVoices(audio) || audioSupportsStreaming(audio) || audioSupportsMultiSpeaker(audio);
   }
   if (mode === "music") {
-    return audioHasEditModes(audio);
+    return audioHasEditModes(audio) || audioSingsSegmentedLyrics(audio);
   }
   if (mode === "voiceclone") {
-    return audioHasVoiceCloneConditioning(audio);
+    return audioHasVoiceCloneConditioning(audio) && !audioSingsSegmentedLyrics(audio);
   }
   if (mode === "sfx") {
     return (
@@ -152,6 +235,7 @@ export function audioModelServesMode(model, mode) {
       !audioSupportsStreaming(audio) &&
       !audioSupportsMultiSpeaker(audio) &&
       !audioHasEditModes(audio) &&
+      !audioSingsSegmentedLyrics(audio) &&
       !audioHasVoiceCloneConditioning(audio)
     );
   }
@@ -223,7 +307,11 @@ export function angleModelUsable(model, caps) {
 }
 
 export function poseModelUsable(model, caps) {
-  return !macModelBlock(model, caps) && Boolean(model?.ui?.poseLibrary);
+  return (
+    !macModelBlock(model, caps) &&
+    !macModelFeatureBlock(model, caps, "pose") &&
+    Boolean(model?.ui?.poseLibrary)
+  );
 }
 
 // Strict-control modes the selected backbone advertises (sc-8245). The single source of truth is the
@@ -297,7 +385,11 @@ export function missingRequiredModels(models, ids) {
 // installed model so every screen has at least the models that would unlock it.
 export function downloadOffersFor(models, predicate, caps) {
   const eligible = (models ?? []).filter(
-    (model) => model?.installState !== "installed" && predicate(model, caps),
+    (model) =>
+      model?.installState !== "installed" &&
+      model?.usable !== false &&
+      model?.downloadable !== false &&
+      predicate(model, caps),
   );
   const recommended = eligible.filter((model) => model?.recommended === true);
   return recommended.length ? recommended : eligible;

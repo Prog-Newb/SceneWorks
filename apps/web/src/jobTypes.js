@@ -10,9 +10,11 @@ export const GPU_REQUIRED_JOB_TYPES = new Set([
   "image_edit",
   "image_vqa",
   "image_interleave",
+  "vector_generate",
   "image_upscale",
   "image_detail",
   "image_segment",
+  "image_depth",
   "video_generate",
   "video_extend",
   "video_bridge",
@@ -25,6 +27,7 @@ export const GPU_REQUIRED_JOB_TYPES = new Set([
   "catalog_analysis",
   "dataset_upscale",
   "dataset_face_analysis",
+  "dataset_subject_mask",
   "face_likeness_compare",
 ]);
 
@@ -58,7 +61,7 @@ export const terminalStatuses = new Set(["completed", "failed", "canceled", "int
 // queue). These are exactly the jobs the bulk "Cancel pending" action terminates
 // immediately — mirrors the backend cancel fast path / PENDING_STATUSES
 // (queued + pending_caption).
-export const pendingStatuses = new Set(["queued", "pending_caption"]);
+export const pendingStatuses = new Set(["queued", "pending_caption", "pending_workflow"]);
 
 // Statuses that surface job actions (retry/repeat/cancel) in the queue.
 export const actionStatuses = new Set(["failed", "canceled", "interrupted", "completed"]);

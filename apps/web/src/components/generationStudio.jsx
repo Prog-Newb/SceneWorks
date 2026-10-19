@@ -1,8 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { LoraKeywordSummary } from "./LoraKeywordSummary.jsx";
 import { Icon } from "./Icons.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice } from "./StudioUpdateNotice.jsx";
 import { terminalStatuses } from "../jobTypes.js";
+import {
+  modelLibraryContextForModel,
+  raiseModelLibraryPrompt,
+} from "../modelLibrary.js";
 import {
   LORA_WEIGHT_MAX,
   LORA_WEIGHT_MIN,
@@ -28,9 +32,10 @@ import { savePresetDialogValidation } from "../generationValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import { StylePicker } from "./StylePicker.jsx";
-import { defaultTierSelection } from "../quantTier.js";
+import { defaultTierSelection, tierQuantize } from "../quantTier.js";
 import { readLastTier, writeLastTier } from "../lastTierStore.js";
 import { readDefaultGenerationQuality } from "../generationQuality.js";
+import { errorMessage } from "../errorMessage.js";
 
 const completedResultFallbackMs = 30000;
 
@@ -43,14 +48,27 @@ export function useQuantTierPicker({
   autoTier = null,
   useGenerationQuality = false,
   reseedOnModelChange = false,
+  preferencesHydrated = true,
 }) {
   const [quantTier, setQuantTier] = useState("");
   const [tierSwitching, setTierSwitching] = useState("");
+  // Bumped by `confirmTier` so the sticky it writes re-derives `tierExplicit` even though the
+  // selected tier itself does not change.
+  const [, setStickyRevision] = useState(0);
   const modelRef = useRef(null);
   const skipReseedRef = useRef(false);
   const availableTiersKey = availableTiers.join(",");
 
   useEffect(() => {
+    // The desktop webview gets a different localStorage origin on every launch. Its durable
+    // per-model tier therefore arrives asynchronously from GET /ui-preferences and is seeded into
+    // lastTierStore by App. If the model catalog wins that startup race, selecting a tier now would
+    // lock in the derived default (usually Q8); seeding the saved sticky later does not otherwise
+    // change any dependency of this effect. Wait for that authoritative seed, then re-run on the
+    // hydration edge so an already-quantized imported checkpoint does not get needlessly folded to
+    // Q8 — including its dense text encoder — merely because catalog loading happened to finish
+    // first.
+    if (!preferencesHydrated) return;
     const modelChanged = modelRef.current !== model;
     modelRef.current = model;
     if (skipReseedRef.current) {
@@ -69,7 +87,7 @@ export function useQuantTierPicker({
     // Install-state is intentionally represented by the stable key; the other values belong
     // to the render which produced it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model, availableTiersKey, autoTier]);
+  }, [model, availableTiersKey, autoTier, preferencesHydrated]);
 
   const timerRef = useRef(null);
   useEffect(() => () => clearTimeout(timerRef.current), []);
@@ -84,12 +102,29 @@ export function useQuantTierPicker({
     },
     [availableTiers, model, quantTier, screen],
   );
+  // sc-10733 / sc-22246: the shown tier is a DELIBERATE pick only when it equals this (screen, model)'s
+  // persisted sticky, which only a user action writes. Anything else (the Auto / quality / q8 base
+  // suggestion) is DERIVED and the worker may capability-clamp it, so the picker labels it a suggestion.
+  const tierExplicit = availableTiers.includes(quantTier) && readLastTier(screen, model) === quantTier;
+  // Only a bits tier rides `mlxQuantizeExplicit` (imageJobAdvanced.js); nvfp4 / int8-convrot never do and
+  // are never downtiered, so they — and an unresolved empty tier — are never labelled a suggestion.
+  const tierSuggested = !tierExplicit && tierQuantize(quantTier) !== null;
+  // Affirm the suggested tier as the user's own pick. A <select> cannot re-pick its current value, so
+  // this is the only route to make a suggested tier explicit without switching away and back.
+  const confirmTier = useCallback(() => {
+    if (!availableTiers.includes(quantTier)) return;
+    writeLastTier(screen, model, quantTier);
+    setStickyRevision((revision) => revision + 1);
+  }, [availableTiers, model, quantTier, screen]);
 
   return {
     quantTier,
     setQuantTier,
     tierSwitching,
     handleTierChange,
+    tierExplicit,
+    tierSuggested,
+    confirmTier,
     skipNextReseed: () => {
       skipReseedRef.current = true;
     },
@@ -98,11 +133,30 @@ export function useQuantTierPicker({
 
 // `className` lets the studios render this as a settings-bar cell (`settings-field`) instead of an
 // Advanced-panel label (studio-cleanup sc-15374) without a wrapper element around the <label>.
-export function TierPickerField({ value, onChange, items, tierSwitching, tierLabel, title, warning, className = "" }) {
+// `suggested` + `onConfirm` (sc-22246): a DERIVED tier (not the user's own pick) is labelled as a
+// suggestion the app may step down to fit memory, with a control to keep it as a deliberate pick.
+export function TierPickerField({
+  value,
+  onChange,
+  items,
+  tierSwitching,
+  tierLabel,
+  title,
+  warning,
+  className = "",
+  suggested = false,
+  onConfirm = null,
+}) {
+  const suggestedNoteId = useId();
+  const showSuggested = suggested && !tierSwitching;
   return (
     <label className={`quant-tier-picker${className ? ` ${className}` : ""}`} title={title}>
       Quant tier
-      <select onChange={(event) => onChange(event.target.value)} value={value}>
+      <select
+        aria-describedby={showSuggested ? suggestedNoteId : undefined}
+        onChange={(event) => onChange(event.target.value)}
+        value={value}
+      >
         {items.map((item) => (
           <option key={item.tier} value={item.tier} disabled={item.disabled}>
             {item.label}
@@ -111,6 +165,28 @@ export function TierPickerField({ value, onChange, items, tierSwitching, tierLab
       </select>
       {tierSwitching ? (
         <span className="field-hint" role="status">Loading {tierLabel(tierSwitching)}…</span>
+      ) : null}
+      {showSuggested ? (
+        <span
+          className="field-hint quant-tier-suggested-note"
+          id={suggestedNoteId}
+          title="Suggested for this machine, not yet your pick: the app may step it down if it doesn't fit memory. Keep it to make it your pick."
+        >
+          Suggested
+          {onConfirm ? (
+            <>
+              {" · "}
+              <button
+                aria-label={`Keep ${tierLabel(value)} as your pick`}
+                className="link-button"
+                onClick={onConfirm}
+                type="button"
+              >
+                Keep
+              </button>
+            </>
+          ) : null}
+        </span>
       ) : null}
       {warning}
     </label>
@@ -323,6 +399,25 @@ export function useGenerationStudio({
       setModel(models[0]?.id ?? fallbackModelId);
     }
   }, [models, model, setModel, fallbackModelId]);
+
+  // Raise the model-library prompt at SELECTION time, not only at submit (sc-19709): picking a
+  // model whose library is disconnected should say so immediately rather than after the user has
+  // written a prompt and pressed Generate. The catalog re-probes live, so this is the seam's own
+  // typed judgement — never a client-side re-derivation.
+  //
+  // Keyed on the model id + its typed availability, NOT on the `selectedModel` object: a catalog
+  // refresh mints new objects every poll, and an object-identity dependency would re-open the
+  // prompt seconds after the user dismissed it.
+  const selectedLibraryContext = modelLibraryContextForModel(selectedModel);
+  const blockedModelKey = selectedLibraryContext
+    ? `${selectedLibraryContext.modelId}:${selectedLibraryContext.expectedLibraryPath ?? ""}`
+    : null;
+  const selectedLibraryContextRef = useRef(selectedLibraryContext);
+  selectedLibraryContextRef.current = selectedLibraryContext;
+  useEffect(() => {
+    if (!blockedModelKey) return;
+    raiseModelLibraryPrompt(selectedLibraryContextRef.current);
+  }, [blockedModelKey]);
 
   // Drop a character selection that's no longer in the catalog. Guard on a loaded catalog
   // (sc-11964): on the first mount after a restart the character catalog is still resolving
@@ -774,7 +869,7 @@ export function useSavePreset({
         text: `Saved "${trimmed}" to ${scope === "project" ? "this project" : "all projects"}.`,
       });
     } catch (err) {
-      setPresetSaveMessage({ tone: "error", text: err.message });
+      setPresetSaveMessage({ tone: "error", text: errorMessage(err, "Could not save this preset.") });
     } finally {
       setSavingPreset(false);
     }

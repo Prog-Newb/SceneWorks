@@ -93,11 +93,8 @@ pub struct Managed {
     /// (those children are owned by the supervisor, not tracked here). Only populated
     /// on the Windows or Linux candle build.
     pub candle_worker: Mutex<Option<CommandChild>>,
-    /// On-demand keychain credential socket served to the MLX worker (sc-5891).
-    /// Started once before the worker spawns; the worker pulls a host's secret from
-    /// it the first time a download needs auth, so the keychain is read lazily
-    /// instead of eagerly at launch. macOS-only.
-    #[cfg(target_os = "macos")]
+    /// On-demand OS-credential bridge served to the API sidecar on every desktop
+    /// platform and the MLX worker on macOS (sc-5891, sc-23730).
     pub cred_ipc: Mutex<Option<crate::cred_ipc::CredIpc>>,
     /// OS-assigned API port, discovered from the sidecar's startup line.
     api_port: Mutex<Option<u16>>,
@@ -593,15 +590,47 @@ fn inject_huggingface_cache_env(command: Command, hf_home: &str) -> Command {
         .fold(command, |command, (name, value)| command.env(name, value))
 }
 
+fn resolved_cache_env(
+    policy: &sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
+) -> Result<[(&'static str, String); 3], String> {
+    policy.env_pairs().map_err(|error| error.to_string())
+}
+
+/// One centralized spawn seam for the API and both native GPU worker processes. All three receive
+/// exactly the same validated policy; an invalid policy aborts the spawn rather than enabling or
+/// unbounding a sidecar.
+fn inject_resolved_cache_env(
+    command: Command,
+    policy: &sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
+) -> Result<Command, String> {
+    Ok(resolved_cache_env(policy)?
+        .into_iter()
+        .fold(command, |command, (name, value)| command.env(name, value)))
+}
+
 fn huggingface_home() -> PathBuf {
+    huggingface_home_selection().0
+}
+
+/// The cache home the sidecars will actually receive at their next spawn, plus whether an ambient
+/// `HF_HOME` in the desktop's own environment is what decides it. When it is, the persisted
+/// Settings override is inert — Settings shows the active path and says so instead of offering a
+/// change that would silently not take effect (`get_storage_setup`).
+pub fn huggingface_home_selection() -> (PathBuf, bool) {
+    let linux_absolute = cfg!(all(unix, not(target_os = "macos")));
     let ambient = std::env::var("HF_HOME").ok();
+    let ambient_wins = ambient
+        .as_deref()
+        .and_then(|value| crate::settings::storage_override_path(value, linux_absolute))
+        .is_some();
     let persisted = crate::settings::load_settings().hf_home;
-    select_huggingface_home(
+    let home = select_huggingface_home(
         ambient.as_deref(),
         persisted.as_deref(),
         shared_huggingface_home(),
-        cfg!(all(unix, not(target_os = "macos"))),
-    )
+        linux_absolute,
+    );
+    (home, ambient_wins)
 }
 
 /// Seed the builtin model/LoRA/recipe-preset catalogs into the desktop's
@@ -1309,9 +1338,6 @@ fn decide_api_bind_env(enabled: bool, port: Option<u16>, password: Option<String
     if !enabled {
         return loopback();
     }
-    let password = password
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
     let Some(password) = password else {
         return ApiBindEnv {
             warning: Some(
@@ -1321,6 +1347,20 @@ fn decide_api_bind_env(enabled: bool, port: Option<u16>, password: Option<String
             ),
             ..loopback()
         };
+    };
+    let password = match crate::settings::validate_remote_password(&password) {
+        Ok(password) => password.to_owned(),
+        Err(_) => {
+            return ApiBindEnv {
+                warning: Some(format!(
+                    "remote access is enabled but the saved password does not meet the \
+                     {}-character minimum — binding loopback-only. Replace it in \
+                     Settings → Remote Access, then restart SceneWorks.",
+                    crate::settings::MIN_REMOTE_PASSWORD_LENGTH
+                )),
+                ..loopback()
+            };
+        }
     };
     let port = port.unwrap_or(crate::settings::DEFAULT_REMOTE_PORT);
     ApiBindEnv {
@@ -1342,9 +1382,11 @@ fn lan_access_token() -> Option<String> {
     if !crate::settings::load_settings().remote_access_enabled {
         return None;
     }
-    crate::settings::read_remote_password()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+    crate::settings::read_remote_password().and_then(|value| {
+        crate::settings::validate_remote_password(&value)
+            .ok()
+            .map(str::to_owned)
+    })
 }
 
 /// Spawn the API sidecar, pipe its output to api.log, and return the chosen port.
@@ -1394,6 +1436,18 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     // The catalog's install-state detection resolves the HF cache from these;
     // they must match the worker's download root or every model reads "missing".
     command = inject_huggingface_cache_env(command, &hf_home);
+    command = inject_resolved_cache_env(command, &settings.resolved_cache)?;
+    // External film planning resolves credentials inside the API sidecar. Reuse the same desktop
+    // secret bridge as model downloads. The sidecar receives only an ephemeral local endpoint and
+    // per-launch capability, then resolves the current OS-stored value for each request. No token
+    // is written to project/config files or exposed to the webview.
+    {
+        let managed = app.state::<Managed>();
+        let guard = managed.cred_ipc.lock().expect("cred_ipc lock");
+        if let Some(ipc) = guard.as_ref() {
+            command = ipc.inject_env(command);
+        }
+    }
     // Epic 3482 (Python Eradication) final cutover (sc-3492) — macOS runs MLX-only.
     // `Settings.mlx_required` ← `SCENEWORKS_MLX_REQUIRED` (sc-3483): the MPS/torch worker
     // never claims an MLX-eligible job, and an MLX-eligible job that no live `mlx` worker
@@ -1476,7 +1530,7 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     // Job Object, so the whole subtree dies with the desktop and no orphan can pin the API port
     // on the next launch.
     #[cfg(windows)]
-    sidecar_job::confine(child.pid());
+    sidecar_job::confine(child.pid(), "api");
     app.state::<Managed>()
         .api
         .lock()
@@ -1742,13 +1796,11 @@ fn gate_window(app: AppHandle) {
     });
 }
 
-/// Start the on-demand credential socket (sc-5891) once and stash it in `Managed`.
-/// The MLX worker is handed its socket path + token at spawn and pulls a recorded
-/// keychain secret from it the first time a download needs auth — so the keychain is
-/// read lazily, not eagerly at launch. Idempotent; a start failure is logged and the
-/// worker simply gets no credentials (a gated download then fails with an auth error
-/// rather than the app prompting at launch).
-#[cfg(target_os = "macos")]
+/// Start the on-demand credential bridge once and stash it in `Managed`. The API
+/// and, on macOS, the MLX worker receive its local endpoint plus per-launch token
+/// and pull a recorded OS secret only when an operation needs auth. Idempotent; a
+/// start failure leaves sidecars without desktop credentials and never falls back
+/// to a persisted plaintext bridge.
 fn ensure_cred_ipc(app: &AppHandle) {
     let managed = app.state::<Managed>();
     let mut slot = managed.cred_ipc.lock().expect("cred_ipc lock");
@@ -1759,32 +1811,24 @@ fn ensure_cred_ipc(app: &AppHandle) {
     match crate::cred_ipc::start(socket) {
         Some(handle) => *slot = Some(handle),
         None => append_log(
-            &logs_dir().join("mlx-worker.log"),
-            "[desktop] credential socket failed to start; gated downloads will need a re-entered token\n",
+            &logs_dir().join("api.log"),
+            "[desktop] credential bridge failed to start; desktop credentials are unavailable to sidecars\n",
         ),
     }
 }
 
 /// Drop a host's cached secret from the credential socket (sc-5891) so a later pull
 /// re-reads the keychain. Called when the user updates or removes a credential, so a
-/// revoked/changed token stops being served without an app restart. No-op off macOS
-/// (no socket there).
+/// revoked/changed token stops being served without an app restart.
 pub fn invalidate_credential_cache(app: &AppHandle, host: &str) {
-    #[cfg(target_os = "macos")]
+    if let Some(ipc) = app
+        .state::<Managed>()
+        .cred_ipc
+        .lock()
+        .expect("cred_ipc lock")
+        .as_ref()
     {
-        if let Some(ipc) = app
-            .state::<Managed>()
-            .cred_ipc
-            .lock()
-            .expect("cred_ipc lock")
-            .as_ref()
-        {
-            ipc.invalidate(host);
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (app, host);
+        ipc.invalidate(host);
     }
 }
 
@@ -2215,6 +2259,11 @@ fn supervise_worker(
                 }
             };
             record_pid(&app, Some(child.pid()));
+            // sc-24743: on Windows this is the candle `auto` supervisor; confine it (and the
+            // per-GPU children it spawns) to the kill-on-close job so a desktop force-quit
+            // frees their VRAM at once instead of after the in-flight generation.
+            #[cfg(windows)]
+            sidecar_job::confine(child.pid(), label);
             slot(&app.state::<Managed>())
                 .lock()
                 .expect("worker lock")
@@ -2452,6 +2501,10 @@ fn supervise_mlx_worker(app: AppHandle) {
                     config_dir().to_string_lossy().to_string(),
                 );
             command = inject_huggingface_cache_env(command, ctx.hf_home);
+            command = inject_resolved_cache_env(
+                command,
+                &crate::settings::load_settings().resolved_cache,
+            )?;
             // sc-7821 (epic 7819): the user's GPU memory ceiling, as fraction × total unified
             // memory. run_worker_loop applies it to the MLX runtime process-globally (covers
             // generations, upscales, AND LoRA training). Absent ⇒ no env ⇒ MLX default budget.
@@ -2486,12 +2539,7 @@ fn supervise_mlx_worker(app: AppHandle) {
                 let managed = ctx.app.state::<Managed>();
                 let guard = managed.cred_ipc.lock().expect("cred_ipc lock");
                 if let Some(ipc) = guard.as_ref() {
-                    command = command
-                        .env(
-                            "SCENEWORKS_CRED_IPC_SOCKET",
-                            ipc.socket.to_string_lossy().to_string(),
-                        )
-                        .env("SCENEWORKS_CRED_IPC_TOKEN", &ipc.token);
+                    command = ipc.inject_env(command);
                     let hosts = crate::settings::recorded_credential_hosts().join(",");
                     if !hosts.is_empty() {
                         command = command.env("SCENEWORKS_CREDENTIAL_HOSTS", hosts);
@@ -2575,6 +2623,10 @@ fn supervise_candle_worker(app: AppHandle) {
                     config_dir().to_string_lossy().to_string(),
                 );
             command = inject_huggingface_cache_env(command, ctx.hf_home);
+            command = inject_resolved_cache_env(
+                command,
+                &crate::settings::load_settings().resolved_cache,
+            )?;
             // cudarc dynamic-linking `LoadLibrary`s the CUDA runtime DLLs by name;
             // prepend the bundled redist dir to this worker's PATH so they resolve
             // without a CUDA Toolkit on the machine (sc-5560).
@@ -2738,6 +2790,11 @@ fn record_api_pid(app: &AppHandle, pid: u32) {
 /// the OS-enforced backstop the pidfile `taskkill /T` reaping ([`kill_pid`]) can't guarantee
 /// once the tracked parent has already exited.
 ///
+/// The candle GPU worker sidecar (the `auto` supervisor + its per-GPU children) is confined
+/// the same way (sc-24743): its parent-PID watchdog alone lets a child mid-denoise keep its
+/// VRAM until the in-flight generation finishes, and the next launch's reap only knows the
+/// (already dead) supervisor PID.
+///
 /// Best-effort: any failure is logged and left to the existing reaping, never fatal.
 #[cfg(windows)]
 mod sidecar_job {
@@ -2793,12 +2850,13 @@ mod sidecar_job {
         }
     }
 
-    /// Assign sidecar process `pid` to the shared kill-on-close job.
-    pub(super) fn confine(pid: u32) {
+    /// Assign sidecar process `pid` (named `sidecar` in logs) to the shared kill-on-close job.
+    pub(super) fn confine(pid: u32, sidecar: &str) {
         let Some(job) = job_handle() else {
             tracing::warn!(
                 event = "sidecar_job_unavailable",
                 pid,
+                sidecar,
                 "could not create kill-on-close job; relying on taskkill reaping"
             );
             return;
@@ -2808,7 +2866,12 @@ mod sidecar_job {
         unsafe {
             let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, pid);
             if process.is_null() {
-                tracing::warn!(event = "sidecar_job_open_failed", pid, "OpenProcess failed");
+                tracing::warn!(
+                    event = "sidecar_job_open_failed",
+                    pid,
+                    sidecar,
+                    "OpenProcess failed"
+                );
                 return;
             }
             let assigned = AssignProcessToJobObject(job, process) != 0;
@@ -2817,12 +2880,14 @@ mod sidecar_job {
                 tracing::info!(
                     event = "sidecar_job_assigned",
                     pid,
-                    "API sidecar confined to kill-on-close job"
+                    sidecar,
+                    "sidecar confined to kill-on-close job"
                 );
             } else {
                 tracing::warn!(
                     event = "sidecar_job_assign_failed",
                     pid,
+                    sidecar,
                     "assign to job failed"
                 );
             }
@@ -3075,6 +3140,20 @@ fn unix_shutdown_pids(
         .collect()
 }
 
+/// What the graceful teardown does once every sidecar is down (sc-19709).
+///
+/// Relaunching after a settings change that only the sidecars' spawn environment can carry — a
+/// relocated model library — is the SAME teardown as quitting, not a faster one. It deliberately
+/// reuses [`begin_teardown`] rather than the auto-update path's `stop_sidecars_for_update`, which
+/// force-kills immediately because an NSIS installer is waiting on a file lock: a hard kill of an
+/// MLX worker mid-render can wedge the host GPU client until reboot, so a user-initiated restart
+/// must go through SIGTERM-and-grace like an ordinary quit.
+#[derive(Clone, Copy)]
+enum Teardown {
+    Exit,
+    Relaunch,
+}
+
 /// Begin graceful shutdown: stop the GPU worker (MLX on macOS, candle on
 /// Windows/Linux) then the API sidecar.
 /// On Unix this sends SIGTERM and waits up to the grace period before
@@ -3082,6 +3161,16 @@ fn unix_shutdown_pids(
 /// Windows-session refinement). Returns true if shutdown was initiated (caller
 /// should prevent the immediate exit), false if it was already in progress.
 pub fn begin_shutdown(app: &AppHandle) -> bool {
+    begin_teardown(app, Teardown::Exit)
+}
+
+/// The identical graceful teardown, followed by a relaunch instead of an exit (sc-19709). Returns
+/// false when a teardown is already running, so a second "Restart now" cannot start a second one.
+pub fn begin_restart(app: &AppHandle) -> bool {
+    begin_teardown(app, Teardown::Relaunch)
+}
+
+fn begin_teardown(app: &AppHandle, then: Teardown) -> bool {
     let managed = app.state::<Managed>();
     if managed.shutting_down.swap(true, Ordering::SeqCst) {
         return false;
@@ -3093,9 +3182,8 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
         .expect("candle worker lock")
         .take();
     let api_child = managed.api.lock().expect("api lock").take();
-    // Take the credential IPC handle so its socket file can be unlinked on a graceful
-    // quit (sc-5891); see the clean-exit block below. macOS-only (the socket is too).
-    #[cfg(target_os = "macos")]
+    // Take the credential IPC handle so its Unix socket can be unlinked on a graceful
+    // quit (sc-5891). The Windows loopback listener owns no filesystem artifact.
     let cred_ipc = managed.cred_ipc.lock().expect("cred_ipc lock").take();
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -3156,11 +3244,14 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
         // Unlink the credential IPC socket (sc-5891) so a graceful quit doesn't leave a
         // stale `cred-ipc.sock` in the data dir. A crash/force-quit skips this, but the
         // next launch's bind reaps it (`cred_ipc::start` removes a stale socket first).
-        #[cfg(target_os = "macos")]
         if let Some(cred_ipc) = cred_ipc {
-            let _ = std::fs::remove_file(&cred_ipc.socket);
+            cred_ipc.cleanup();
         }
-        handle.exit(0);
+        match then {
+            Teardown::Exit => handle.exit(0),
+            // Diverges: the process is replaced, so nothing after this runs.
+            Teardown::Relaunch => handle.restart(),
+        }
     });
     true
 }
@@ -3284,7 +3375,7 @@ const NVML_DRIVER_MISMATCH: &str = "The NVIDIA kernel driver and the NVIDIA user
     a driver update is staged into the NEXT boot, so a reboot is required even if the \
     machine has been running for days.";
 
-/// Recognize the NVML version-mismatch signature in `nvidia-smi`'s **stderr**, which the
+/// Recognize the NVML version-mismatch signature in `nvidia-smi`'s output, which the
 /// preflights below would otherwise discard along with the exit status.
 ///
 /// `nvidia-smi` prints `Failed to initialize NVML: Driver/library version mismatch` (newer
@@ -3294,13 +3385,29 @@ const NVML_DRIVER_MISMATCH: &str = "The NVIDIA kernel driver and the NVIDIA user
 /// version lines are new — and it is specific enough that nothing else in NVML's error
 /// vocabulary collides with it.
 ///
+/// **Both streams are searched, and that is the whole point of this signature check.**
+/// NVIDIA documents neither the stream nor the exit status for this failure, and when
+/// `nvidia-smi` is invoked with `--query-gpu=... --format=csv,noheader` — exactly how both
+/// preflights below call it — it has been reported writing the NVML init failure to
+/// **stdout**, in the position a GPU row would have occupied, signalling the failure only
+/// through its exit status. That is the shape that makes a stderr-only match find nothing
+/// on a genuinely mismatched host, leaving the remedy this function exists to deliver
+/// unreachable and the caller falling through to its platform's "install or update the
+/// NVIDIA driver" text — the precise wrong advice that splitting this condition out was
+/// meant to stop (GH #1966, GH #3017).
+///
+/// Since which stream carries it is observed rather than contractual, and varies across
+/// driver branches, neither stream is relied on: the signature is claimed from either, and
+/// ahead of the exit status, so no single one of those three details can hide it again.
+///
 /// Every other `nvidia-smi` failure (absent binary, `Unknown Error`, no permission) keeps
 /// the existing "no usable GPU" verdict: those really can mean the driver is missing or
 /// broken, and a reboot is not the fix.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn nvml_driver_mismatch(stderr: &str) -> Option<&'static str> {
-    stderr
-        .contains("Driver/library version mismatch")
+fn nvml_driver_mismatch(stdout: &str, stderr: &str) -> Option<&'static str> {
+    [stdout, stderr]
+        .iter()
+        .any(|stream| stream.contains("Driver/library version mismatch"))
         .then_some(NVML_DRIVER_MISMATCH)
 }
 
@@ -3358,17 +3465,22 @@ fn cuda_preflight() -> Result<(), String> {
     // Don't flash a console window when probing from the GUI app.
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     let stdout = match command.output() {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).into_owned()
-        }
-        // Errored. A version-mismatched NVML is its own condition with its own remedy
-        // (reboot), so check stderr for it before falling back to "no usable GPU" —
-        // otherwise a user whose driver is installed and fine is told to install a driver.
         Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            return Err(nvml_driver_mismatch(&stderr)
-                .unwrap_or(CUDA_REQUIREMENT)
-                .to_owned());
+            // A version-mismatched NVML is its own condition with its own remedy (reboot),
+            // so claim it before falling back to "no usable GPU" — otherwise a user whose
+            // driver is installed and fine is told to install a driver. Checked across both
+            // streams and ahead of the exit status: `nvidia-smi` puts this failure on stdout
+            // where a GPU row would go, so neither the stream nor a non-zero exit can be the
+            // thing this detection hinges on.
+            if let Some(guidance) = nvml_driver_mismatch(&stdout, &stderr) {
+                return Err(guidance.to_owned());
+            }
+            if !output.status.success() {
+                return Err(CUDA_REQUIREMENT.to_owned());
+            }
+            stdout
         }
         // Couldn't run nvidia-smi at all (no NVIDIA driver) → no usable GPU.
         Err(_) => return Err(CUDA_REQUIREMENT.to_owned()),
@@ -3489,18 +3601,19 @@ fn linux_cuda_preflight() -> Result<(), String> {
         ])
         .output();
     let stdout = match output {
-        Ok(output) if output.status.success() => {
-            Some(String::from_utf8_lossy(&output.stdout).into_owned())
-        }
-        // Same split as the Windows probe: a version-mismatched NVML means `nvidia-smi`
-        // exits non-zero with a healthy driver installed, so it must not collapse into
-        // `LINUX_CUDA_REQUIREMENT`'s "install or update the NVIDIA driver".
         Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            if let Some(guidance) = nvml_driver_mismatch(&stderr) {
+            // Same split as the Windows probe: a version-mismatched NVML means `nvidia-smi`
+            // fails with a healthy driver installed, so it must not collapse into
+            // `LINUX_CUDA_REQUIREMENT`'s "install or update the NVIDIA driver". Claimed from
+            // either stream and before the exit status is consulted — the failure arrives on
+            // stdout in place of the GPU rows, so a stderr-only check saw nothing and a
+            // stdout-only one would feed that error line to the parser below as a GPU name.
+            if let Some(guidance) = nvml_driver_mismatch(&stdout, &stderr) {
                 return Err(guidance.to_owned());
             }
-            None
+            output.status.success().then_some(stdout)
         }
         Err(_) => None,
     };
@@ -3846,6 +3959,10 @@ async fn run_startup(app: AppHandle) {
         return;
     }
     emit(&app, "starting", "Starting the local engine…", false);
+    // Start the OS-credential bridge before constructing the API command so the
+    // sidecar receives its endpoint on the first launch. This does not open a
+    // secret item until a planning request asks for one.
+    ensure_cred_ipc(&app);
     if let Err(error) = spawn_api(&app) {
         emit(&app, "error", error, true);
         return;
@@ -3872,8 +3989,8 @@ pub async fn start_setup(app: AppHandle) {
 #[cfg(test)]
 mod path_tests {
     use super::{
-        huggingface_cache_env, packaged_macos_bundle_paths, select_huggingface_home,
-        LinuxDesktopPaths, MacosBundlePaths,
+        huggingface_cache_env, packaged_macos_bundle_paths, resolved_cache_env,
+        select_huggingface_home, LinuxDesktopPaths, MacosBundlePaths,
     };
     use std::collections::HashMap;
     use std::ffi::OsString;
@@ -3898,6 +4015,46 @@ mod path_tests {
         std::fs::create_dir_all(path.parent().expect("fixture parent"))
             .expect("create fixture parent");
         std::fs::write(path, b"fixture").expect("write fixture file");
+    }
+
+    #[test]
+    fn resolved_cache_spawn_environment_is_exact_for_every_sidecar() {
+        let policy = sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy {
+            enabled: true,
+            max_bytes: 4_294_967_296,
+            inactivity_seconds: 604_800,
+        };
+        let expected = [
+            ("SCENEWORKS_RESOLVED_CACHE_ENABLED", "true".to_owned()),
+            (
+                "SCENEWORKS_RESOLVED_CACHE_MAX_BYTES",
+                "4294967296".to_owned(),
+            ),
+            (
+                "SCENEWORKS_RESOLVED_CACHE_INACTIVITY_SECONDS",
+                "604800".to_owned(),
+            ),
+        ];
+        assert_eq!(resolved_cache_env(&policy).unwrap(), expected);
+        let source = include_str!("setup.rs");
+        let injection_call = ["command = inject_", "resolved_cache_env("].concat();
+        assert_eq!(
+            source.matches(&injection_call).count(),
+            3,
+            "API, MLX, and Candle must all enter the centralized policy seam"
+        );
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for path in [
+            manifest.join("../rust-api/src/server.rs"),
+            manifest.join("../../crates/sceneworks-worker/src/settings.rs"),
+        ] {
+            let consumer = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                consumer.contains("ResolvedCachePolicy::from_env_or_safe_default()"),
+                "{} must use the shared fail-closed parser",
+                path.display()
+            );
+        }
     }
 
     #[test]
@@ -4425,16 +4582,29 @@ mod nvml_mismatch_tests {
     use super::{nvml_driver_mismatch, NVML_DRIVER_MISMATCH};
 
     /// The exact text `nvidia-smi` prints in this state, in both the classic one-line form
-    /// and the newer form that appends the two versions it found.
+    /// and the newer form that appends the two versions it found — and on **either** stream.
+    ///
+    /// The stdout cases are the regression: `--query-gpu=... --format=csv,noheader` puts the
+    /// NVML failure on stdout, so matching stderr alone found nothing on a real mismatched
+    /// host and the reboot remedy below was unreachable in the field (GH #3017).
     #[test]
     fn the_nvml_mismatch_signature_maps_to_the_reboot_remedy() {
-        for stderr in [
-            "Failed to initialize NVML: Driver/library version mismatch\n",
-            "Failed to initialize NVML: Driver/library version mismatch\n\
-             NVML library version: 610.43\n",
+        const CLASSIC: &str = "Failed to initialize NVML: Driver/library version mismatch\n";
+        const WITH_VERSIONS: &str = "Failed to initialize NVML: Driver/library version mismatch\n\
+             NVML library version: 610.43\n";
+        for (stdout, stderr) in [
+            // The field shape: the failure on stdout, nothing on stderr.
+            (CLASSIC, ""),
+            (WITH_VERSIONS, ""),
+            // Still claimed if a driver branch routes it to stderr instead.
+            ("", CLASSIC),
+            ("", WITH_VERSIONS),
+            // Or duplicates it onto both.
+            (CLASSIC, CLASSIC),
         ] {
-            let guidance =
-                nvml_driver_mismatch(stderr).expect("the NVML mismatch signature must be matched");
+            let guidance = nvml_driver_mismatch(stdout, stderr).expect(
+                "the NVML mismatch signature must be matched on whichever stream carries it",
+            );
             assert_eq!(guidance, NVML_DRIVER_MISMATCH);
             assert!(
                 guidance.contains("reboot"),
@@ -4462,19 +4632,39 @@ mod nvml_mismatch_tests {
     /// claiming them here would trade one wrong message for another.
     #[test]
     fn unrelated_nvidia_smi_failures_are_not_claimed_as_a_mismatch() {
-        for stderr in [
+        for output in [
             "Failed to initialize NVML: Unknown Error",
             "Failed to initialize NVML: Insufficient Permissions",
             "No devices were found",
             "'nvidia-smi' is not recognized as an internal or external command",
             "",
         ] {
+            // Neither stream may claim it, in either position: widening the search must not
+            // widen what counts as a mismatch.
             assert_eq!(
-                nvml_driver_mismatch(stderr),
+                nvml_driver_mismatch(output, ""),
                 None,
-                "{stderr:?} must not be reported as a driver/library version mismatch"
+                "{output:?} on stdout must not be reported as a driver/library version mismatch"
+            );
+            assert_eq!(
+                nvml_driver_mismatch("", output),
+                None,
+                "{output:?} on stderr must not be reported as a driver/library version mismatch"
             );
         }
+    }
+
+    /// A healthy run must not be re-read as a mismatch. The detection now runs before the
+    /// exit status is consulted, so the only thing keeping a successful probe out of the
+    /// reboot message is the signature itself — worth pinning, because the GPU row for the
+    /// host in GH #1966 carries a driver version and nothing else should resemble it.
+    #[test]
+    fn a_healthy_gpu_row_is_not_claimed_as_a_mismatch() {
+        assert_eq!(
+            nvml_driver_mismatch("NVIDIA GeForce RTX 3090 Ti, 610.43.03, 8.6\n", ""),
+            None,
+            "a healthy GPU row must not be reported as a driver/library version mismatch"
+        );
     }
 }
 
@@ -4648,18 +4838,18 @@ mod bind_tests {
 
     #[test]
     fn enabled_with_password_binds_open_fixed_port_with_token() {
-        let env = decide_api_bind_env(true, Some(8910), Some("  swordfish  ".to_owned()));
+        let env = decide_api_bind_env(true, Some(8910), Some("  swordfish-12  ".to_owned()));
         assert_eq!(env.host, "0.0.0.0");
         assert_eq!(env.port, "8910");
         // Token is the trimmed password; it is also handed to the GPU worker(s).
-        assert_eq!(env.access_token.as_deref(), Some("swordfish"));
+        assert_eq!(env.access_token.as_deref(), Some("swordfish-12"));
         assert_eq!(env.fixed_port, Some(8910));
         assert!(env.warning.is_none());
     }
 
     #[test]
     fn enabled_without_port_uses_the_default_suggestion() {
-        let env = decide_api_bind_env(true, None, Some("pw".to_owned()));
+        let env = decide_api_bind_env(true, None, Some("twelve-chars".to_owned()));
         assert_eq!(env.host, "0.0.0.0");
         assert_eq!(env.port, DEFAULT_REMOTE_PORT.to_string());
         assert_eq!(env.fixed_port, Some(DEFAULT_REMOTE_PORT));
@@ -4687,6 +4877,18 @@ mod bind_tests {
         assert_eq!(env.host, "127.0.0.1");
         assert!(env.access_token.is_none());
         assert!(env.warning.is_some());
+    }
+
+    #[test]
+    fn enabled_with_short_password_fails_closed_with_replacement_guidance() {
+        let env = decide_api_bind_env(true, Some(8787), Some("legacy".to_owned()));
+        assert_eq!(env.host, "127.0.0.1");
+        assert_eq!(env.port, "0");
+        assert!(env.access_token.is_none());
+        assert!(env.fixed_port.is_none());
+        let warning = env.warning.expect("short password must surface a warning");
+        assert!(warning.contains("12-character minimum"), "{warning}");
+        assert!(warning.contains("Replace it in Settings"), "{warning}");
     }
 
     /// Story 3: the desktop must NEVER set `SCENEWORKS_ALLOW_OPEN_BIND` (the server's

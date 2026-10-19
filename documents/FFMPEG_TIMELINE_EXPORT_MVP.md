@@ -70,9 +70,14 @@ Closed set — `TimelineTransitionType` is `Crossfade | FadeFromBlack | FadeToBl
 ## Explicitly NOT in v1
 
 - **Advanced audio mixing** 📄 — segments are rendered with `-an` (`media_jobs.rs:2247, 2273`); there
-  is no multi-track audio bed, ducking, level automation, or per-item gain in the export. (The
-  generation encode path can mux a single AAC track via `-shortest`, `video_jobs.rs:769-783`, but
-  that is single-source, not a timeline mix.)
+  is no multi-track audio bed, ducking, level automation, or per-item gain in the export. (Two
+  worker paths mux a single AAC track, each bounded at the picture's length and spelled by the one
+  shared `video_jobs/mod.rs::format_picture_bound`: the generation encode
+  (`video_jobs/mod.rs::audio_mux_args`, `frame_count / fps`) and the SeedVR2 upscale's source-audio
+  passthrough (`video_jobs/seedvr2.rs::seedvr2_audio_mux_args`, the source timing it measured,
+  sc-24391). Both passed `-shortest` until sc-19425 and
+  sc-19549 measured that flag discarding video frames; **no path uses it today.** Either way these
+  are single-source, not a timeline mix.)
 - **Browser / canvas recording** 📄 — export is a backend FFmpeg render, not `MediaRecorder`/canvas
   capture. The browser editor is preview-only; the authoritative pixels come from the worker.
 - **Deferred (post-v1):** rich multi-track compositing/overlays, transition types beyond

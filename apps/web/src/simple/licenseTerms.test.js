@@ -70,6 +70,123 @@ describe("modelLicenseRows", () => {
     expect(fluxDev.badge.label).toBe("Non-commercial");
   });
 
+  it("badges a restricted component whose licence NAME carries no marker (sc-24108)", () => {
+    // The Qwen RESEARCH LICENSE AGREEMENT is research/evaluation-only (§1(i), §2(a)) but its
+    // TITLE says nothing of the kind, so the name match alone badges it "Commercial OK". The
+    // component's explicit `nonCommercial: true` is what makes the badge right, and this pins
+    // BOTH halves: the declaration is present on the shipped component, and the badge prefers it.
+    const component = bundledLicenses.find((entry) => entry.id === "qwen-image-2-1");
+    expect(component).toBeTruthy();
+    expect(component.models).toEqual(["qwen_image_2_1"]);
+    expect(component.nonCommercial).toBe(true);
+    // The title genuinely does NOT match the historical classifier — i.e. the flag is load-bearing
+    // here, not redundant belt-and-braces.
+    expect(licenseIsNonCommercial(component.license)).toBe(false);
+    expect(licenseBadge(component)).toEqual({ label: "Non-commercial", tone: "danger" });
+
+    const row = modelLicenseRows(bundledLicenses).find((entry) => entry.id === "qwen-image-2-1");
+    expect(row).toBeTruthy();
+    expect(row.license).toBe("Qwen Research License Agreement");
+    expect(row.badge.label).toBe("Non-commercial");
+  });
+
+  it("covers the optional prompt rewriters, with a wired document and the same badge (sc-24113)", () => {
+    // The two PE checkpoints were in NO component. Three things went wrong at once and none of
+    // them failed a build: `check-license-coverage` named them but exits 0 (report-only), the
+    // About screen had no row for them, and `licenseBadge` — which reads `nonCommercial` off this
+    // manifest — had nothing to read, so research-only weights would have badged "Commercial OK".
+    const component = bundledLicenses.find((entry) => entry.id === "qwen-image-2-1-pe");
+    expect(component).toBeTruthy();
+    expect(component.models).toEqual([
+      "qwen_image_2_1_pe_t2i",
+      "qwen_image_2_1_pe_i2i",
+    ]);
+    expect(component.nonCommercial).toBe(true);
+    // Same agreement as the base weights, so the same trap: the TITLE carries no marker and the
+    // flag is what makes the badge right.
+    expect(licenseIsNonCommercial(component.license)).toBe(false);
+    expect(licenseBadge(component)).toEqual({ label: "Non-commercial", tone: "danger" });
+
+    // The document must RESOLVE, not merely be named: `bundledLicenses` drops any document whose
+    // key has no bundled URL, so an unwired key would leave an About row with nothing to open.
+    expect(component.documents).toHaveLength(1);
+    expect(component.documents[0].key).toBe("qwen-image-2-1-research");
+    expect(typeof component.documents[0].url).toBe("string");
+
+    const row = modelLicenseRows(bundledLicenses).find(
+      (entry) => entry.id === "qwen-image-2-1-pe",
+    );
+    expect(row).toBeTruthy();
+    expect(row.license).toBe("Qwen Research License Agreement");
+    expect(row.badge.label).toBe("Non-commercial");
+
+    // A SEPARATE row from the weights — different repositories, different purpose — so the About
+    // screen does not imply the rewriters are part of the image model's download.
+    expect(row.id).not.toBe("qwen-image-2-1");
+  });
+
+  it("covers Qwen Image 2.1 Turbo with its own row, the same agreement and the same badge (sc-25907)", () => {
+    // The distilled checkpoint is a different repository and revision under the byte-identical
+    // agreement, so it gets its own About row (not a silent ride on base's) that resolves the same
+    // document and badges Non-commercial through the explicit flag — the title alone would not.
+    const component = bundledLicenses.find((entry) => entry.id === "qwen-image-2-1-turbo");
+    expect(component).toBeTruthy();
+    expect(component.models).toEqual(["qwen_image_2_1_turbo"]);
+    expect(component.nonCommercial).toBe(true);
+    expect(licenseIsNonCommercial(component.license)).toBe(false);
+    expect(licenseBadge(component)).toEqual({ label: "Non-commercial", tone: "danger" });
+    expect(component.documents.map((document) => document.key)).toEqual(["qwen-image-2-1-research"]);
+    expect(typeof component.documents[0].url).toBe("string");
+    const base = bundledLicenses.find((entry) => entry.id === "qwen-image-2-1");
+    expect(base.models).not.toContain("qwen_image_2_1_turbo");
+  });
+
+  it("falls back to the licence name for a component that declares no flag", () => {
+    // Every pre-existing component keeps the badge it had: no `nonCommercial` key, name match only.
+    const fluxDev = bundledLicenses.find((entry) => entry.id === "flux1-dev");
+    expect(fluxDev?.nonCommercial).toBeUndefined();
+    expect(licenseBadge(fluxDev).label).toBe("Non-commercial");
+    const apache = bundledLicenses.find((entry) => entry.id === "qwen-image");
+    expect(apache?.nonCommercial).toBeUndefined();
+    expect(licenseBadge(apache).label).toBe("Commercial OK");
+  });
+
+  it("surfaces the alternate decoder terms for every compatible catalog product", () => {
+    const decoder = bundledLicenses.find((component) => component.id === "wan2_1_t2v_14b_diffusers");
+    expect(decoder?.models).toEqual([]);
+    expect(decoder?.appliesToModels).toEqual([
+      "krea_2_turbo",
+      "krea_2_raw",
+      "qwen_image",
+      "qwen_image_edit_2511",
+      "qwen_image_edit_2511_lightning",
+    ]);
+
+    const decoderRow = modelLicenseRows(bundledLicenses).find(
+      (row) => row.id === "wan2_1_t2v_14b_diffusers",
+    );
+    expect(decoderRow?.license).toBe("Apache-2.0");
+  });
+
+  it("keeps Tile primary while composing OpenPose terms with the exact five accepted backbones", () => {
+    const controlnet = bundledLicenses.find(
+      (component) => component.id === "controlnet-tile-sdxl",
+    );
+    expect(controlnet?.models).toEqual(["controlnet_tile_sdxl"]);
+    expect(controlnet?.appliesToModels).toEqual([
+      "sdxl",
+      "realvisxl",
+      "realvisxl_lightning",
+      "illustrious_xl_v1",
+      "illustrious_xl_v2",
+    ]);
+
+    const controlnetRow = modelLicenseRows(bundledLicenses).find(
+      (row) => row.id === "controlnet-tile-sdxl",
+    );
+    expect(controlnetRow?.license).toBe("Apache-2.0");
+  });
+
   it("tolerates an empty or absent corpus", () => {
     expect(modelLicenseRows([])).toEqual([]);
     expect(modelLicenseRows(undefined)).toEqual([]);

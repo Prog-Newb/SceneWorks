@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AssetMedia, AssetThumbnail, MissingMedia, assetUrl, posterUrl, thumbnailUrl } from "./assetMedia.jsx";
+import { AssetMedia, AssetThumbnail, MissingMedia, assetCanRenderAsImage, assetUrl, posterUrl, thumbnailUrl } from "./assetMedia.jsx";
 
 const imageAsset = {
   id: "img",
@@ -26,6 +26,12 @@ const audioAsset = {
   origin: "audio_studio",
   file: { path: "assets/line.wav", mimeType: "audio/wav", duration: 3, sampleRate: 24000, channels: 1 },
   projectId: "p1",
+};
+
+const vectorAsset = {
+  id: "vector", type: "vector", projectId: "p1", displayName: "mark.svg",
+  file: { path: "assets/vector.svg", mimeType: "image/svg+xml" },
+  preview: { path: "assets/preview.png", mimeType: "image/png" },
 };
 
 function fireContextMenu(el) {
@@ -96,6 +102,14 @@ describe("bounded thumbnail URLs (sc-14797)", () => {
   });
 });
 
+describe("vector PNG-only rendering (sc-22257)", () => {
+  it("uses only the worker PNG preview and cannot enter generic image conditioning", () => {
+    expect(assetCanRenderAsImage(vectorAsset)).toBe(false);
+    expect(thumbnailUrl(vectorAsset)).toContain("assets/preview.png");
+    expect(thumbnailUrl(vectorAsset)).not.toContain("vector.svg");
+  });
+});
+
 // AssetMedia audio rendering (SceneWorks Audio Studio, epic 13400 A5 / sc-13405):
 // a type:audio asset renders a playable <audio> element, mirroring the <video>
 // branch — never an <audio> for image/video assets.
@@ -140,7 +154,11 @@ describe("AssetMedia audio rendering (epic 13400 A5)", () => {
     const video = container.querySelector("video");
     expect(video).not.toBeNull();
     expect(video.controls).toBe(true);
-    expect(video.muted).toBe(true);
+    // `playsInline` is the WebKit-safe half; `muted` never was. It used to be hard-set here, which
+    // made every clip in the app play silent — see `assetMedia.audio.test.jsx` (sc-17161), where
+    // the joint audio+video families make that a wrong answer rather than a harmless one. Still
+    // PINNED, in the other direction: a surface that needs a mute passes `muted` explicitly.
+    expect(video.muted).toBe(false);
     expect(video.playsInline).toBe(true);
     expect(video.preload).toBe("metadata");
     expect(video.getAttribute("src")).toContain("clip.mp4");
@@ -209,3 +227,37 @@ describe("data URL passthrough", () => {
     expect(thumbnailUrl(asset)).toBe(asset.url);
   });
 });
+
+describe("depth assets paint their preview, never the raw .npy (sc-25682)", () => {
+  const depthAsset = {
+    id: "depth", type: "depth", projectId: "p1", displayName: "photo (depth)",
+    file: { path: "assets/depth/g/map.npy", mimeType: "application/x-npy" },
+    preview: { path: "assets/depth/g/map.preview.png", mimeType: "image/png" },
+  };
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("thumbnails and media render the separate preview; the asset URL stays the raw map", async () => {
+    expect(thumbnailUrl(depthAsset)).toContain("/files/assets/depth/g/map.preview.png");
+    expect(assetUrl(depthAsset)).toContain("/files/assets/depth/g/map.npy");
+    expect(assetCanRenderAsImage(depthAsset)).toBe(false);
+    await act(() => root.render(<AssetThumbnail asset={depthAsset} />));
+    expect(container.querySelector("img").getAttribute("src")).toContain("map.preview.png");
+    await act(() => root.render(<AssetMedia asset={depthAsset} />));
+    expect(container.querySelector("img").getAttribute("src")).toContain("map.preview.png");
+    expect(container.innerHTML).not.toContain("map.npy");
+  });
+});
+

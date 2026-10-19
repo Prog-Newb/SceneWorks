@@ -23,6 +23,7 @@ export const LIBRARY_ORIGINS = new Set([
   "video_studio",
   "audio_studio",
   "document_studio",
+  "vector_studio",
   "upload",
 ]);
 
@@ -96,6 +97,30 @@ export const WAN_MOE_PAIRED_LORA_MODEL_IDS = new Set(["wan_2_2_t2v_14b", "wan_2_
 // both serve the production image-caption request.
 export const VISION_CAPTION_MODEL_ID = "vision_caption_qwen3vl_8b";
 export const VISION_CAPTION_MODEL_REPO = "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated";
+
+// Qwen-Image 2.1 and its two OFFICIAL prompt rewriters (sc-24113, epic 24107).
+//
+// The rewriters are OPTIONAL, explicitly downloaded checkpoints — `autoDownload: false` in the
+// manifest — and the image model works fully without either. Which of the two applies is decided by
+// the REQUEST (references attached ⇒ the editing one) and never by a user-facing picker, so these
+// ids are looked up by the caller, not offered as a choice. They mirror
+// `crates/sceneworks-worker/src/qwen_prompt_rewrite.rs`'s `Rewriter::catalog_id`.
+export const QWEN_IMAGE_2_1_MODEL_ID = "qwen_image_2_1";
+export const QWEN_REWRITE_T2I_MODEL_ID = "qwen_image_2_1_pe_t2i";
+export const QWEN_REWRITE_I2I_MODEL_ID = "qwen_image_2_1_pe_i2i";
+
+// The rewrite TARGETS: base 2.1 and its distilled Turbo sibling (sc-25908, epic 25899) — one prompt
+// format, one template. A mirror of `sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS`, the
+// exact set the worker serves a rewrite for (`qwen_prompt_rewrite::is_rewrite_target_model`);
+// `qwenImage21Turbo.test.jsx` reads the Rust list and holds this one to it. Keyed on the id, NOT
+// the family: an imported custom checkpoint can carry family `qwen-image-2-1` and the worker
+// refuses a rewrite targeting it.
+export const QWEN_IMAGE_2_1_MODEL_IDS = Object.freeze([QWEN_IMAGE_2_1_MODEL_ID, "qwen_image_2_1_turbo"]);
+
+// Whether the official Qwen rewriters apply to the selected generation model.
+export function qwenRewriterAppliesTo(model) {
+  return QWEN_IMAGE_2_1_MODEL_IDS.includes(model?.id);
+}
 
 // DWPose whole-body pose detector (sc-17634 re-host, `type: "utility"` in builtin.models.jsonc).
 // One catalog entry carrying BOTH ONNX graphs the pose lane loads — YOLOX person boxes + the RTMW
@@ -196,6 +221,124 @@ const seededFallbackModels = [
       // STRICT_CONTROL_ENGINES qwen_image_control = {pose,canny,depth}).
       controlModes: ["pose", "canny", "depth"],
       controlScale: { label: "Control strength", default: 0.9, min: 0.0, max: 2.0, step: 0.05 },
+    },
+  },
+  {
+    // Qwen Image 2.1 (sc-24108) — a separate model from `qwen_image` above, not a newer build of
+    // it. Text-to-image only: NO poseLibrary / controlModes / controlScale, because the 2.1
+    // provider declares no conditioning at all. ⚠️ No `image` block: ABSENT MEANS TRUE, and 2.1 is
+    // a true-CFG family that takes both a guidance scale and a negative prompt.
+    id: "qwen_image_2_1",
+    name: "Qwen Image 2.1",
+    type: "image",
+    // Upstream ships ONE pipeline: text-to-image is that pipeline with no condition images, and
+    // editing / multi-reference / local editing are the SAME call with 1-10 ORDERED condition
+    // images. `image_to_image` (sc-24113) is the single-reference face of that call and
+    // `edit_image` (sc-24110) the ordered-set face the Image Editor drives; both are declared
+    // because both are the same engine call. `image_inpaint` is deliberately absent — there is no
+    // mask tensor in this family, so a mask is just another ordered reference the prompt names.
+    capabilities: ["text_to_image", "image_to_image", "edit_image"],
+    // ⚠️ PROVISIONAL KEY (sc-24113) — see `apps/web/src/qwenAlpha.js`. The engine-side RGBA output
+    // contract is being defined concurrently by inference sc-24111, so this flag and the request
+    // field it implies are spelled in exactly three places and a rename is one line in each.
+    supportsAlphaOutput: true,
+    // The seed carries `limits` for this model where most entries do not, because every one of
+    // these keys drives a CONTROL and a pre-catalog render would otherwise offer the wrong bounds:
+    // the Aspect menu would show the blanket 768²/1024²/1280x720/720x1280 (none of which is a legal
+    // 2.1 bucket), Steps would offer 1 against a floor of 2, and the free Width/Height boxes would
+    // offer 256-4096 with no stride. Kept byte-identical to the manifest entry; `imageLimitsParity`
+    // asserts the two agree in both directions.
+    limits: {
+      resolutions: [
+        "2048x2048",
+        "2400x1792",
+        "1792x2400",
+        "2528x1696",
+        "1696x2528",
+        "2752x1536",
+        "1536x2752",
+      ],
+      count: [1, 2, 4, 8],
+      minDimension: 32,
+      maxDimension: 2752,
+      requiresDimensionsMultipleOf: 32,
+      maxReferenceAssets: 10,
+      hardMinSteps: 2,
+      // sc-24114: the curated menu both providers publish — mirrors the manifest.
+      samplers: ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
+      schedulers: ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"],
+    },
+    defaults: {
+      resolution: "2048x2048",
+      steps: 40,
+      guidanceScale: 1.0,
+      count: 1,
+      sampler: "default",
+      scheduler: "default",
+    },
+    ui: {
+      description: "Qwen-Image 2.1 text-to-image and reference editing (research licence).",
+      // The ordered-reference surface: `multiReference` opens the Image Editor's reference rail and
+      // the Studio's plural `referenceAssetIds` payload, widened to the model's declared
+      // `limits.maxReferenceAssets` instead of the global MAX_EDIT_REFERENCES.
+      //
+      // `img2img` was declared here and is REMOVED (sc-24110), for the same reason the manifest
+      // does not declare it: that flag's whole control is the `advanced.strength` slider, and
+      // upstream's condition images have NO strength — the engine refuses one and the API 400s it
+      // at enqueue, so the slider would advertise a knob every render rejects. It also drifted from
+      // the manifest, which never declared it. The single-reference case is the ordered list with
+      // one entry, which is the same engine call.
+      multiReference: true,
+      promptGuide: {
+        title: "Qwen Image 2.1 Prompt Guide",
+        path: "/prompt-guides/qwen-image-2-1.md",
+      },
+    },
+  },
+  {
+    // Qwen Image 2.1 Turbo (epic 25899) — the distilled few-step sibling of `qwen_image_2_1`. The
+    // same pipeline, capabilities, alpha output and bucket ladder; only the step floor (4, from the sc-25909 step sweep), the
+    // default step count (8) and the prompt guide differ. Kept in step with its manifest entry for
+    // the same reason as the base seed above: every `limits` key drives a pre-catalog control.
+    id: "qwen_image_2_1_turbo",
+    name: "Qwen Image 2.1 Turbo",
+    type: "image",
+    capabilities: ["text_to_image", "image_to_image", "edit_image"],
+    supportsAlphaOutput: true,
+    limits: {
+      resolutions: [
+        "2048x2048",
+        "2400x1792",
+        "1792x2400",
+        "2528x1696",
+        "1696x2528",
+        "2752x1536",
+        "1536x2752",
+      ],
+      count: [1, 2, 4, 8],
+      minDimension: 32,
+      maxDimension: 2752,
+      requiresDimensionsMultipleOf: 32,
+      maxReferenceAssets: 10,
+      hardMinSteps: 4,
+      samplers: ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
+      schedulers: ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"],
+    },
+    defaults: {
+      resolution: "2048x2048",
+      steps: 8,
+      guidanceScale: 1.0,
+      count: 1,
+      sampler: "default",
+      scheduler: "default",
+    },
+    ui: {
+      description: "Qwen-Image 2.1 Turbo few-step text-to-image and reference editing (research licence).",
+      multiReference: true,
+      promptGuide: {
+        title: "Qwen Image 2.1 Turbo Prompt Guide",
+        path: "/prompt-guides/qwen-image-2-1-turbo.md",
+      },
     },
   },
   {
@@ -443,6 +586,10 @@ const seededFallbackModels = [
     ui: {
       description: "Stability AI Stable Diffusion XL base 1.0 — open text-to-image foundation with the largest LoRA/finetune ecosystem. CreativeML OpenRAIL++-M (commercial use OK, ungated). SDXL UNet + dual CLIP; ~6.9GB fp16, real CFG + negative prompt, ~30 steps at guidance 7.0; native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance (faithful likeness — see InstantID).",
       promptGuide: { title: "Stable Diffusion XL Prompt Guide", path: "/prompt-guides/sdxl.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
@@ -453,6 +600,28 @@ const seededFallbackModels = [
     ui: {
       description: "Photoreal SDXL finetune that targets the \"shiny/plastic\" look of base SDXL — the same RealVisXL_V5.0 checkpoint the InstantID built-in uses, exposed as a plain selectable. openrail++ (commercial use OK, ungated). Same SDXL UNet + dual CLIP, sdxl-family LoRA support, real CFG + negative prompt; ~30 steps at guidance 7.0, native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance.",
       promptGuide: { title: "RealVisXL Prompt Guide", path: "/prompt-guides/realvisxl.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
+    },
+  },
+  {
+    // Distilled RealVisXL sibling: five-step Lightning sampling with CFG off at the default
+    // guidance 1.0. The native MLX and Candle lanes also accept the shared SDXL OpenPose control.
+    id: "realvisxl_lightning",
+    name: "RealVisXL Lightning (fast photoreal SDXL)",
+    family: "sdxl",
+    type: "image",
+    capabilities: ["text_to_image"],
+    defaults: { resolution: "1024x1024", steps: 5, guidanceScale: 1.0, count: 4 },
+    ui: {
+      description: "Few-step distilled RealVisXL — photoreal SDXL at ~5 steps, roughly 6x faster than the 30-step base. CFG-free by default at guidance 1.0; the negative prompt becomes active only if guidance is raised toward 2.0. Text-to-image and OpenPose control only; use standard RealVisXL for edits, reference identity, inpaint, or detail-refine.",
+      promptGuide: { title: "RealVisXL Lightning Prompt Guide", path: "/prompt-guides/realvisxl-lightning.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
@@ -470,6 +639,10 @@ const seededFallbackModels = [
       promptHint:
         "Danbooru-tag model: lead with the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, silver hair, ornate dress, dynamic pose). Plain sentences underperform tags.",
       promptGuide: { title: "Illustrious Prompt Guide", path: "/prompt-guides/illustrious.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
@@ -486,6 +659,10 @@ const seededFallbackModels = [
       promptHint:
         "Danbooru-tag model: lead with the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, silver hair, ornate dress, dynamic pose). Plain sentences underperform tags.",
       promptGuide: { title: "Illustrious Prompt Guide", path: "/prompt-guides/illustrious.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
@@ -687,11 +864,14 @@ const seededFallbackModels = [
     name: "LTX-2.3",
     type: "video",
     capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
-    defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+    defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced", steps: 8 },
     limits: {
       durations: [4, 6, 8, 10, 12, 15],
       recommendedMaxDuration: 10,
       fps: [24, 25, 30],
+      // Distilled: 8 baked sigma waypoints is the ONLY renderable count on either backend, so the
+      // Steps control pins rather than accepting a value the enqueue gate would refuse (sc-19502).
+      steps: [8],
       resolutions: ["768x512", "512x768", "640x640", "1280x704", "704x1280"],
     },
     ui: {
@@ -704,12 +884,15 @@ const seededFallbackModels = [
     id: "ltx_2_3_eros",
     name: "LTX-2.3 10Eros",
     type: "video",
+    macOnly: true,
     capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
-    defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+    defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced", steps: 8 },
     limits: {
       durations: [4, 6, 8, 10, 12, 15],
       recommendedMaxDuration: 10,
       fps: [24, 25, 30],
+      // Same distilled schedule as base LTX-2.3 (sc-19502).
+      steps: [8],
       resolutions: ["768x512", "512x768", "640x640", "1280x704", "704x1280"],
     },
     ui: {
@@ -790,6 +973,9 @@ const seededFallbackModels = [
     id: "wan_2_2_i2v_14b",
     name: "Wan2.2 14B (I2V)",
     type: "video",
+    // No `first_last_frame` (sc-19504): neither engine has a keyframe path on the A14B. This mirror
+    // is what the picker reads BEFORE the catalog loads, so a stale capability here re-offers the
+    // dead tab for that whole window — `declared video capabilities are all offerable` pins it.
     capabilities: ["image_to_video", "extend_clip", "video_bridge"],
     defaults: { duration: 5, fps: 16, resolution: "1280x720", quality: "balanced" },
     limits: {
@@ -837,6 +1023,81 @@ const seededFallbackModels = [
       description: "Wan2.2 A14B VACE control model (high/low-noise mixture-of-experts) for person replacement and controllable video.",
       durationHint: "Heavy dual-expert control model — keep clips at 5s or less. Generates at 16fps.",
       promptGuide: { title: "Wan2.2 VACE-Fun Prompt Guide", path: "/prompt-guides/wan-2-2-t2v-14b.md" },
+    },
+  },
+  // MiniMax-H3 / Hailuo 3.0 (epic 17137, sc-17158). ⚠️ A MIRROR of
+  // config/manifests/builtin.models.jsonc, not a source of truth — the catalog is, and editing only
+  // this file ships nothing (sc-4997's fast path changed only the mirror and never took effect).
+  // videoGeometryParity.test.js pins the resolutions + default against the manifest in both
+  // directions.
+  //
+  // The duration menu is the FOURTEEN `17n + 5` lattice rungs, NOT a range and NOT the `4k + 1` the
+  // epic's R7 claims — see MINIMAX_H3_LEGAL_FRAME_COUNTS in
+  // crates/sceneworks-core/src/video_request.rs. Every bucket is on the default ÷32 stride, so no
+  // `requiresDimensionsMultipleOf` travels with them.
+  {
+    id: "minimax_h3",
+    name: "MiniMax-H3",
+    type: "video",
+    capabilities: ["text_to_video", "image_to_video", "first_last_frame"],
+    defaults: { duration: 5.1667, fps: 24, resolution: "1344x768", steps: 50 },
+    limits: {
+      durations: [5.1667, 5.875, 6.5833, 7.2917, 8.0, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583, 13.6667, 14.375],
+      hardMinDuration: 5.1667,
+      hardMaxDuration: 14.375,
+      recommendedMaxDuration: 14.375,
+      // MODEL EVALUATIONS (NFE), not sigma grid points — the engine appends the terminal 0 itself,
+      // so 1 evaluation is a legal 2-point grid that renders, as a single Euler jump from pure
+      // noise. 2 is the smallest schedule with an intermediate sigma, so the floor is a product
+      // judgement, and it is refused rather than raised (sc-19426, corrected sc-18726). See the
+      // manifest's `hardMinSteps` comment for the full account.
+      hardMinSteps: 2,
+      fps: [24],
+      maxPixels: 1032192,
+      resolutions: ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],
+    },
+    ui: {
+      // Licence-required attribution (MiniMax H3 Community License §IV.2, sc-17227). Keep it in
+      // the hand-authored mirror as a parity invariant even though generation surfaces now wait for
+      // the authoritative /api/v1/models response before offering a model (sc-17161).
+      attribution: "Powered by MiniMax H3",
+      // sc-17162 — keep the withheld-component disclosure in the MIRROR as well so its descriptive
+      // metadata stays in lockstep with the generated manifest. Condensed against the manifest's
+      // prose, but it carries the same four load-bearing claims, and
+      // `minimaxH3CatalogCopy.test.js` pins the mirror to the manifest claim-by-claim.
+      description: "MiniMax-H3 video + synchronized stereo audio; first/last-frame conditioning. No guidance scale or negative prompt. Open weights: H3-Context-IR and H3-Regenerate-2K are unreleased; prompt adherence differs from Hailuo and 2K is not reachable from these weights. Attention runs dense by default. Optional Veda uses the managed predictor and falls back to dense when it cannot run. The shortest dense clip at 1344x768 is a two-hour render. Fourteen lengths, 5.17s–14.38s; 15s is refused rather than shortened; no still-image mode.",
+      durationHint: "Fourteen clip lengths only, 5.17s-14.38s at 24fps, and 15s is refused rather than shortened to 14.38s. Cost is canvas-driven — 5.17s at 576x320 is ~14 minutes, the same clip at 1344x768 is ~2 hours.",
+      promptGuide: { title: "MiniMax-H3 Prompt Guide", path: "/prompt-guides/minimax-h3.md" },
+    },
+  },
+  {
+    id: "minimax_h3_ref",
+    name: "MiniMax-H3 References",
+    type: "video",
+    capabilities: ["reference_to_video"],
+    defaults: { duration: 5.1667, fps: 24, resolution: "1344x768", steps: 50 },
+    limits: {
+      durations: [5.1667, 5.875, 6.5833, 7.2917, 8.0, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583, 13.6667, 14.375],
+      hardMinDuration: 5.1667,
+      hardMaxDuration: 14.375,
+      recommendedMaxDuration: 14.375,
+      hardMinSteps: 2,
+      fps: [24],
+      maxPixels: 1032192,
+      resolutions: ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],
+      maxReferenceAssets: 9,
+      maxSourceClipAssets: 3,
+      maxReferenceAudioAssets: 3,
+      maxCombinedReferenceAssets: 12,
+    },
+    ui: {
+      // §IV.2 attribution, same as `minimax_h3` — see that entry (sc-17227 / sc-17161).
+      attribution: "Powered by MiniMax H3",
+      // sc-17162 — carried in full rather than by reference, same as the manifest entry: this is a
+      // separate model card and a user can install it without ever opening the other one's.
+      description: "MiniMax-H3 reference video: up to 9 images, 3 clips and 3 audio references (12 total); synchronized stereo audio. Open weights: H3-Context-IR and H3-Regenerate-2K are unreleased; prompt adherence differs from Hailuo and 2K is not reachable from these weights. Attention runs dense by default. Optional Veda uses the managed predictor and falls back to dense when it cannot run. The shortest dense clip at 1344x768 is a two-hour render. No guidance scale or negative prompt. Fourteen lengths, 5.17s–14.38s; 15s is refused rather than shortened; no still-image mode.",
+      durationHint: "Same fourteen clip lengths as MiniMax-H3, 5.17s-14.38s at 24fps, 15s is refused rather than shortened to 14.38s, and the same canvas-driven cost.",
+      promptGuide: { title: "MiniMax-H3 Prompt Guide", path: "/prompt-guides/minimax-h3.md" },
     },
   },
   // Audio models (epic 13400 A2/A3) — this mirrors the `type:"audio"` catalog entries so the
@@ -975,6 +1236,45 @@ const seededFallbackModels = [
       },
     },
   },
+  // YuE lyrics2song (epic sc-19373, sc-19383) — six stage-1 checkpoints, mirrored from
+  // builtin.models.jsonc. `supportsSegmentedLyrics` is the Music-mode signal for a model with no
+  // edit surface; the ICL variants' ReferenceAudio is a song prompt, not a voice-clone signal.
+  ...[
+    ["en", "English", ["en"]],
+    ["zh", "Chinese", ["zh"]],
+    ["jp_kr", "Japanese / Korean", ["ja", "ko"]],
+  ].flatMap(([lang, langLabel, languages]) =>
+    ["cot", "icl"].map((mode) => {
+      const icl = mode === "icl";
+      const modeLabel = icl ? "ICL" : "CoT";
+      return {
+        id: `yue_${lang}_${mode}`,
+        name: `YuE ${langLabel} ${modeLabel} (Lyrics-to-Song)`,
+        type: "audio",
+        macOnly: false,
+        audio: {
+          languages,
+          sampleRates: [44100],
+          ...(icl ? { conditioning: ["ReferenceAudio"] } : {}),
+          supportsMultiSpeaker: false,
+          supportsGuidance: true,
+          supportsNegativePrompt: false,
+          supportsSegmentedLyrics: true,
+          supportsRepetitionPenalty: true,
+          supportsReferenceRegion: icl,
+          supportsOutputLimiter: true,
+        },
+        ui: {
+          label: `YuE ${langLabel} ${modeLabel}`,
+          description: `YuE lyrics-to-song model for ${langLabel} lyrics — full songs with vocals from structured lyrics and genre tags, returned as a 44.1 kHz mix plus vocal and instrumental stems.${icl ? " Conditions on a reference clip (in-context learning)." : ""} Candle-native on every platform. Apache-2.0.`,
+          promptGuide: {
+            title: "YuE Lyrics-to-Song Guide",
+            path: "/prompt-guides/yue.md",
+          },
+        },
+      };
+    }),
+  ),
   {
     id: "openvoice_v2",
     name: "OpenVoice V2 (Voice Conversion)",

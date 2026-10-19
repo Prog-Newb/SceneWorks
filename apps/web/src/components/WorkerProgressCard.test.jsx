@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   WorkerProgressCard,
+  deriveFullJobTitle,
   deriveJobTitle,
   getJobTypeChip,
   useLiveJobElapsedSeconds,
@@ -82,6 +83,16 @@ describe("deriveJobTitle", () => {
     expect(title.length).toBeLessThan(120);
   });
 
+  it("reconstructs the full prompt when the server title is already truncated", () => {
+    const prompt = "A wide cinematic establishing shot of a lighthouse during a violent midnight storm";
+    const job = {
+      type: "video_generate",
+      title: "Generate Video — A wide cinematic establishing shot…",
+      payload: { prompt },
+    };
+    expect(deriveFullJobTitle(job)).toBe(`Generate Video — ${prompt}`);
+  });
+
   it("formats character turnaround when characterId is set", () => {
     const job = {
       type: "image_generate",
@@ -150,6 +161,52 @@ describe("WorkerProgressCard layout", () => {
     );
     expect(card.querySelector(".worker-progress-card__id").getAttribute("title")).toBe("job-abcdef123456");
     expect(card.querySelector(".worker-progress-card__id").textContent).toBe("job-ab…3456");
+  });
+
+  it("expands and collapses a shortened prompt when enabled", () => {
+    const prompt = "A detailed portrait of a lighthouse keeper watching waves break across the harbor wall at midnight";
+    const shortenedTitle = "Generate Image — A detailed portrait of a lighthouse keeper…";
+    const job = {
+      id: "job-long-prompt",
+      type: "image_generate",
+      title: shortenedTitle,
+      status: "queued",
+      progress: 0,
+      attempts: 1,
+      payload: { prompt },
+    };
+    api = render(<WorkerProgressCard job={job} allowTitleExpansion />, makeContext([]));
+
+    const title = api.container.querySelector(".worker-progress-card__title");
+    const toggle = api.container.querySelector(".worker-progress-card__title-toggle");
+    expect(title.textContent).toBe(shortenedTitle);
+    expect(title.getAttribute("title")).toBe(`Generate Image — ${prompt}`);
+    expect(toggle.textContent).toBe("Show full prompt");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    act(() => toggle.click());
+    expect(title.textContent).toBe(`Generate Image — ${prompt}`);
+    expect(title.classList.contains("expanded")).toBe(true);
+    expect(toggle.textContent).toBe("Show less");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+
+    act(() => toggle.click());
+    expect(title.textContent).toBe(shortenedTitle);
+    expect(title.classList.contains("expanded")).toBe(false);
+  });
+
+  it("does not offer prompt expansion outside opted-in Queue cards", () => {
+    const job = {
+      id: "job-long-prompt",
+      type: "image_generate",
+      title: "Generate Image — shortened…",
+      status: "queued",
+      progress: 0,
+      attempts: 1,
+      payload: { prompt: "A much longer original prompt that should remain private to the Queue disclosure control" },
+    };
+    api = render(<WorkerProgressCard job={job} />, makeContext([]));
+    expect(api.container.querySelector(".worker-progress-card__title-toggle")).toBeNull();
   });
 
   it("renders live GPU meters for a running job assigned to a CUDA worker", () => {
@@ -235,6 +292,26 @@ describe("WorkerProgressCard layout", () => {
     expect(labels).toEqual(["Cancel"]);
   });
 
+  it("requires a visible compute choice before duplicating a pre-policy YuE2 job", () => {
+    const job = {
+      id: "old-yue2", type: "audio_generate", status: "completed", attempts: 1,
+      payload: { model: "yue2", yue2: { kind: "create", lyrics: "la", runId: "yue2run_old" } },
+    };
+    const onDuplicate = vi.fn();
+    api = render(<WorkerProgressCard job={job} onDuplicate={onDuplicate} />, makeContext([]));
+    const choice = api.container.querySelector('select[aria-label="Compute precision for duplicate"]');
+    const button = [...api.container.querySelectorAll("button")].find((item) => item.textContent === "Duplicate");
+    expect(choice).not.toBeNull();
+    expect(button.disabled).toBe(true);
+    act(() => {
+      choice.value = "fp32";
+      choice.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(button.disabled).toBe(false);
+    act(() => button.click());
+    expect(onDuplicate).toHaveBeenCalledWith(job, "fp32");
+  });
+
   it("renders a pending_caption job as an in-flight, cancelable job (sc-9120)", () => {
     // A pending_caption Ideogram job (awaiting the async prompt rewrite) is non-terminal: it gets a
     // readable badge and can be canceled before a worker starts, like a queued job.
@@ -296,6 +373,39 @@ describe("WorkerProgressCard layout", () => {
       buttons[1].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     });
     expect(onFreshRetry).toHaveBeenCalledWith(resumedJob, { payloadChanges: { downloadAction: "fresh" } });
+  });
+
+  it("offers Resume only for a stopped training job with a checkpoint, and Restart from step 0 (sc-25785)", () => {
+    const job = {
+      id: "t",
+      type: "lora_train",
+      status: "canceled",
+      attempts: 1,
+      payload: {},
+      result: { resumeCheckpointStep: 150 },
+    };
+    const onRetry = vi.fn();
+    api = render(<WorkerProgressCard job={job} onRetry={onRetry} />, makeContext([]));
+    let buttons = Array.from(api.container.querySelectorAll(".worker-progress-card__actions button"));
+    expect(buttons.map((button) => button.textContent)).toEqual(["Resume from step 150", "Restart from step 0"]);
+    act(() => {
+      buttons[0].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(onRetry).toHaveBeenLastCalledWith(job, { resume: true });
+    act(() => {
+      buttons[1].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(onRetry).toHaveBeenLastCalledWith(job, { resume: false });
+
+    for (const variant of [
+      { ...job, id: "t2", result: {} },
+      { ...job, id: "t3", status: "completed" },
+    ]) {
+      api.cleanup();
+      api = render(<WorkerProgressCard job={variant} onRetry={onRetry} />, makeContext([]));
+      buttons = Array.from(api.container.querySelectorAll(".worker-progress-card__actions button"));
+      expect(buttons.map((button) => button.textContent)).toEqual(["Restart from step 0"]);
+    }
   });
 
   it("shows the dismiss × on a terminal job and calls onClear (issue #1556)", () => {
@@ -1223,5 +1333,107 @@ describe("live preview support states", () => {
     expect(api.container.querySelectorAll(".worker-progress-card__thumb-cell.interim")).toHaveLength(
       1,
     );
+  });
+});
+
+// sc-19577 — the queue card is the FIRST place a just-finished render is seen, and for the joint
+// audio+video family it is where "did this one come out with sound?" is asked. The badge's own
+// suite covers the component and the review-grid/detail mount sites; this covers the queue card's
+// `video-player` variant, which renders a different subtree (`VideoThumbnail`) and so is not
+// reached by any of those.
+describe("WorkerProgressCard audio track badge (sc-19577)", () => {
+  let api = null;
+
+  afterEach(() => {
+    api?.cleanup();
+    api = null;
+  });
+
+  // One fixture, `hasAudio` spliced in per case, so every assertion below discriminates on that one
+  // key rather than on some unrelated absence.
+  const clip = (hasAudio) => {
+    const file = {
+      path: "asset_1.mp4",
+      mimeType: "video/mp4",
+      width: 1344,
+      height: 768,
+      duration: 5.1667,
+      fps: 24,
+      frameCount: 124,
+    };
+    if (hasAudio !== undefined) {
+      file.hasAudio = hasAudio;
+    }
+    return {
+      id: "asset_1",
+      type: "video",
+      url: "/api/v1/files/asset_1.mp4",
+      projectId: "project_1",
+      generationSetId: "genset_1",
+      file,
+      status: {},
+      recipe: { model: "minimax_h3", prompt: "a lighthouse keeper hums" },
+    };
+  };
+
+  const videoJob = {
+    id: "job-1",
+    type: "video_generate",
+    status: "succeeded",
+    stage: "done",
+    payload: { prompt: "a lighthouse keeper hums" },
+  };
+
+  const renderCard = (asset) =>
+    render(
+      <WorkerProgressCard
+        job={videoJob}
+        thumbnailsVariant="video-player"
+        thumbnailAssets={[asset]}
+      />,
+      makeContext([appleWorker]),
+    );
+
+  it("badges a measured soundtrack on the queue card, and nothing else", () => {
+    api = renderCard(clip(true));
+    expect(api.container.querySelector(".audio-track-badge")).not.toBeNull();
+    expect(api.container.querySelector(".audio-track-badge").getAttribute("aria-label")).toBe(
+      "Has audio",
+    );
+    api.cleanup();
+
+    // Measured and SILENT — the same MiniMax-H3 checkpoint produces both, so a family lookup would
+    // wrongly badge this one.
+    api = renderCard(clip(false));
+    expect(api.container.querySelector(".audio-track-badge")).toBeNull();
+    api.cleanup();
+
+    // Never measured (every render predating sc-19577): no claim either way.
+    api = renderCard(clip(undefined));
+    expect(api.container.querySelector(".audio-track-badge")).toBeNull();
+    api.cleanup();
+
+    // …and back, so the two negatives above are discriminating on `hasAudio` rather than on the
+    // queue card having quietly stopped rendering the badge at all.
+    api = renderCard(clip(true));
+    expect(api.container.querySelector(".audio-track-badge")).not.toBeNull();
+  });
+});
+
+describe("Veda job result observations", () => {
+  it("reads the actual assetWrites result carrier and ignores requested sparse status alone", () => {
+    const job = { id: "h3-job", type: "video_generate", status: "completed", payload: {
+      model: "minimax_h3", advanced: { veda: { enabled: true } },
+    }, result: { assetWrites: [{ rawAdapterSettings: {
+      veda: { enabled: true }, vedaExecution: { effective: "dense", totalAttentionFraction: 1,
+        fallbackReason: "managed predictor is missing" },
+    } }] } };
+    const rendered = render(<WorkerProgressCard job={job} />, makeContext([]));
+    expect(rendered.container.textContent).toContain("Observed attention: Dense");
+    expect(rendered.container.textContent).toContain("managed predictor is missing");
+    rendered.cleanup();
+    const later = render(<WorkerProgressCard job={{ ...job, id: "later-job", result: {} }} />, makeContext([]));
+    expect(later.container.textContent).not.toContain("Observed attention");
+    later.cleanup();
   });
 });

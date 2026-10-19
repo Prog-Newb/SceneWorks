@@ -301,6 +301,9 @@ keys in either direction: a key this table does not name is dropped on write **a
 | `upscale.factor` | The upscale factor. |
 | `upscale.engine` | The upscale engine label. |
 | `upscale.softness` | The upscale softness. |
+| `upscale.scale` | The Iris restoration output scale (any positive factor; 1 restores without resizing). |
+| `upscale.inputSizing` | The Iris restoration input sizing: `budgeted` or `original`. |
+| `upscale.colorFix` | Whether the Iris restoration colour correction ran. |
 | `loras[].name` | For a generated image, the safe readable stem of the exact adapter filename. It associates the prompt tag with the hash map but is not resource identity. A foreign or unresolved recipe may instead carry its portable display hint. |
 | `loras[].weight` | Its weight. |
 | `loras[].repo` | Its Hugging Face `owner/name`, when the catalog entry resolved to one. Never a path, never a local id. |
@@ -387,11 +390,15 @@ smuggled under a scalar key.
 | `sampler` | `Scalar` | Sampler choice. |
 | `scheduler` | `Scalar` | Scheduler choice. |
 | `schedulerShift` | `Scalar` | Time-shift (mu) for the curated schedule. |
+| `cfgInterval` | `NumberPair` | Classifier-free-guidance interval `[start, end]` in model time (Iris-3B). Any other shape is dropped. |
+| `captionOverflow` | `Scalar` | Caption-overflow policy (`warn` / `error` / `silent`) for an over-long prompt (Iris-3B). |
 | `steps` | `Scalar` | Step-count override. |
 | `guidanceScale` | `Scalar` | Guidance override. |
 | `guidanceMethod` | `Scalar` | Guidance method (CFG / CFG++). |
 | `enhancePrompt` | `Scalar` | Caption-upsampling opt-in — it changes the prompt the model sees. |
+| `transparentBackground` | `Scalar` | Transparency: the model decodes four channels and the render carries a real alpha channel instead of being composited onto white. A cut-out is the picture the author asked for, so replaying their recipe onto an opaque render would produce a different image. Only models that advertise alpha output emit it; a replay onto one that does not is refused by name rather than downgraded. |
 | `usePid` | `Scalar` | PiD decoder opt-in. Changes the produced image, and is its non-commercial marker. |
+| `decoder` | `Scalar` | Experimental alternate terminal decoder id. Native is omitted. |
 | `pidTarget` | `Scalar` | PiD output tier (2k / 4k). |
 | `ipAdapterScale` | `Scalar` | Reference strength. |
 | `controlnetConditioningScale` | `Scalar` | Identity-structure strength (InstantID). |
@@ -413,6 +420,12 @@ smuggled under a scalar key.
 | `motion` | `Scalar` | **Video.** Camera-motion preset off a closed menu (`static`, `slow push-in`, `handheld`). It conditions the generation. |
 | `ltxPipeline` | `Scalar` | **Video.** LTX pipeline selector. It picks which denoise path runs, so two values give two different clips from one prompt. |
 | `distilledVariant` | `Scalar` | **Video.** LTX distilled-checkpoint variant. A different checkpoint is a different model for replay purposes. |
+| `transformerVariant` | `Scalar` | **Video.** LTX 2.5 transformer choice (`distilled` / `dev`). It changes the checkpoint, schedule, guidance and refinement recipe. |
+| `vaeDecoder` | `Scalar` | **Video.** LTX 2.5 Conv-versus-DiffVAE decoder choice. It changes the reconstruction path and rendered detail. |
+| `autoDuration` | `Scalar` | **Video.** LTX 2.5 duration-head opt-in. It decides whether the prompt or an explicit duration supplies the frame count. |
+| `autoDurationMinSeconds` | `Scalar` | **Video.** Authored lower bound for LTX 2.5 duration prediction. It constrains the resulting clip length. |
+| `autoDurationMaxSeconds` | `Scalar` | **Video.** Authored upper bound for LTX 2.5 duration prediction. It constrains the resulting clip length. |
+| `temporalUpsampleRounds` | `Scalar` | **Video.** LTX 2.5 temporal-refinement count. Each round changes the output frame count and motion. |
 | `textEncoderModel` | `Scalar` | **Video.** The text-encoder pick — it changes what the model *sees* of the prompt. A catalog-global slug, not a local id. |
 | `lightning` | `Scalar` | **Video.** Wan2.2 A14B fast-4-step toggle. It swaps in a distilled recipe and overrides the step count. |
 | `videoCfgGuidanceScale` | `Scalar` | **Video.** LTX native CFG scale — the video lane's `guidanceScale`. |
@@ -420,6 +433,7 @@ smuggled under a scalar key.
 | `videoRescaleScale` | `Scalar` | **Video.** LTX guidance-rescale factor. |
 | `videoConditioningStrength` | `Scalar` | **Video.** Source-clip conditioning strength for extend / bridge / v2v — the video lane's `strength`. |
 | `bridgeRightVideoConditioningStrength` | `Scalar` | **Video.** The right-clip strength for a bridge. Without it a shared bridge replays lopsided. |
+| `veda` | `H3VedaSettings` | **Video.** The complete MiniMax-H3 Veda control object, validated as one closed request shape so sparsity and full-attention settings replay together. |
 | `timelineAction` | `Scalar` | **Video.** Which timeline operation made the clip (`extend` / `replace` / `bridge`). A closed vocabulary with no id in it; its companion `timelineContext` is withheld. |
 
 <!-- END PINNED: advanced-shared -->
@@ -522,6 +536,7 @@ times larger.
 | `control` | A pre-made control map, with the conditioning it feeds in `controlMode`. |
 | `sourceClip` | **Video.** A clip the run continues, re-times or bridges from. Separate from `source` because "needs a still to start from" and "needs a clip to continue" are different asks of whoever replays it. |
 | `referenceClip` | **Video.** A reference clip the run conditions on — the moving counterpart of `reference`. |
+| `referenceAudio` | **Video.** A reference audio clip the run conditions on — the audible counterpart of `reference`. |
 
 <!-- END PINNED: input-kinds -->
 
@@ -580,7 +595,7 @@ measurement found a new way to spend what they left.
 | `PROSE_MAX_BYTES` | 16,384 | Each authored prose field, in bytes. | Truncated at a whole character. Prose still means what it said after its tail is cut. |
 | `LABEL_MAX_CHARS` | 200 | Each non-prose label (model slug, style id, LoRA name, producer block), in characters. | **Dropped**, not truncated — a slug's spelling is its identity. |
 | `MAX_SHARE_LORAS` | 5 | Entries in `loras`. | The list is dropped whole and `omitted` gains `loras`. |
-| `MAX_SHARE_INPUTS` | 6 | Entries in `inputs` — one per kind, and the kinds are closed. | The list is dropped whole and `omitted` gains `inputs`. |
+| `MAX_SHARE_INPUTS` | 7 | Entries in `inputs` — one per kind, and the kinds are closed. | The list is dropped whole and `omitted` gains `inputs`. |
 | `MAX_SHARE_PHASES` | 8 | Entries in `advanced.phases`. | The key is dropped and `omitted` gains `advanced.phases`. |
 | `MAX_SHARE_POSES` | 64 | Entries in `advanced.poses`. | The key is dropped and `omitted` gains `advanced.poses`. |
 | `MAX_SHARE_POSE_SLOTS` | 6,144 | Coordinate slots across the whole `advanced.poses` array — a number, or a `null` standing in for one. | The key is dropped and `omitted` gains `advanced.poses`. |
@@ -658,8 +673,9 @@ whether the key describes **what to make** or **what this machine can afford to 
 
 - `allow(key, shape, reason)` — it describes the intended output. It travels, and a stranger opening
   your image sees it. Pick the `shape` that matches: `Scalar` for a string, number or bool (an
-  object or array under a `Scalar` key is dropped, which is what closes the smuggling channel); one
-  of the structured shapes otherwise.
+  object or array under a `Scalar` key is dropped, which is what closes the smuggling channel);
+  `H3VedaSettings` for the complete five-field MiniMax-H3 controls validated by the shared H3
+  request validator; or one of the other structured shapes.
 - `deny(key, reason)` — it describes this install (a tier, a kernel, a GPU) or names something local
   (an id, a path, a preset). It is dropped, and a shared image will not reproduce whatever it did.
 
@@ -724,7 +740,7 @@ key with no row is treated as not restored — rendered and marked, never silent
 either direction.
 
 That guardrail exists because the first cut of the panel displayed ten knobs — `enhancePrompt`,
-`usePid`, `pidTarget`, `strength`, `textStyleGain`, `faceRestore`, `controlMode`, `controlScale`,
+`usePid`, `decoder`, `pidTarget`, `strength`, `textStyleGain`, `faceRestore`, `controlMode`, `controlScale`,
 `poses`, `phases` — as ordinary settings rows while none of them reached a control. Being told a
 recipe replayed faithfully when it did not is the failure this whole contract exists to prevent.
 
@@ -846,7 +862,9 @@ deferred.
 | `crates/sceneworks-worker/src/image_jobs.rs` | `write_upscaled_asset` | Embeds — the inline-upscaled variant's own PNG. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `detail_workflow_share` | Embeds — the standalone detail pass's envelope. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `standalone_upscale_workflow_share` | Embeds — the standalone upscale job's envelope. |
+| `crates/sceneworks-worker/src/image_jobs.rs` | `standalone_restore_workflow_share` | Embeds — the standalone Iris restoration job's envelope (sc-25683). |
 | `crates/sceneworks-worker/src/image_jobs/detail.rs` | `run_image_detail_job` | Embeds — writes the refined PNG. macOS-gated; the scan is textual, so it is read on every platform. |
+| `crates/sceneworks-worker/src/upscale_jobs.rs` | `run_iris_restore_job_using` | Embeds — hands the standalone Iris restoration's envelope to the shared single-child writer (sc-25683). |
 | `crates/sceneworks-worker/src/upscale_jobs.rs` | `run_image_upscale_job` | Embeds — hands the standalone upscale's envelope to the shared single-child writer. |
 | `crates/sceneworks-worker/src/single_child_asset.rs` | `write_single_child_asset` | Conduit — writes the envelope its caller decided on, and builds none itself. |
 | `crates/sceneworks-worker/src/video_jobs/mod.rs` | `video_workflow_metadata` | Embeds — the funnel every *generated* clip is encoded through, whatever engine or studio produced it. |

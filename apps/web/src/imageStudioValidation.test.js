@@ -72,6 +72,20 @@ describe("imageGenerateValidation", () => {
     expect(rolled.surfaced.map((i) => i.message)).toContain(msg);
   });
 
+  it("blocks a restored alternate decoder until engine capabilities are authoritative", () => {
+    const summary = summarize(
+      imageGenerateValidation({ ...whole, decoderCapabilitiesPending: true }),
+    );
+    expect(summary.ready).toBe(false);
+    expect(summary.surfaced).toEqual([
+      expect.objectContaining({
+        field: "decoder",
+        kind: "error",
+        message: "Waiting for engine capabilities before using the restored decoder.",
+      }),
+    ]);
+  });
+
   it("requires caption content on a structured model, silently", () => {
     const issues = imageGenerateValidation({ ...whole, structuredActive: true, captionHasContent: false, prompt: "" });
     expect(kinds(issues, "caption")).toEqual(["requirement"]);
@@ -236,11 +250,40 @@ describe("imageBatchValidation", () => {
     expect(summarize(imageBatchValidation(whole)).surfaced).toEqual([]);
   });
 
+  // S2: the Iris post-processing plan of EVERY batch render size gates the batch Run — a prompt whose
+  // [WxH] directive the restore would refuse never lets the batch start (and render its base image).
+  it("blocks a batch whose Iris restoration plan is refused, and waits while it plans", () => {
+    const refused = summarize(
+      imageBatchValidation({
+        ...whole,
+        restorePlan: { ready: false, blocked: true, error: "output 6144x10752 exceeds 8192" },
+      }),
+    );
+    expect(refused.ready).toBe(false);
+    expect(refused.surfaced[0].message).toBe("Iris restoration cannot run: output 6144x10752 exceeds 8192");
+    const planning = summarize(imageBatchValidation({ ...whole, restorePlan: { ready: false, blocked: false } }));
+    expect(planning.ready).toBe(false);
+    expect(planning.surfaced).toEqual([]);
+    expect(summarize(imageBatchValidation({ ...whole, restorePlan: { ready: true, blocked: false } })).ready).toBe(true);
+  });
+
   it("treats an empty batch as a silent requirement", () => {
     const issues = imageBatchValidation({ ...whole, batchTotal: 0 });
     expect(issues.find((i) => i.field === "prompts").kind).toBe("requirement");
     expect(summarize(issues).surfaced).toEqual([]);
     expect(summarize(issues).ready).toBe(false);
+  });
+
+  it("blocks a batch while a restored alternate decoder waits for engine capabilities", () => {
+    const summary = summarize(
+      imageBatchValidation({ ...whole, decoderCapabilitiesPending: true }),
+    );
+    expect(summary.ready).toBe(false);
+    expect(summary.surfaced[0]).toMatchObject({
+      field: "decoder",
+      kind: "error",
+      message: "Waiting for engine capabilities before using the restored decoder.",
+    });
   });
 
   it("surfaces missing template keys as an error", () => {
@@ -304,6 +347,17 @@ describe("imageBatchValidation", () => {
     expect(summary.surfaced[0].message).toBe(
       "Batch prompts 2 (4001/4000), 4 (4002/4000) exceed the character limit — shorten the prompt or pick a shorter style.",
     );
+  });
+
+  it("stops a streaming budget preflight after the first actionable overage", () => {
+    function* prompts() {
+      yield "x".repeat(PROMPT_MAX_CHARS + 1);
+      throw new Error("the preflight must not retain or inspect later violations");
+    }
+
+    expect(batchPromptBudgetOverages(prompts(), 1)).toEqual([
+      { item: 1, length: 4001, max: 4000, remaining: -1, over: true },
+    ]);
   });
 
   it("catches a batch item whose short raw prompt only exceeds the cap after style composition", () => {

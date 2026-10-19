@@ -25,6 +25,35 @@ enum GenEvent {
         expected_prompt: String,
         report: gen_core::PromptEnhancementReport,
     },
+    /// The re-assembled three checkpoint facts of THIS load (sc-11045): the runtime handle only
+    /// answers `Generator::checkpoint_weight_facts()` after a materialization, which is strictly
+    /// after the route stamped its pre-load raw settings, so the producing lane rebuilds the fact
+    /// set on the blocking thread once the engine's receipt exists and sends the finished receipt
+    /// object here. Job-scoped rather than per-image: the consumer keeps the latest value
+    /// (publication is last-write-wins engine-side too) and applies it to every subsequent asset
+    /// write, replacing the pre-load `no-runtime-receipt` stamp. Lanes that hold no handle simply
+    /// never produce this variant.
+    //
+    // The producers today are the candle imported-Krea and checkpoint-plan lanes (the routes whose
+    // runtime handles answer `checkpoint_weight_facts()` at this pin), so builds without those
+    // lanes construct nothing here while the consumer arm still compiles everywhere.
+    #[cfg_attr(
+        not(all(not(target_os = "macos"), feature = "backend-candle")),
+        allow(dead_code)
+    )]
+    CheckpointWeightFacts { facts: Value },
+    /// Per-image provenance facts of image `index` (sc-25681): the engine's non-fatal warnings and
+    /// the applied adapter stack (`lane_controls::image_facts`). Sent before that image's
+    /// [`GenEvent::Image`] on the same channel; the consumer merges the block into that image's
+    /// `rawAdapterSettings`. Lanes with nothing to report never produce it.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        )),
+        allow(dead_code)
+    )]
+    ImageFacts { index: usize, facts: JsonObject },
     Image {
         index: usize,
         seed: i64,
@@ -86,6 +115,19 @@ impl PromptEnhancementEventSink {
                 report,
             });
         })
+    }
+}
+
+impl PromptEnhancementEventSink {
+    /// Report image `index`'s provenance facts (sc-25681) on the same per-item channel the
+    /// prompt-enhancement report rides. Load-bearing like that report, so it blocks rather than
+    /// dropping under channel pressure; it is sent before the image itself, so the consumer holds
+    /// it when the image is written.
+    fn send_image_facts(&self, facts: JsonObject) {
+        let _ = self.tx.blocking_send(GenEvent::ImageFacts {
+            index: self.index,
+            facts,
+        });
     }
 }
 
@@ -307,6 +349,51 @@ where
     Ok(())
 }
 
+/// Drive ONE engine call that renders a whole native prompt batch (sc-25681): its progress rides
+/// image 0's channel, then each returned image `k` (engine order — prompt-minor) is published as
+/// image `k` on seed `seed + k`, the seed the engine drew its noise from, after its provenance
+/// `facts`. A cancel or an engine failure inside the call returns before any image is sent, so a
+/// partial batch is never published; a count that is not `expected` is a typed engine failure.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+fn drive_native_prompt_batch<F>(
+    tx: tokio::sync::mpsc::Sender<GenEvent>,
+    seed: i64,
+    expected: usize,
+    generate: F,
+) -> WorkerResult<()>
+where
+    F: FnOnce(
+        gen_core::PreviewSink,
+        &mut dyn FnMut(Progress),
+    ) -> WorkerResult<(Vec<(u32, u32, Vec<u8>)>, Option<JsonObject>)>,
+{
+    let _cache_release = RequestCacheRelease;
+    let mut on_progress = |progress| send_gen_progress(&tx, 0, progress);
+    let (images, facts) = generate(preview_sink_for(&tx, 0), &mut on_progress)?;
+    if images.len() != expected {
+        return Err(WorkerError::Engine(format!(
+            "the prompt batch returned {} images, expected {expected}",
+            images.len()
+        )));
+    }
+    for (index, (width, height, pixels)) in images.into_iter().enumerate() {
+        if let Some(facts) = facts.clone() {
+            let _ = tx.blocking_send(GenEvent::ImageFacts { index, facts });
+        }
+        let image = (seed.wrapping_add(index as i64), width, height, pixels);
+        if !send_generated_image(&tx, index, image) {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Release MLX's freed-buffer cache between batch images so peak memory doesn't carry
 /// forward across a `drive_gen_items` loop (sc-5567). `clear_cache()` returns only the
 /// retained-for-reuse buffers to the OS — live arrays (the cached model weights) are not
@@ -315,7 +402,34 @@ where
 /// Windows/CUDA candle lane shares this loop but has no `mlx_rs` dependency.
 #[cfg(target_os = "macos")]
 fn release_gen_cache_between_items() {
+    #[cfg(test)]
+    if SUPPRESS_TEST_MLX_CACHE_RELEASE.with(std::cell::Cell::get) {
+        return;
+    }
     mlx_rs::memory::clear_cache();
+}
+
+#[cfg(all(test, target_os = "macos"))]
+std::thread_local! {
+    /// Headless unit-test escape hatch for drivers whose provider work is fully faked. The real
+    /// allocator call hard-exits when no Metal device exists, so those tests suppress only this
+    /// ancillary release while still exercising the exact production item loop. Hardware tests do
+    /// not enter this scope and continue to verify the real `clear_cache` behavior.
+    static SUPPRESS_TEST_MLX_CACHE_RELEASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn without_mlx_cache_release_for_headless_test<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SUPPRESS_TEST_MLX_CACHE_RELEASE.with(|suppressed| suppressed.set(self.0));
+        }
+    }
+
+    let previous = SUPPRESS_TEST_MLX_CACHE_RELEASE.with(|suppressed| suppressed.replace(true));
+    let _restore = Restore(previous);
+    run()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -402,14 +516,115 @@ where
         adapter_count,
         spec,
         load_error_context,
-        move |generator, _cache_state, _load_policy, _external_committed_bytes, tx, cancel| {
+        move |generator,
+              _cache_state,
+              _loaded_policy,
+              warm_policy: crate::execution_planner::WarmPolicyProposal,
+              _external_committed_bytes,
+              tx,
+              cancel| {
+            // `start_cached_gen_stream` exposes only the generator, so this route has no
+            // request-scoped memory block a policy switch could act through. Decline truthfully.
+            warm_policy.decline(
+                crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+            );
             drive(generator, tx, cancel)
         },
     )
 }
 
-/// Cached stream seam that exposes cold/warm state and the actual cold-load residency policy to the
-/// request callback. Geometry and request strategy remain absent from the generator cache key.
+/// The reclaimable-byte estimate and the gate that consumes resident-entry credit for one cold load.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+struct ColdLoadAdmission<A> {
+    incoming_reclaimable_weight_bytes: u64,
+    admit: A,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+impl<A> ColdLoadAdmission<A> {
+    fn new(incoming_reclaimable_weight_bytes: u64, admit: A) -> Self {
+        Self {
+            incoming_reclaimable_weight_bytes,
+            admit,
+        }
+    }
+}
+
+/// Cached stream whose pre-load admission belongs to the cache miss rather than the route preamble.
+/// The admission closure is invoked by the cache loader only for a cold/different-key load; an exact
+/// warm hit goes straight to `drive` without re-gating or evicting itself.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn start_cached_gen_stream_after_cold_admission<A, D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    spec: LoadSpec,
+    load_error_context: String,
+    cold_admission: ColdLoadAdmission<A>,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    A: FnOnce(u64) -> WorkerResult<()> + Send + 'static,
+    D: FnOnce(&dyn Generator, tokio::sync::mpsc::Sender<GenEvent>, CancelFlag) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
+    let ColdLoadAdmission {
+        incoming_reclaimable_weight_bytes,
+        admit: cold_admission,
+    } = cold_admission;
+    let cancel = CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
+    let blocking_cancel = cancel.clone();
+    let blocking = tokio::spawn(async move {
+        emit_load_event(
+            "image_pipeline_load_start",
+            &job_id,
+            engine_id,
+            adapter_count,
+        );
+        crate::generator_cache::with_cached_generator_for_request_after_cold_admission(
+            engine_id,
+            spec,
+            load_error_context,
+            incoming_reclaimable_weight_bytes,
+            cold_admission,
+            move |generator,
+                  _cache_state,
+                  _loaded_policy,
+                  warm_policy: crate::execution_planner::WarmPolicyProposal,
+                  _external_committed_bytes,
+                  _provider_resident_bytes| {
+                warm_policy.decline(
+                    crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                );
+                emit_load_event(
+                    "image_pipeline_load_complete",
+                    &job_id,
+                    engine_id,
+                    adapter_count,
+                );
+                drive(generator, tx, blocking_cancel)
+            },
+        )
+        .await
+    });
+    (cancel, rx, blocking)
+}
+
+/// Cached stream seam that exposes cold/warm state, the LOADED execution policy, and this request's
+/// vetted [`crate::execution_planner::WarmPolicyProposal`] to the callback. Geometry and request
+/// strategy remain absent from the generator load identity.
+///
+/// The two policy slots have different jobs and must not be swapped: `loaded_policy` is what the
+/// resident weights actually are, so it is the ADMISSION input; the proposal carries this request's
+/// own policy intent after vetting, and the callback owes it exactly one settlement — thread it into
+/// `mlx_fit_gate::evaluate_request` (which floors the memory ladder with it and reports what the
+/// selection did) or `decline` it. It is `#[must_use]`, so forgetting is a compiler warning.
 fn start_cached_gen_stream_with_request_state<D>(
     job_id: String,
     engine_id: &'static str,
@@ -426,7 +641,52 @@ where
     D: FnOnce(
             &dyn Generator,
             gen_core::MemoryCacheState,
-            gen_core::OffloadPolicy,
+            crate::generator_cache::ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            tokio::sync::mpsc::Sender<GenEvent>,
+            CancelFlag,
+        ) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
+    start_cached_gen_stream_with_request_state_using(
+        job_id,
+        engine_id,
+        adapter_count,
+        spec,
+        load_error_context,
+        crate::inference_runtime::load,
+        drive,
+    )
+}
+
+/// [`start_cached_gen_stream_with_request_state`] with the generator loader supplied by the caller
+/// — the `_using` loader-injection seam (`generator_cache::with_cached_generator_for_request_using`)
+/// lifted to the image stream, so a test can drive a whole image job arm (`generate_stream_using`)
+/// against a stub `Generator` with no tensor backend or weights. Production passes
+/// `crate::inference_runtime::load` through the plain name.
+fn start_cached_gen_stream_with_request_state_using<D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    spec: LoadSpec,
+    load_error_context: String,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    D: FnOnce(
+            &dyn Generator,
+            gen_core::MemoryCacheState,
+            crate::generator_cache::ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
             u64,
             tokio::sync::mpsc::Sender<GenEvent>,
             CancelFlag,
@@ -444,11 +704,17 @@ where
             engine_id,
             adapter_count,
         );
-        crate::generator_cache::with_cached_generator_for_request(
+        crate::generator_cache::with_cached_generator_for_request_using(
             engine_id,
             spec,
             load_error_context,
-            move |generator, cache_state, load_policy, external_committed_bytes| {
+            load_generator,
+            move |generator,
+                  cache_state,
+                  loaded_policy,
+                  warm_policy,
+                  external_committed_bytes,
+                  _provider_resident_bytes| {
                 emit_load_event(
                     "image_pipeline_load_complete",
                     &job_id,
@@ -458,7 +724,8 @@ where
                 drive(
                     generator,
                     cache_state,
-                    load_policy,
+                    loaded_policy,
+                    warm_policy,
                     external_committed_bytes,
                     tx,
                     blocking_cancel,
@@ -477,7 +744,9 @@ where
 /// can't be resolved (partially deleted HF cache, stale refs, missing
 /// modelPath). None when the model isn't engine-backed (the stub is its
 /// intended path) or the weights resolve. MLX-only (uses `mlx_model` + the macOS
-/// `resolve_weights_dir`); the candle lane has no equivalent stub-gap check.
+/// `resolve_weights_dir`); the candle lane's narrower twin is `candle_weights_gap`
+/// (base.rs, sc-20529), which covers the unconverted convert-at-install class only —
+/// candle has no general tier-completeness probe to mirror the arm above.
 #[cfg(target_os = "macos")]
 pub(crate) fn mlx_weights_gap(request: &ImageRequest, settings: &Settings) -> Option<String> {
     let model = mlx_model(&request.model)?;

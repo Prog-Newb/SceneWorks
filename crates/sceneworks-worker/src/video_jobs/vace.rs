@@ -5,6 +5,56 @@
 use super::ltx::resolve_clip_media_path;
 #[allow(unused_imports)]
 use super::prelude::*;
+
+/// VACE-Fun is not a generic Wan fallback: its only supported product route is the dedicated
+/// dual-expert `replace_person` engine. Keep this validation ahead of project/output setup so a
+/// worker that cannot run that engine cannot leave a successful-looking procedural asset behind.
+pub(super) fn validate_vace_fun_capability(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<()> {
+    if request.model != "wan_2_2_vace_fun_14b" {
+        return Ok(());
+    }
+    if request.mode != "replace_person" {
+        return Err(WorkerError::InvalidPayload(format!(
+            "wan_2_2_vace_fun_14b supports only replace_person; no real VACE-Fun backend can run {}.",
+            request.mode
+        )));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = settings;
+        Ok(())
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        if settings.backend_candle_enabled {
+            Ok(())
+        } else {
+            Err(WorkerError::InvalidPayload(
+                "wan_2_2_vace_fun_14b replace_person requires the enabled native Candle backend; \
+                 no real VACE-Fun backend is available on this worker."
+                    .to_owned(),
+            ))
+        }
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let _ = settings;
+        Err(WorkerError::InvalidPayload(
+            "wan_2_2_vace_fun_14b replace_person requires the native MLX worker on macOS or an \
+             enabled Candle backend; no real VACE-Fun backend is available on this worker."
+                .to_owned(),
+        ))
+    }
+}
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -12,8 +62,7 @@ use super::prelude::*;
 use super::wan::ClipFramePosition;
 #[cfg(target_os = "macos")]
 use super::wan::{
-    generate_video, resolve_wan_model_dir, resolve_wan_quant, resolve_wan_vace_adapters,
-    VideoGenInput,
+    generate_video, resolve_wan_model_dir, resolve_wan_vace_adapters, wan_load_quant, VideoGenInput,
 };
 #[cfg(any(
     target_os = "macos",
@@ -92,6 +141,44 @@ pub(super) fn wan_vace_dir_is_complete(dir: &Path) -> bool {
         && dir.join("tokenizer.json").is_file()
 }
 
+/// The shared base-Wan components a VACE assembly links beside its transformer(s)
+/// (`assemble_wan_vace_snapshot` / `assemble_wan_vace_fun_snapshot` require all three).
+#[cfg(target_os = "macos")]
+const WAN_VACE_SHARED_FILES: [&str; 3] = [
+    "t5_encoder.safetensors",
+    "vae.safetensors",
+    "tokenizer.json",
+];
+
+/// The first directory, over the candidate base-Wan snapshot `roots` in order, that holds all of
+/// [`WAN_VACE_SHARED_FILES`]: each root's first complete quant-matrix tier (`q4/` first, the default
+/// install; a macOS turnkey install downloads only its tier subdirs), else the root itself (a legacy
+/// flat or locally converted snapshot). A root missing the files never masks a later complete one.
+#[cfg(target_os = "macos")]
+fn wan_vace_base_dir_from(roots: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    roots.into_iter().find_map(|root| {
+        ["q4", "q8", "bf16"]
+            .iter()
+            .map(|tier| root.join(tier))
+            .chain(std::iter::once(root.clone()))
+            .find(|dir| {
+                WAN_VACE_SHARED_FILES
+                    .iter()
+                    .all(|name| dir.join(name).is_file())
+            })
+    })
+}
+
+/// The base-Wan 14B component dir for a VACE assembly: T2V-A14B first, then I2V-A14B.
+#[cfg(target_os = "macos")]
+pub(super) fn resolve_wan_vace_base_dir(settings: &Settings) -> Option<PathBuf> {
+    wan_vace_base_dir_from(
+        ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]
+            .into_iter()
+            .filter_map(|model| resolve_wan_model_dir(settings, model, model).ok()),
+    )
+}
+
 /// Resolve (assembling on first use) the converted Wan-VACE snapshot dir. Env override
 /// (`SCENEWORKS_MLX_WAN_VACE_DIR`) → the app-managed `<data>/models/mlx/wan_vace` → assemble
 /// it from the diffusers VACE transformer (HF `Wan-AI/Wan2.1-VACE-1.3B-diffusers`,
@@ -127,17 +214,13 @@ pub(super) fn resolve_wan_vace_model_dir(settings: &Settings) -> WorkerResult<Pa
                  fetch it via the model manager."
             ))
         })?;
-    let base_wan = ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]
-        .into_iter()
-        .find_map(|model| resolve_wan_model_dir(settings, model, model).ok())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "replace_person: Wan-VACE needs a converted base-Wan 14B snapshot (its shared \
-                 UMT5 text encoder + z16 VAE + tokenizer). Convert/download wan_2_2_t2v_14b or \
-                 wan_2_2_i2v_14b first."
-                    .to_owned(),
-            )
-        })?;
+    let base_wan = resolve_wan_vace_base_dir(settings).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "replace_person: Wan-VACE needs a base-Wan 14B snapshot (its shared UMT5 text \
+             encoder + z16 VAE + tokenizer). Download wan_2_2_t2v_14b or wan_2_2_i2v_14b first."
+                .to_owned(),
+        )
+    })?;
     // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
     runtime_macos::providers::wan::convert::assemble_wan_vace_snapshot(
         &out_dir,
@@ -206,17 +289,13 @@ fn resolve_wan_vace_fun_model_dir(settings: &Settings) -> WorkerResult<PathBuf> 
              transformer_2/) — re-fetch it via the model manager."
         )));
     }
-    let base_wan = ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]
-        .into_iter()
-        .find_map(|model| resolve_wan_model_dir(settings, model, model).ok())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "wan_2_2_vace_fun_14b: VACE-Fun needs a converted base-Wan 14B snapshot (its shared \
-                 UMT5 text encoder + z16 VAE + tokenizer). Convert/download wan_2_2_t2v_14b or \
-                 wan_2_2_i2v_14b first."
-                    .to_owned(),
-            )
-        })?;
+    let base_wan = resolve_wan_vace_base_dir(settings).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "wan_2_2_vace_fun_14b: VACE-Fun needs a base-Wan 14B snapshot (its shared UMT5 text \
+             encoder + z16 VAE + tokenizer). Download wan_2_2_t2v_14b or wan_2_2_i2v_14b first."
+                .to_owned(),
+        )
+    })?;
     // CARVE-OUT(epic 3720): backend-specific weight packager; not a registry contract.
     runtime_macos::providers::wan::convert::assemble_wan_vace_fun_snapshot(
         &out_dir, &high, &low, &base_wan, true,
@@ -319,10 +398,96 @@ async fn select_extracted_frames(work_dir: PathBuf, count: usize) -> WorkerResul
     .map_err(|error| task_join_error("frame decode task", error))?
 }
 
-/// The approved character reference images (≤4) for the replacement (Python
-/// `character_reference_images`): the selected look's `approvedReferenceIds`, else the
-/// character's approved `references`. Errors when none are readable (the torch
-/// `_validate_inputs` parity). The engine cover-fits each to the output size.
+/// One immutable character-reference receipt plus its decoded RGB identity image. Keeping the
+/// asset id beside the pixels lets provider-specific paths record exactly which approved identities
+/// were physically conditioned, rather than reporting only an untraceable count.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) struct CharacterReferenceReceipt {
+    pub(super) asset_id: String,
+    pub(super) image: Image,
+}
+
+/// The approved character reference receipts (1–4) for replacement: the selected look's
+/// `approvedReferenceIds`, else the character's approved `references`. Every selected identity is
+/// mandatory: dropping an unreadable item or silently truncating the ordered list changes the model
+/// input while retaining a misleading successful replacement receipt.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn resolve_character_reference_receipts(
+    settings: &Settings,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<Vec<CharacterReferenceReceipt>> {
+    let character_id = request.character_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload("replace_person requires a character (characterId).".to_owned())
+    })?;
+    let character = CharacterStore::new(&settings.data_dir, project_path.to_path_buf())
+        .get_character(&request.project_id, character_id)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("character {character_id}: {error}"))
+        })?;
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(look_id) = request.character_look_id.as_deref() {
+        if let Some(looks) = character.get("looks").and_then(Value::as_array) {
+            for look in looks {
+                if look.get("id").and_then(Value::as_str) == Some(look_id) {
+                    if let Some(approved) =
+                        look.get("approvedReferenceIds").and_then(Value::as_array)
+                    {
+                        ids.extend(approved.iter().filter_map(Value::as_str).map(str::to_owned));
+                    }
+                }
+            }
+        }
+    }
+    if ids.is_empty() {
+        if let Some(references) = character.get("references").and_then(Value::as_array) {
+            for reference in references {
+                if reference
+                    .get("approved")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    if let Some(asset_id) = reference.get("assetId").and_then(Value::as_str) {
+                        ids.push(asset_id.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    let attempted: Vec<String> = ids.into_iter().filter(|id| !id.is_empty()).collect();
+    if !(1..=4).contains(&attempted.len()) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "replace_person requires 1–4 approved ordered character reference images (got {})",
+            attempted.len()
+        )));
+    }
+    let mut references = Vec::with_capacity(attempted.len());
+    for asset_id in attempted {
+        let image = load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            &asset_id,
+            project_path,
+        )
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "replace_person: approved character reference {asset_id} is unreadable: {error}"
+            ))
+        })?;
+        references.push(CharacterReferenceReceipt { asset_id, image });
+    }
+    Ok(references)
+}
+
+/// Legacy image-only resolver for existing Wan/SCAIL paths. Keep its historical best-effort
+/// semantics isolated here; LTX replacement must use [`resolve_character_reference_receipts`],
+/// whose immutable carrier cannot truthfully omit an approved identity.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -369,11 +534,6 @@ pub(super) fn resolve_character_references(
             }
         }
     }
-    // The approved references we will attempt (capped at the engine's 4-reference contract). A
-    // reference that fails to load must NOT be dropped silently: a corrupted approved reference
-    // otherwise quietly weakens identity conditioning with zero signal (sc-8922, F-120). Warn per
-    // skipped reference (asset id + error) and, when some — but not all — loaded, emit a summary the
-    // operator can compare against the approved count.
     let attempted: Vec<String> = ids
         .into_iter()
         .filter(|id| !id.is_empty())
@@ -541,16 +701,15 @@ pub(super) async fn generate_wan_vace(
         "wan_vace",
         model_dir,
         WAN_VACE_ADAPTER,
-        resolve_wan_quant(request),
     )
     .await
 }
 
 /// The dual-expert Wan2.2 VACE-Fun replace_person dispatch (sc-3459) — identical conditioning to
 /// single-expert [`generate_wan_vace`], but resolves the dual-expert snapshot
-/// ([`resolve_wan_vace_fun_model_dir`]) + the `wan2_2_vace_fun_14b` engine. Forces **Q4** by default
-/// (the validated real-weight footprint; both 14B experts at bf16 would risk OOM on a 128 GB Mac),
-/// still overridable via the `mlxQuantize` advanced knob.
+/// ([`resolve_wan_vace_fun_model_dir`]) + the `wan2_2_vace_fun_14b` engine. Loads at the product's
+/// VACE-Fun quant (`product_load::load_quant`: **Q4** unless the `mlxQuantize` advanced knob picks
+/// one — both 14B experts at bf16 would risk OOM on a 128 GB Mac).
 #[cfg(target_os = "macos")]
 pub(super) async fn generate_wan_vace_fun(
     api: &ApiClient,
@@ -561,7 +720,6 @@ pub(super) async fn generate_wan_vace_fun(
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, Value)> {
     let model_dir = resolve_wan_vace_fun_model_dir(settings)?;
-    let quant = resolve_wan_quant(request).or(Some(Quant::Q4));
     generate_wan_vace_engine(
         api,
         settings,
@@ -572,7 +730,6 @@ pub(super) async fn generate_wan_vace_fun(
         "wan2_2_vace_fun_14b",
         model_dir,
         WAN_VACE_FUN_ADAPTER,
-        quant,
     )
     .await
 }
@@ -580,7 +737,8 @@ pub(super) async fn generate_wan_vace_fun(
 /// Shared replace_person engine dispatch for both VACE backends (single-expert `wan_vace` +
 /// dual-expert `wan2_2_vace_fun_14b`): builds the source-frame + person-mask + character-reference
 /// control conditioning, runs the resolved engine, and returns the decoded video + the honest
-/// `replacementStatus`. Only `engine_id` / `model_dir` / `adapter` / `quant` differ between the two.
+/// `replacementStatus`. Only `engine_id` / `model_dir` / `adapter` differ between the two; the load
+/// quant follows from `engine_id`.
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 async fn generate_wan_vace_engine(
@@ -593,8 +751,10 @@ async fn generate_wan_vace_engine(
     engine_id: &'static str,
     model_dir: PathBuf,
     adapter: &'static str,
-    quant: Option<Quant>,
 ) -> WorkerResult<(DecodedVideo, Value)> {
+    // The load quant is the product's decision for the SAME engine id that loads, so the two can
+    // never name different routes (`product_load::load_quant`).
+    let quant = wan_load_quant(engine_id, request, false)?;
     let track_id = request.person_track_id.as_deref().ok_or_else(|| {
         WorkerError::InvalidPayload(
             "replace_person requires a person track (personTrackId).".to_owned(),
@@ -1016,12 +1176,13 @@ pub(super) async fn generate_wan_vace_extend_bridge(
     let negative_prompt = non_empty_negative_prompt(request);
     let steps = super::wan::advanced_opt_u32(request, "steps");
     let guidance = super::wan::advanced_opt_f32(request, "guidanceScale");
+    let engine_id = "wan_vace";
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
-        engine_id: "wan_vace",
+        engine_id,
         model_dir,
-        quant: resolve_wan_quant(request),
+        quant: wan_load_quant(engine_id, request, false)?,
         adapters: resolve_wan_vace_adapters(settings, request)?,
         conditioning,
         prompt: request.prompt.clone(),
@@ -1037,4 +1198,51 @@ pub(super) async fn generate_wan_vace_extend_bridge(
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, &request.advanced, input).await
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod vace_base_dir_tests {
+    use super::{wan_vace_base_dir_from, WAN_VACE_SHARED_FILES};
+    use std::path::Path;
+
+    fn write_shared(dir: &Path) {
+        std::fs::create_dir_all(dir).expect("dir");
+        for name in WAN_VACE_SHARED_FILES {
+            std::fs::write(dir.join(name), name).expect("file");
+        }
+    }
+
+    /// A tier-only turnkey install (only `q4/*` downloaded, no flat root files) supplies the shared
+    /// components from its tier; an incomplete first candidate never masks a complete later one.
+    #[test]
+    fn the_base_dir_comes_from_the_first_complete_tier() {
+        let root = tempfile::tempdir().expect("temp root");
+        let t2v = root.path().join("t2v");
+        let i2v = root.path().join("i2v");
+        write_shared(&i2v.join("q4"));
+        write_shared(&i2v.join("q8"));
+        // The T2V root resolves but holds no shared files anywhere (e.g. a partial download).
+        std::fs::create_dir_all(t2v.join("q4")).expect("t2v tier");
+        std::fs::write(t2v.join("q4/t5_encoder.safetensors"), "t5").expect("partial");
+        assert_eq!(
+            wan_vace_base_dir_from([t2v.clone(), i2v.clone()]),
+            Some(i2v.join("q4"))
+        );
+        // A complete T2V tier wins, q4 first.
+        write_shared(&t2v.join("q8"));
+        assert_eq!(
+            wan_vace_base_dir_from([t2v.clone(), i2v.clone()]),
+            Some(t2v.join("q8"))
+        );
+        write_shared(&t2v.join("q4"));
+        assert_eq!(
+            wan_vace_base_dir_from([t2v.clone(), i2v]),
+            Some(t2v.join("q4"))
+        );
+        // A legacy flat root with the files at its top level still resolves.
+        let flat = root.path().join("flat");
+        write_shared(&flat);
+        assert_eq!(wan_vace_base_dir_from([flat.clone()]), Some(flat));
+        assert_eq!(wan_vace_base_dir_from([root.path().join("missing")]), None);
+    }
 }

@@ -97,6 +97,27 @@ pub(crate) fn normalized_data_dir(settings: &Settings) -> WorkerResult<PathBuf> 
     normalize_absolute_path(&settings.data_dir)
 }
 
+/// Every operator-controlled root from which read-only model files may be loaded.
+///
+/// Keep both lexical and canonical forms: callers first confine the retained lexical loader entry,
+/// then the exact target captured by [`gen_core::PinnedWeightsFile`]. A missing external root is
+/// intentionally inert rather than fatal, matching the pre-existing model/LoRA policy.
+pub(crate) fn allowed_model_roots(settings: &Settings) -> WorkerResult<Vec<PathBuf>> {
+    let data_dir = normalized_data_dir(settings)?;
+    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
+    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let canonical_hf_cache =
+        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
+    for root in &settings.external_model_roots {
+        roots.push(normalize_absolute_path(root)?);
+        if let Ok(canonical) = normalize_existing_or_absolute(root) {
+            roots.push(canonical);
+        }
+    }
+    Ok(roots)
+}
+
 pub(crate) fn ensure_path_under(
     path: PathBuf,
     roots: &[PathBuf],
@@ -171,15 +192,33 @@ pub(crate) fn normalize_app_managed_model_path(
     if raw_path.is_empty() {
         return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
     }
+    normalize_app_managed_model_entry_path(settings, Path::new(raw_path), label)
+}
+
+/// `Path`-valued sibling of [`normalize_app_managed_model_path`], for callers that already hold a
+/// built `PathBuf` rather than a payload string (sc-20524: the data-dir anchoring of a manifest
+/// entry's provenance path). Such a caller must NOT round-trip through `to_string_lossy` to reach
+/// the `&str` form — a non-UTF-8 component becomes U+FFFD there, and the confinement check would
+/// then judge a path that is not the one the caller holds.
+pub(crate) fn normalize_app_managed_model_entry_path(
+    settings: &Settings,
+    raw_path: &Path,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    if raw_path.as_os_str().is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
     // Canonicalize the input and allow either the lexical or canonical form of each
     // root, so a symlink/`..` can't slip past the confinement check (sc-8877 / F-075),
     // matching `normalize_app_managed_lora_path` (same roots).
-    let data_dir = normalized_data_dir(settings)?;
-    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
-    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let canonical_hf_cache =
-        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
+    // The shared helper carries every root (data dir, HF cache, declared external roots — both
+    // lexical and canonical forms); the source library binding below feeds the sc-19707 leased
+    // redirect.
+    let roots = allowed_model_roots(settings)?;
+    let source_library = sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(
+        huggingface_hub_cache_dir(&settings.data_dir),
+    )
+    .expect("the configured Hugging Face source-library root is nonempty");
     // Additionally admit the operator's external model roots (epic 10451 / sc-10668). Phase 1
     // widened only the LoRA lane; Phase 2 reads an external ComfyUI **base** model's component
     // files (DiT / text-encoder / VAE) in place from the configured tree, so those paths must
@@ -187,14 +226,134 @@ pub(crate) fn normalize_app_managed_model_path(
     // roots come only from the process env (never a payload — a LAN caller, epic 4484, cannot
     // widen the allow-list), and the list is empty by default and on macOS, so confinement is
     // unchanged for every install that has not opted in. Both lexical + canonical forms are added.
-    for root in &settings.external_model_roots {
-        roots.push(normalize_absolute_path(root)?);
-        if let Ok(canonical) = normalize_existing_or_absolute(root) {
-            roots.push(canonical);
-        }
+    let confined = sceneworks_core::model_artifacts::confine_artifact_path(raw_path, &roots)
+        .map_err(|_| {
+            WorkerError::InvalidPayload(format!("{label} must be inside an app-managed directory."))
+        })?;
+    // sc-19707: a model directory the API already resolved to a concrete source-library path
+    // (training base models, captioners, analyzers) is served from the leased app-owned bundle
+    // when one covers that exact snapshot. Purely a read redirect inside the app data dir, applied
+    // only while a runtime lease is active and only when the bundle really holds the path — with
+    // no lease this is inert and the authoritative source path is returned unchanged.
+    Ok(prefer_leased_local_path(&source_library, confined))
+}
+
+/// Redirect one already-confined source-library path into the leased app-owned bundle that holds
+/// it (sc-19707). Inert without an active runtime lease, and inert for any path the bundle does not
+/// hold, so the authoritative source path is what survives in every other case. Shared by the model
+/// and adapter confinement seams so neither can drift into serving a different tier than the other.
+fn prefer_leased_local_path(
+    source_library: &sceneworks_core::model_artifacts::ArtifactSourceLibrary,
+    confined: PathBuf,
+) -> PathBuf {
+    sceneworks_core::model_artifacts::local_preference::redirect_source_library_path(
+        source_library.root(),
+        &confined,
+    )
+    .unwrap_or(confined)
+}
+
+/// Confine a payload-supplied model **file** while retaining the lexical, extension-bearing path the
+/// runtime must re-open (sc-18306). Both the lexical entry and canonical target cross the trust
+/// boundary: an outside entry cannot be admitted merely because it currently points inward, and an
+/// inside entry cannot escape through its target. Both are checked against the same data/HF/operator roots as
+/// [`normalize_app_managed_model_path`]. Once that target is proven confined, return the absolute
+/// pre-canonical path when it resolves to exactly the vetted file. This lets inference pin the entry
+/// with `lstat` and re-open it for transformer windows; returning only the canonical HF blob path would
+/// discard both the user-visible filename extension and the symlink-entry identity.
+#[cfg(all(test, unix))]
+pub(crate) fn normalize_app_managed_model_file_path(
+    settings: &Settings,
+    raw_path: &str,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
     }
-    let path = normalize_existing_or_absolute(Path::new(raw_path))?;
-    ensure_path_under(path, &roots, label)
+    normalize_app_managed_model_file_entry_path(settings, Path::new(raw_path), label)
+}
+
+/// Path-valued sibling of [`normalize_app_managed_model_file_path`], used after an install directory
+/// has selected its lone checkpoint entry. Re-running the canonical confinement check on that child
+/// is essential: a confined directory can contain a `.safetensors` symlink whose target escapes every
+/// app-managed root.
+#[cfg(all(test, unix))]
+pub(crate) fn normalize_app_managed_model_file_entry_path(
+    settings: &Settings,
+    raw_path: &Path,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    Ok(pin_app_managed_model_file(settings, raw_path, label)?
+        .loader_path()
+        .to_path_buf())
+}
+
+/// Pin a model file before resolving it, then confine both the retained lexical entry and the exact
+/// target captured by that same pin. This is the file trust-boundary primitive for prepared
+/// [`gen_core::LoadSpec`]s: there is no authorize-then-re-resolve gap, and the extension-bearing
+/// loader path is preserved for format dispatch.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn pin_app_managed_model_file(
+    settings: &Settings,
+    raw_path: &Path,
+    label: &str,
+) -> WorkerResult<gen_core::PinnedWeightsFile> {
+    if raw_path.as_os_str().is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    let roots = allowed_model_roots(settings)?;
+    let lexical = normalize_absolute_path(raw_path)?;
+    ensure_path_under(lexical.clone(), &roots, label)?;
+    let pin = gen_core::PinnedWeightsFile::pin(&lexical)
+        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    ensure_path_under(pin.canonical_target_path().to_path_buf(), &roots, label)?;
+    pin.ensure_unchanged()
+        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    Ok(pin)
+}
+
+/// Pin an operator-only model file without applying payload model-root confinement. Used only for
+/// `SCENEWORKS_CONTROLNET_KREA`, whose pre-existing contract deliberately admits an absolute
+/// operator path outside the managed roots. The exact entry/target identity is still retained and
+/// revalidated like every prepared File source.
+#[cfg(target_os = "macos")]
+pub(crate) fn pin_operator_model_file(
+    raw_path: &Path,
+    label: &str,
+) -> WorkerResult<gen_core::PinnedWeightsFile> {
+    if raw_path.as_os_str().is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    let lexical = normalize_absolute_path(raw_path)?;
+    let pin = gen_core::PinnedWeightsFile::pin(&lexical)
+        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    pin.ensure_unchanged()
+        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    Ok(pin)
+}
+
+/// Atomically finalize a complete prepared token set, deduplicating repeated lexical File slots
+/// (for example the same adapter selected twice at different scales) before calling the strict
+/// gen-core preparation API.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn prepare_load_spec_with_file_pins(
+    spec: &mut gen_core::LoadSpec,
+    pins: impl IntoIterator<Item = gen_core::PinnedWeightsFile>,
+    label: &str,
+) -> WorkerResult<()> {
+    let mut unique = BTreeMap::new();
+    for pin in pins {
+        unique.entry(pin.loader_path().to_path_buf()).or_insert(pin);
+    }
+    spec.prepare_with_file_pins(unique.into_values())
+        .map_err(|error| crate::classify_engine_error(label, error))
 }
 
 /// Confine a LoRA adapter path taken from a job payload to an app-managed root
@@ -219,27 +378,32 @@ pub(crate) fn normalize_app_managed_lora_path(
     settings: &Settings,
     path: &Path,
 ) -> WorkerResult<PathBuf> {
-    let data_dir = normalized_data_dir(settings)?;
-    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
-    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let canonical_hf_cache =
-        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
+    // The shared helper carries every root (both forms of the data dir, HF cache, and declared
+    // external roots); the source library binding feeds the sc-19707 leased redirect below.
+    let roots = allowed_model_roots(settings)?;
+    let source_library = sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(
+        huggingface_hub_cache_dir(&settings.data_dir),
+    )
+    .expect("the configured Hugging Face source-library root is nonempty");
     // Both the lexical and canonical form of each external root, matching the posture
     // above: `resolved` is canonical, and a canonical path never `starts_with` a
     // lexical root when the two differ (a symlinked or `..`-bearing root, macOS
     // `/var` -> `/private/var`). A root that cannot be canonicalized (unmounted drive)
     // contributes its lexical form only, and simply never matches.
-    for root in &settings.external_model_roots {
-        roots.push(normalize_absolute_path(root)?);
-        if let Ok(canonical) = normalize_existing_or_absolute(root) {
-            roots.push(canonical);
-        }
-    }
     let normalized = normalize_absolute_path(path)?;
-    let resolved = normalize_existing_or_absolute(&normalized)?;
-    let confined = ensure_path_under(resolved, &roots, "LoRA path")?;
-    Ok(loadable_confined_lora_path(&normalized, confined))
+    let confined = sceneworks_core::model_artifacts::confine_artifact_path(&normalized, &roots)
+        .map_err(|_| {
+            WorkerError::InvalidPayload(
+                "LoRA path must be inside an app-managed directory.".to_owned(),
+            )
+        })?;
+    // The loadable (extension-bearing) form first: an HF-cached adapter confines to its
+    // extensionless `blobs/<sha>` target, and only the snapshot-shaped form can be matched against
+    // a leased bundle — which stores real files, so the redirected path keeps its extension.
+    Ok(prefer_leased_local_path(
+        &source_library,
+        loadable_confined_lora_path(&normalized, confined),
+    ))
 }
 
 /// Return a *loadable* form of a confined adapter path (sc-11649). mlx-rs's safetensors
@@ -395,12 +559,28 @@ pub(crate) fn resolve_training_output_dir(
     output_dir: &str,
     label: &str,
 ) -> WorkerResult<PathBuf> {
-    // `normalize_app_managed_path` now returns the canonicalized path (sc-8877), so
-    // build each sub-root in both its lexical and canonical form to keep this second
-    // `starts_with` consistent (a canonical path never starts_with a lexical root
-    // when the two differ, e.g. macOS `/var` -> `/private/var`).
-    let path = normalize_app_managed_path(settings, output_dir, label)?;
-    let data_dir = normalized_data_dir(settings)?;
+    resolve_training_output_dir_under(&settings.data_dir, output_dir, label)
+}
+
+/// [`resolve_training_output_dir`] keyed on the bare data dir, so the API can confine a training
+/// plan's `output.outputDir` exactly as the worker does before it reads that directory (sc-25785).
+pub fn resolve_training_output_dir_under(
+    data_dir_root: &Path,
+    output_dir: &str,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    let output_dir = output_dir.trim();
+    if output_dir.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    // Canonicalize before the confinement check so a symlink (or `..`) under the data dir can't
+    // satisfy a purely-lexical `starts_with`. Each sub-root is built in both its lexical and
+    // canonical form (a canonical path never starts_with a lexical root when the two differ,
+    // e.g. macOS `/var` -> `/private/var`).
+    let data_dir = normalize_absolute_path(data_dir_root)?;
+    let canonical_data_dir = normalize_existing_or_absolute(data_dir_root)?;
+    let path = normalize_existing_or_absolute(Path::new(output_dir))?;
+    let path = ensure_path_under(path, &[data_dir.clone(), canonical_data_dir], label)?;
     // Global-scope outputs land in `<data>/loras` (or `<data>/models` for full
     // fine-tunes); project-scope outputs — the default — land in the owning
     // project's tree, `<data>/projects/<slug>.sceneworks/loras/<lora_id>`, which
@@ -410,11 +590,100 @@ pub(crate) fn resolve_training_output_dir(
     let mut allowed_roots = Vec::with_capacity(6);
     for sub in ["loras", "models", "projects"] {
         allowed_roots.push(data_dir.join(sub));
-        allowed_roots.push(normalize_existing_or_absolute(
-            &settings.data_dir.join(sub),
-        )?);
+        allowed_roots.push(normalize_existing_or_absolute(&data_dir_root.join(sub))?);
     }
     ensure_path_under(path, &allowed_roots, label)
+}
+
+/// The engine's checkpoint stem for an adapter `file_name` (`Path::file_stem`, e.g. `style` for
+/// `style.safetensors`) — the prefix every resume bundle of that run carries.
+pub fn training_resume_stem(file_name: &str) -> &str {
+    Path::new(file_name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("lora")
+}
+
+/// The step of a resume bundle of `stem`'s run — `{stem}-step{NNNNNN}.resume.safetensors`, or a Wan
+/// MoE expert's `{stem}-{high,low}_noise-step{NNNNNN}.resume.safetensors` (the engine's
+/// `checkpoint::resume_snapshot_filename` / `resume_stem`) — or `None` for any other file.
+fn training_resume_bundle_step(name: &str, stem: &str) -> Option<u32> {
+    let rest = name.strip_prefix(stem)?;
+    let rest = ["-step", "-high_noise-step", "-low_noise-step"]
+        .iter()
+        .find_map(|marker| rest.strip_prefix(marker))?;
+    let digits = rest.strip_suffix(".resume.safetensors")?;
+    (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
+/// The highest step of any resume bundle of `stem`'s run in `output_dir`, i.e. the checkpoint a
+/// `resume: true` run continues from. `None` when the directory is absent or holds none (sc-25785).
+pub fn latest_training_resume_step(output_dir: &Path, stem: &str) -> Option<u32> {
+    std::fs::read_dir(output_dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| training_resume_bundle_step(entry.file_name().to_str()?, stem))
+        .max()
+}
+
+/// Delete every resume bundle of `stem`'s run (`*.resume.safetensors` and its `.optim.safetensors`
+/// optimizer sibling) in `output_dir`, returning how many files were removed. The user-loadable
+/// `{stem}-stepNNNNNN.safetensors` adapter checkpoints are left alone. An absent directory is a no-op.
+pub fn remove_training_resume_bundles(output_dir: &Path, stem: &str) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(output_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let resume_name = name.replace(".optim.safetensors", ".resume.safetensors");
+        if training_resume_bundle_step(&resume_name, stem).is_some() && entry.file_type()?.is_file()
+        {
+            std::fs::remove_file(entry.path())?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// Ready a training output dir for a run (sc-25785). A resume run reports the checkpoint step it
+/// continues from. A run from step 0 (a fresh submit, or a "restart" retry into the same dir)
+/// removes the resume bundles an earlier run left, so a later resume continues from THIS run's
+/// checkpoints and never from a stale higher-step one; a removal failure fails the run rather than
+/// leaving that hazard in place.
+// Only the training execution path (macOS, or off-Mac with backend-candle) calls this.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn prepare_training_resume_dir(
+    resume: bool,
+    output_dir: &Path,
+    file_name: &str,
+) -> WorkerResult<Option<u32>> {
+    let stem = training_resume_stem(file_name);
+    if resume {
+        return Ok(latest_training_resume_step(output_dir, stem));
+    }
+    remove_training_resume_bundles(output_dir, stem).map_err(|error| {
+        WorkerError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "Could not clear stale training resume checkpoints in {}: {error}",
+                output_dir.display()
+            ),
+        ))
+    })?;
+    Ok(None)
 }
 
 pub(crate) fn resolve_dataset_item_path(
@@ -661,4 +930,105 @@ pub(crate) fn relative_path(root: &Path, path: &Path) -> WorkerResult<String> {
         .map_err(|_| WorkerError::InvalidPayload("Path is outside project.".to_owned()))?
         .to_string_lossy()
         .replace('\\', "/"))
+}
+
+#[cfg(test)]
+mod training_resume_bundle_tests {
+    use super::*;
+
+    const NAMES: [&str; 10] = [
+        "style-step000050.resume.safetensors",
+        "style-step000050.optim.safetensors",
+        "style-high_noise-step000200.resume.safetensors",
+        "style-high_noise-step000200.optim.safetensors",
+        "style-step000300.safetensors",
+        "style.safetensors",
+        "style-stepXYZ.resume.safetensors",
+        "other-step000900.resume.safetensors",
+        "other-step000900.optim.safetensors",
+        "training-config.json",
+    ];
+
+    fn seeded() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for name in NAMES {
+            std::fs::write(dir.path().join(name), b"x").expect("write");
+        }
+        dir
+    }
+
+    fn remaining(dir: &Path) -> Vec<String> {
+        let mut left: Vec<_> = std::fs::read_dir(dir)
+            .expect("read")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .into_string()
+                    .expect("utf8")
+            })
+            .collect();
+        left.sort();
+        left
+    }
+
+    #[test]
+    fn a_resume_run_reports_its_own_stems_latest_step_and_deletes_nothing() {
+        let dir = seeded();
+        assert_eq!(
+            prepare_training_resume_dir(true, dir.path(), "style.safetensors").expect("prepare"),
+            Some(200),
+            "another stem's higher step is not this run's checkpoint"
+        );
+        assert_eq!(remaining(dir.path()).len(), NAMES.len());
+    }
+
+    #[test]
+    fn a_step_zero_run_removes_only_its_own_resume_bundles() {
+        let dir = seeded();
+        assert_eq!(
+            prepare_training_resume_dir(false, dir.path(), "style.safetensors").expect("prepare"),
+            None
+        );
+        assert_eq!(
+            remaining(dir.path()),
+            [
+                "other-step000900.optim.safetensors",
+                "other-step000900.resume.safetensors",
+                "style-step000300.safetensors",
+                "style-stepXYZ.resume.safetensors",
+                "style.safetensors",
+                "training-config.json",
+            ]
+        );
+        assert_eq!(latest_training_resume_step(dir.path(), "style"), None);
+    }
+
+    #[test]
+    fn absent_output_dir_has_no_checkpoint_and_removal_is_a_no_op() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("never-created");
+        assert_eq!(
+            prepare_training_resume_dir(true, &missing, "style.safetensors").unwrap(),
+            None
+        );
+        assert_eq!(
+            prepare_training_resume_dir(false, &missing, "style.safetensors").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn output_dir_resolution_is_confined_to_the_training_roots() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let data = dir.path();
+        let inside = data.join("projects/p.sceneworks/loras/lora_1");
+        assert!(resolve_training_output_dir_under(data, inside.to_str().unwrap(), "out").is_ok());
+        let outside_root = data.join("cache/elsewhere");
+        assert!(
+            resolve_training_output_dir_under(data, outside_root.to_str().unwrap(), "out").is_err()
+        );
+        assert!(resolve_training_output_dir_under(data, "/etc", "out").is_err());
+        assert!(resolve_training_output_dir_under(data, "  ", "out").is_err());
+    }
 }

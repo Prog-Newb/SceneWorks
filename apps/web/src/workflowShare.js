@@ -1,11 +1,10 @@
-// Reading a dropped image's embedded workflow, and turning it into something the Image Studio
-// can be prefilled with (sc-15951, epic 15945).
+// Reading a dropped/imported asset's embedded workflow, and turning it into the recipe shape its
+// destination studio can be prefilled with (sc-15951, epic 15945).
 //
 // The envelope contract is `docs/workflow-share-envelope.md`; the resolution report is
 // `crates/sceneworks-core/src/workflow_resolution.rs`. Nothing here re-derives either — this
-// module only bridges the two onto the shape the studio's existing replay seam already accepts
-// (`recipe.normalizedSettings` / `recipe.rawAdapterSettings`, read by the injection effect in
-// `screens/ImageStudio.jsx`).
+// module only bridges the two onto the shape the destination studio's existing replay seam accepts
+// (`recipe.normalizedSettings` / `recipe.rawAdapterSettings`, read by Image Studio and Video Studio).
 //
 // # The one rule
 //
@@ -18,8 +17,8 @@
 // model.
 //
 // The same rule has a second half, and it is the one this module got wrong first: a knob that
-// travels in the envelope but reaches no Image Studio control is ALSO a silent substitution — the
-// studio keeps whatever it was already on while the panel says "PiD decoder — On". So
+// travels in the envelope but reaches no destination-studio control is ALSO a silent substitution —
+// the studio keeps whatever it was already on while the panel says "PiD decoder — On". So
 // [`ADVANCED_PREFILL`] below is the single table both halves read: the recipe carries exactly the
 // keys the studio applies, and the panel marks exactly the rest as not restored.
 
@@ -265,11 +264,20 @@ export const ADVANCED_PREFILL = {
   sampler: { label: "Sampler", prefill: PREFILL_CONTROL },
   scheduler: { label: "Scheduler", prefill: PREFILL_CONTROL },
   schedulerShift: { label: "Schedule shift", prefill: PREFILL_CONTROL },
+  // sc-25681 — Iris-3B's CFG interval and caption-overflow policy; both restore their controls.
+  cfgInterval: { label: "Guidance interval", prefill: PREFILL_CONTROL },
+  captionOverflow: { label: "Long prompts", prefill: PREFILL_CONTROL },
   steps: { label: "Steps", prefill: PREFILL_CONTROL },
   guidanceScale: { label: "Guidance", prefill: PREFILL_CONTROL },
   guidanceMethod: { label: "Guidance method", prefill: PREFILL_CONTROL },
   enhancePrompt: { label: "Prompt upsampling", prefill: PREFILL_CONTROL },
+  // sc-24113. Restores the toggle, which is the whole of what SceneWorks controls: it keeps the
+  // model's alpha channel instead of compositing over white. The prompt that ASKED for a
+  // transparent background travels as the prompt, because upstream has no transparency mode — so
+  // replaying a shared cut-out restores both halves through their own rows, not this one.
+  transparentBackground: { label: "Transparent background", prefill: PREFILL_CONTROL },
   usePid: { label: "PiD decoder", prefill: PREFILL_CONTROL },
+  decoder: { label: "Alternate decoder", prefill: PREFILL_CONTROL },
   pidTarget: { label: "PiD output", prefill: PREFILL_CONTROL },
   ipAdapterScale: { label: "Reference strength", prefill: PREFILL_CONTROL },
   controlnetConditioningScale: { label: "Identity structure", prefill: PREFILL_CONTROL },
@@ -283,7 +291,18 @@ export const ADVANCED_PREFILL = {
   styleId: { label: "Style", prefill: PREFILL_CONTROL },
   stylePrompt: { label: "Pre-style prompt", prefill: PREFILL_PROMPT },
   phases: { label: "Multi-phase denoise", prefill: PREFILL_CONTROL },
-  // The five that travel and land nowhere. Each names why, because "not restored" without a
+  // Shared by Image Studio substitutions and the older LTX video selector. Image workflow replay
+  // restores the opaque authored id even when this install no longer lists it; Image Studio keeps
+  // that unavailable choice visible and the API then fails closed until it is restored or changed.
+  textEncoderModel: { label: "Text encoder", prefill: PREFILL_CONTROL },
+  // The sparse-attention request belongs to Video Studio. Preserve the complete authored object,
+  // including its range/list strings, only when a video envelope is routed there. An image envelope
+  // cannot claim this control was restored in Image Studio.
+  veda: {
+    label: "Veda",
+    prefill: PREFILL_CONTROL,
+  },
+  // The settings that travel and land nowhere. Each names why, because "not restored" without a
   // reason reads like a bug.
   poses: {
     label: "Poses",
@@ -310,7 +329,7 @@ export const ADVANCED_PREFILL = {
     detail: "A Document Studio interleave setting. Image Studio has no control for it.",
   },
   // The VIDEO arm (sc-15956). Every one of these travels in a shared MP4 and lands nowhere HERE,
-  // for one reason that covers all eleven: this registry drives Image Studio, and a video recipe
+  // for one shared reason: this registry drives Image Studio, and a video recipe
   // replays in Video Studio. That is a different panel and a different story, so the honest thing
   // for this one to say is that the setting arrived and this studio has no control for it —
   // exactly what the four rows above say about the Detail, Character and Document lanes.
@@ -333,10 +352,35 @@ export const ADVANCED_PREFILL = {
     prefill: PREFILL_NONE,
     detail: "A Video Studio setting: which distilled LTX checkpoint the clip was made with.",
   },
-  textEncoderModel: {
-    label: "Text encoder",
+  transformerVariant: {
+    label: "Transformer variant",
     prefill: PREFILL_NONE,
-    detail: "A Video Studio setting: which text encoder read the prompt.",
+    detail: "A Video Studio setting: which LTX 2.5 transformer recipe made the clip.",
+  },
+  vaeDecoder: {
+    label: "VAE decoder",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: which LTX 2.5 reconstruction path made the clip.",
+  },
+  autoDuration: {
+    label: "Automatic duration",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: whether LTX 2.5 predicted the clip duration.",
+  },
+  autoDurationMinSeconds: {
+    label: "Minimum automatic duration",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: the lower bound for LTX 2.5 duration prediction.",
+  },
+  autoDurationMaxSeconds: {
+    label: "Maximum automatic duration",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: the upper bound for LTX 2.5 duration prediction.",
+  },
+  temporalUpsampleRounds: {
+    label: "Temporal refinement",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: how many LTX 2.5 temporal-refinement rounds ran.",
   },
   lightning: {
     label: "Lightning steps",
@@ -377,8 +421,36 @@ export const ADVANCED_PREFILL = {
   },
 };
 
-function prefillDisposition(key) {
-  return ADVANCED_PREFILL[key]?.prefill ?? PREFILL_NONE;
+function prefillDisposition(key, share) {
+  return key === "veda" && share.sceneworksWorkflow !== "video"
+    ? PREFILL_NONE
+    : (ADVANCED_PREFILL[key]?.prefill ?? PREFILL_NONE);
+}
+
+// Shared workflows cross a trust boundary before they reach the number-backed controls in a
+// studio. Keep the list beside the prefill registry: these are the control values that may safely
+// be coerced to a finite number, while every other scalar retains its own meaning and shape.
+const NUMERIC_ADVANCED_PREFILL_KEYS = new Set([
+  "schedulerShift",
+  "steps",
+  "guidanceScale",
+  "ipAdapterScale",
+  "controlnetConditioningScale",
+  "trueCfgScale",
+  "strength",
+  "textStyleGain",
+  "controlScale",
+]);
+
+function sharedRecipeNumber(value) {
+  if (
+    (typeof value !== "number" && typeof value !== "string") ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 // ---- The adapter --------------------------------------------------------------------------
@@ -423,8 +495,16 @@ export function recipeFromWorkflowShare(
   // studio-facing edits below.)
   const rawSettings = {};
   for (const [key, value] of Object.entries(share.advanced ?? {})) {
-    if (value !== null && value !== undefined && prefillDisposition(key) !== PREFILL_NONE) {
-      rawSettings[key] = value;
+    if (value !== null && value !== undefined && prefillDisposition(key, share) !== PREFILL_NONE) {
+      if (NUMERIC_ADVANCED_PREFILL_KEYS.has(key)) {
+        const number = sharedRecipeNumber(value);
+        if (number === null) {
+          continue;
+        }
+        rawSettings[key] = number;
+      } else {
+        rawSettings[key] = value;
+      }
     }
   }
   if (!styleIdResolved(report)) {
@@ -607,7 +687,7 @@ export function workflowSettingRows(share, report = null) {
   }
   const styleResolvedHere = styleIdResolved(report);
   return Object.keys(settings)
-    .filter((key) => prefillDisposition(key) !== PREFILL_PROMPT)
+    .filter((key) => prefillDisposition(key, share) !== PREFILL_PROMPT)
     .map((key) => ({ key, value: settings[key] }))
     .filter(
       (row) =>
@@ -622,10 +702,12 @@ export function workflowSettingRows(share, report = null) {
         key: row.key,
         label: ADVANCED_PREFILL[row.key]?.label ?? row.key,
         value: settingValueLabel(row.key, row.value),
-        restored: prefillDisposition(row.key) === PREFILL_CONTROL && !styleUnavailable,
+        restored: prefillDisposition(row.key, share) === PREFILL_CONTROL && !styleUnavailable,
         detail: styleUnavailable
           ? "This install does not have that style, so the prompt is used exactly as it was already composed."
-          : (ADVANCED_PREFILL[row.key]?.detail ?? "This build has no control for this setting."),
+          : row.key === "veda" && share.sceneworksWorkflow !== "video"
+            ? "Video Studio only."
+            : (ADVANCED_PREFILL[row.key]?.detail ?? "This build has no control for this setting."),
       };
     });
 }
