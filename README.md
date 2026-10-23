@@ -1,5 +1,23 @@
 # SceneWorks
 
+> **Fork notice — AMD / ROCm lane.** This is a fork of
+> [SceneWorks/SceneWorks](https://github.com/SceneWorks/SceneWorks) at release
+> 0.8.7, adding a third GPU backend: **AMD Radeon via ROCm**, for SeedVR2 image
+> and video upscaling. Validated on an RX 7900 XTX (gfx1100) under Windows.
+> The Mac (MLX) and NVIDIA (candle/CUDA) lanes are untouched.
+>
+> **Build from `amd-rocm-0.8.7`.** The older `amd-on-087` branch is kept only
+> as the record attached to pull request #3094; a bad merge resolution on it
+> pins `runtime-cuda` backward, drops `candle-gen-ltx`, and loses ~800 lines of
+> upstream tests. Details in the AMD docs.
+>
+> **This branch is not buildable as-is** — two of its dependencies are
+> unpublished forks referenced by local filesystem path. Read
+> [`docs/amd-port/README.md`](docs/amd-port/README.md) first; it says plainly
+> what works, what is missing, and what the measured numbers do and do not cover.
+>
+> Everything below this notice is upstream's README, unmodified.
+
 SceneWorks is a **desktop-native AI image, video, and audio generation studio**. It
 runs generation directly on your machine's GPU — **MLX** on macOS (Apple Silicon)
 and **candle / CUDA** on Windows and Linux (NVIDIA) — with **no Python, no cloud,
